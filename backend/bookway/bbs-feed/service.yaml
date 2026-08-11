@@ -1,0 +1,9 @@
+name: bookway-bbs-feed
+owner: bbs-feed
+kind: http-service
+port: 8088
+healthcheck: /health
+dependencies:
+  - bookway-recommend-main
+contracts:
+  - pkg/api

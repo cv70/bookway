@@ -1,0 +1,9 @@
+name: bookway-bbs-search
+owner: bbs-search
+kind: http-service
+port: 8085
+healthcheck: /health
+dependencies:
+  - bookway-bbs-link
+contracts:
+  - pkg/api

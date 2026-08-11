@@ -1,0 +1,7 @@
+name: bookway-commonlikestatus
+owner: interaction
+kind: http-service
+port: 8087
+healthcheck: /health
+contracts:
+  - pkg/api

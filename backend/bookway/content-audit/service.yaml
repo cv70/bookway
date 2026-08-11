@@ -1,0 +1,5 @@
+name: content-audit
+port: 8092
+owner: trust-safety
+readiness:
+  - postgres

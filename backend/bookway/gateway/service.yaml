@@ -1,0 +1,17 @@
+name: bookway-gateway
+owner: platform
+kind: edge-service
+port: 8080
+healthcheck: /health
+dependencies:
+  - bookway-growth
+  - bookway-bbs-link
+  - bookway-bbs
+  - bookway-bbs-feed
+  - bookway-search-main
+  - bookway-user-event
+  - bookway-comment
+  - bookway-commonlikestatus
+  - bookway-media
+contracts:
+  - pkg/api

@@ -1,0 +1,5 @@
+name: rank-main
+port: 8094
+owner: recommendation
+readiness:
+  - model-service

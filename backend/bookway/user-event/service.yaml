@@ -1,0 +1,11 @@
+name: bookway-user-event
+owner: data-platform
+kind: event-ingestion-service
+port: 8089
+healthcheck: /health
+dependencies: []
+contracts:
+  - pkg/api
+events:
+  produces:
+    - user-behavior.v1

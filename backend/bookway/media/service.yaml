@@ -1,0 +1,6 @@
+name: media
+port: 8091
+owner: platform
+readiness:
+  - postgres
+  - object-storage

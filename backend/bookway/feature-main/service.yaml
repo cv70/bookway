@@ -1,0 +1,6 @@
+name: feature-main
+port: 8093
+owner: recommendation
+readiness:
+  - postgres
+  - redis

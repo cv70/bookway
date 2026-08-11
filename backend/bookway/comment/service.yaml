@@ -1,0 +1,7 @@
+name: bookway-comment
+owner: comment
+kind: http-service
+port: 8086
+healthcheck: /health
+contracts:
+  - pkg/api

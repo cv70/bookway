@@ -1,0 +1,11 @@
+name: bookway-recommend-main
+owner: recommendation
+kind: http-service
+port: 8083
+healthcheck: /health
+dependencies:
+  - bookway-bbs
+  - bookway-bbs-link
+  - bookway-commonlikestatus
+contracts:
+  - pkg/api

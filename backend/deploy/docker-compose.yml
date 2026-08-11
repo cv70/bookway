@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: bookway
+      POSTGRES_USER: bookway
+      POSTGRES_PASSWORD: bookway-local-only
+    ports:
+      - "5432:5432"
+    volumes:
+      - bookway-postgres:/var/lib/postgresql/data
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+  redpanda:
+    image: redpandadata/redpanda:v24.3.6
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://127.0.0.1:19092
+      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://127.0.0.1:18082
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  redpanda-init:
+    image: redpandadata/redpanda:v24.3.6
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - "rpk topic describe bookway.domain-events.v1 -X brokers=redpanda:9092 >/dev/null 2>&1 || rpk topic create bookway.domain-events.v1 -p 12 -r 1 -X brokers=redpanda:9092"
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: bookway-local
+      MINIO_ROOT_PASSWORD: bookway-local-only
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - bookway-minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://minio:9000 bookway-local bookway-local-only && mc mb --ignore-existing local/bookway-media && mc anonymous set download local/bookway-media"]
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - bookway-opensearch:/usr/share/opensearch/data
+  prometheus:
+    image: quay.io/prometheus/prometheus:v2.54.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+volumes:
+  bookway-postgres:
+  bookway-opensearch:
+  bookway-minio:

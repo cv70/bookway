@@ -1,0 +1,16 @@
+[package]
+name = "bookway-outbox-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bookway-data.workspace = true
+bookway-event.workspace = true
+bookway-runtime.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+name: bookway-growth
+owner: growth
+kind: http-service
+port: 8081
+healthcheck: /health
+contracts:
+  - pkg/api

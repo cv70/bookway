@@ -1,0 +1,7 @@
+name: bookway-bbs
+owner: bbs
+kind: http-service
+port: 8082
+healthcheck: /health
+contracts:
+  - pkg/api

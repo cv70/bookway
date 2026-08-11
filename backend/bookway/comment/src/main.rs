@@ -1,0 +1,12 @@
+mod internal;
+
+use internal::{conf::Config, registry};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    bookway_runtime::init_tracing("comment");
+    let config = Config::from_env()?;
+    let app = registry::build().await?;
+    bookway_runtime::serve("comment", config.listen_addr, app).await?;
+    Ok(())
+}
