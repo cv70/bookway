@@ -11,4 +11,4 @@
 
 必须配置 `DATABASE_URL`、`S3_ENDPOINT`、`S3_BUCKET`、`S3_ACCESS_KEY`、`S3_SECRET_KEY` 和 `CDN_BASE_URL`。默认监听 `8091`。
 
-Gateway 使用对应的 `/internal/v1/media/*` 路由调用本服务。待上传资产只允许所有者读取；完成并进入 `ready` 后才可作为公开 CDN 资源引用。图片处理、视频转码、病毒扫描和多媒体审核仍属于下一阶段。
+Gateway 通过内部 gRPC `create_upload`、`complete_upload`、`get` 调用本服务。待上传资产只允许所有者读取；完成并进入 `ready` 后才可作为公开 CDN 资源引用。图片处理、视频转码、病毒扫描和多媒体审核仍属于下一阶段。

@@ -1,0 +1,9 @@
+name: bookway-recommend-rank
+owner: recommendation
+kind: grpc-service
+port: 8096
+healthcheck: grpc
+dependencies:
+  - bookway-feature-main
+contracts:
+  - src/api/pb/server.proto

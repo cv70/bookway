@@ -1,5 +1,9 @@
 name: content-audit
+kind: grpc-service
 port: 8092
 owner: trust-safety
+healthcheck: grpc
+contracts:
+  - src/api/pb/server.proto
 readiness:
   - postgres

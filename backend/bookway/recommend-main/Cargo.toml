@@ -11,6 +11,11 @@ axum.workspace = true
 bookway-api.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
+bookway-recommend-recall.workspace = true
+bookway-recommend-rank.workspace = true
+bookway-bbs.workspace = true
+bookway-commonlikestatus.workspace = true
+bookway-feature-main.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -21,6 +26,12 @@ tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+prost.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true

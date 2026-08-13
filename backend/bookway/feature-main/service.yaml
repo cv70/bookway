@@ -1,6 +1,10 @@
 name: feature-main
+kind: grpc-service
 port: 8093
 owner: recommendation
+healthcheck: grpc
+contracts:
+  - src/api/pb/server.proto
 readiness:
   - postgres
   - redis

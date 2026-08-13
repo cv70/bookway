@@ -1,0 +1,11 @@
+syntax = "proto3";
+package bookway.comment;
+
+message ListRequest { string post_id = 1; }
+message CreateRequest { string user_id = 1; string post_id = 2; string request_json = 3; }
+message JsonResponse { string response_json = 1; }
+
+service Comment {
+  rpc List(ListRequest) returns (JsonResponse);
+  rpc Create(CreateRequest) returns (JsonResponse);
+}

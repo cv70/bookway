@@ -1,9 +1,9 @@
 name: bookway-bbs-feed
 owner: bbs-feed
-kind: http-service
+kind: grpc-service
 port: 8088
-healthcheck: /health
+healthcheck: grpc
 dependencies:
   - bookway-recommend-main
 contracts:
-  - pkg/api
+  - src/api/pb/server.proto

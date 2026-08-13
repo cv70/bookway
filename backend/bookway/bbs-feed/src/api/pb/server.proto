@@ -1,0 +1,9 @@
+syntax = "proto3";
+package bookway.bbs.feed;
+
+message FeedRequest { string request_json = 1; }
+message JsonResponse { string response_json = 1; }
+
+service BbsFeed {
+  rpc Feed(FeedRequest) returns (JsonResponse);
+}

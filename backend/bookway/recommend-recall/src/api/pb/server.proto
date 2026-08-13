@@ -1,0 +1,7 @@
+syntax = "proto3";
+package bookway.recommend.recall;
+
+message Candidate { string content_id = 1; string post_json = 2; string author_id = 3; string status = 4; double quality_score = 5; double freshness = 6; double recall_score = 7; double score = 8; string source = 9; repeated string reasons = 10; }
+message RecallRequest { string user_id = 1; repeated string interests = 2; repeated string seen = 3; string cursor = 4; uint32 limit = 5; }
+message RecallResponse { repeated Candidate candidates = 1; string next_cursor = 2; repeated string sources = 3; bool degraded = 4; }
+service RecommendRecall { rpc Recall(RecallRequest) returns (RecallResponse); }

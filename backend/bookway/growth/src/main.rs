@@ -1,12 +1,14 @@
-mod internal;
+pub(crate) mod api;
+pub(crate) mod conf;
+pub(crate) mod datasource;
+pub(crate) mod domain;
 
-use internal::{conf::Config, registry};
+use conf::Config;
+use domain::Domain;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("growth");
-    let config = Config::from_env()?;
-    let app = registry::build().await?;
-    bookway_runtime::serve("growth", config.listen_addr, app).await?;
+    api::serve(Domain::new(Config::from_env()?).await?).await?;
     Ok(())
 }

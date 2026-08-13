@@ -22,7 +22,8 @@
 | `media` | `8091` | platform | 对象 key、上传会话、媒体元数据和 CDN |
 | `content-audit` | `8092` | trust-safety | 文本审核、风险决策和人工复审入口 |
 | `feature-main` | `8093` | recommendation | 实时/离线特征统一读取与缓存 |
-| `rank-main` | `8094` | recommendation | 模型排序、版本、实验桶与启发式降级 |
+| `recommend-recall` | `8095` | recommendation | 候选召回、去重和已看过滤 |
+| `recommend-rank` | `8096` | recommendation | 模型排序、版本、实验桶与启发式降级 |
 
 ```text
 mobile ──HTTPS──> gateway ─┬──> growth
@@ -36,7 +37,7 @@ mobile ──HTTPS──> gateway ─┬──> growth
                            └──> bbs-feed ─────────> recommend-main ─┬──> bbs-link
                                                                   ├──> bbs
                                                                   ├──> commonlikestatus
-                                                                  └──> feature-main ──> rank-main
+                                                                  └──> feature-main ──> recommend-rank
 ```
 
 数据所有权严格分离：`bbs-link` 持有内容事实，`bbs` 持有关系，`comment` 持有评论，`commonlikestatus` 持有互动状态，`user-event` 持有行为接收幂等状态，`recommend-main` 只负责在线推荐决策，`bbs-feed` 负责 Feed 交付，`search-main` 负责搜索产品编排，`bbs-search` 只负责检索和索引访问。
@@ -60,21 +61,16 @@ backend/
 │   ├── media/
 │   ├── content-audit/
 │   ├── feature-main/
-│   └── rank-main/
+│   ├── recommend-recall/
+│   └── recommend-rank/
 │       ├── Cargo.toml
 │       ├── README.md
 │       ├── service.yaml
 │       ├── src/main.rs
-│       ├── src/internal/
-│       │   ├── api/          # 普通 Rust module，无 Cargo.toml
-│       │   ├── conf/
-│       │   ├── datasource/
-│       │   ├── domain/
-│       │   ├── registry/
-│       │   └── service/
-│       ├── bg/
-│       ├── cronjob/
-│       └── job/
+│       ├── src/api/          # HTTP 或 gRPC 传输适配
+│       ├── src/conf/
+│       ├── src/datasource/
+│       └── src/domain/       # Domain 持有配置、依赖和业务编排
 ├── deploy/docker-compose.yml
 ├── migrations/
 ├── cmd/
@@ -84,23 +80,23 @@ backend/
 ├── infra/data/
 ├── infra/event/
 ├── infra/runtime/
-├── pkg/api/
+├── pkg/api/                  # HTTP DTOs and shared application types
 ├── Cargo.toml
 ├── Cargo.lock
 └── rust-toolchain.toml
 ```
 
-每一个微服务的 `README.md` 与该服务的 `Cargo.toml` 同级。`src/internal/api` 与 `domain`、`service` 同级，是普通模块，不是独立 Cargo crate。服务内部统一保持：
+每一个微服务的 `README.md` 与该服务的 `Cargo.toml` 同级。服务内部统一由 `Domain` 持有配置、Repository、客户端和业务对象；`api/http.rs` 只承载外部 HTTP，`api/grpc.rs` 只承载内部 gRPC，服务启动入口由 `api` 暴露给 `main`：
 
 ```text
-main -> registry -> service -> domain -> datasource
-                    ^
-                  conf / api
+main -> Domain -> api/http.rs or api/grpc.rs
+          |
+     datasource / conf
 ```
 
 ## 推荐主链路
 
-`recommend-main/src/internal/domain/pipeline` 对应 x-algorithm 的多阶段 Candidate Pipeline：
+`recommend-main/src/domain/pipeline` 对应 x-algorithm 的多阶段 Candidate Pipeline：
 
 ```text
 Query Hydrator
@@ -113,7 +109,7 @@ Query Hydrator
 -> 异步曝光副作用
 ```
 
-候选源失败或补全失败时保留可用结果，并将 `FeedMeta.degraded` 置为 `true`。响应包含 `request_id`、`pipeline_id`、游标和阶段统计。在线链路已调用 `feature-main` 和 `rank-main`；当前模型实现是可解释、可版本化的启发式 Ranker，远程排序不可用时保留流水线基础分并显式标记降级。训练平台、外部推理引擎、负反馈建模和可回放评测仍属于后续容量阶段。
+候选源失败或补全失败时保留可用结果，并将 `FeedMeta.degraded` 置为 `true`。响应包含 `request_id`、`pipeline_id`、游标和阶段统计。在线链路已调用 `feature-main` 和 `recommend-rank`；当前模型实现是可解释、可版本化的启发式 Ranker，远程排序不可用时保留流水线基础分并显式标记降级。训练平台、外部推理引擎、负反馈建模和可回放评测仍属于后续容量阶段。
 
 ## Feed 与推荐链路
 
@@ -124,8 +120,7 @@ Gateway 只请求 `bbs-feed`。`bbs-feed` 负责客户端 surface、分页上限
 Gateway 只请求 `search-main`，由它规范化参数和编排底层 `bbs-search`：
 
 ```text
-GET /internal/v1/search?q=跑步&search_type=all|posts|journeys|users|topics&cursor=...
-GET /internal/v1/suggestions?q=跑
+内部搜索由 `search-main` 的 gRPC `search` 和 `suggestions` 方法提供。
 ```
 
 设置 `OPENSEARCH_URL` 后，`bbs-search` 使用 OpenSearch 多字段召回并在索引不可用时降级到 `bbs-link`；`bookway-search-indexer` 创建版本化 CJK 索引并同步公开内容。`search-main` 仍承担 `query rewrite -> recall -> pre-rank -> rank -> rerank` 的产品编排边界。
@@ -139,7 +134,7 @@ GET /internal/v1/suggestions?q=跑
 - Gateway：互动写入前调用内容服务校验内容存在且公开。
 - `user-event`：最多 100 条批量事件、UUID 与时间校验、`event_id` 幂等；事件和 Outbox 同事务写入，`bookway-outbox-relay` 负责 Kafka 重试、指数退避与死信。
 
-配置 `CONTENT_AUDIT_URL` 后，发布会先进入 `content-audit`，再转换为公开、复审或受限状态；每个内容版本保留风险分数、原因和 provider。人工复审、申诉和多媒体审核仍需继续扩展。
+配置 `CONTENT_AUDIT_GRPC_URL` 后，发布会先进入 `content-audit`，再转换为公开、复审或受限状态；每个内容版本保留风险分数、原因和 provider。人工复审、申诉和多媒体审核仍需继续扩展。
 
 媒体上传通过 Gateway 获取 S3/MinIO 预签名 PUT URL，客户端直接上传到对象存储，再调用完成接口。`media` 会使用 HEAD 校验对象的实际大小和 MIME，只有校验一致才将元数据从 `pending` 转为 `ready`；待上传资产仅所有者可读，`ready` 资产通过 CDN URL 访问。
 
@@ -197,7 +192,8 @@ cargo run -p bookway-search-main
 cargo run -p bookway-media
 cargo run -p bookway-content-audit
 cargo run -p bookway-feature-main
-cargo run -p bookway-rank-main
+cargo run -p bookway-recommend-recall
+cargo run -p bookway-recommend-rank
 cargo run -p bookway-growth
 cargo run -p bookway-gateway
 ```
@@ -206,21 +202,22 @@ cargo run -p bookway-gateway
 
 | 服务 | 监听变量 | 上游变量 |
 | --- | --- | --- |
-| gateway | `GATEWAY_ADDR` | `GROWTH_URL`、`BBS_FEED_URL`、`SEARCH_MAIN_URL`、`USER_EVENT_URL`、`BBS_LINK_URL`、`BBS_URL`、`COMMENT_URL`、`LIKE_STATUS_URL`、`MEDIA_URL` |
+| gateway | `GATEWAY_ADDR` | `GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`、`COMMENT_GRPC_URL`、`LIKE_STATUS_GRPC_URL`、`MEDIA_GRPC_URL` |
 | growth | `GROWTH_ADDR` | 无 |
 | bbs | `BBS_ADDR` | 无 |
-| recommend-main | `RECOMMEND_MAIN_ADDR` | `BBS_LINK_URL`、`BBS_URL`、`LIKE_STATUS_URL` |
-| bbs-link | `BBS_LINK_ADDR` | 无 |
-| bbs-search | `BBS_SEARCH_ADDR` | `BBS_LINK_URL` |
+| recommend-main | `RECOMMEND_MAIN_ADDR` | `BBS_GRPC_URL`、`LIKE_STATUS_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`RECOMMEND_RECALL_GRPC_URL`、`RECOMMEND_RANK_GRPC_URL` |
+| bbs-link | `BBS_LINK_ADDR`、`BBS_LINK_GRPC_ADDR` | `CONTENT_AUDIT_GRPC_URL` |
+| bbs-search | `BBS_SEARCH_ADDR` | `BBS_LINK_GRPC_URL` |
 | comment | `COMMENT_ADDR` | 无（由 Gateway 先校验内容） |
 | commonlikestatus | `LIKE_STATUS_ADDR` | 无（由 Gateway 先校验内容） |
-| bbs-feed | `BBS_FEED_ADDR` | `RECOMMEND_MAIN_URL` |
+| bbs-feed | `BBS_FEED_ADDR` | `RECOMMEND_MAIN_GRPC_URL` |
 | user-event | `USER_EVENT_ADDR` | PostgreSQL + Transactional Outbox，由 Relay 发布 Kafka |
-| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_URL` |
+| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL` |
 | media | `MEDIA_ADDR` | `S3_ENDPOINT`、`S3_BUCKET`、`CDN_BASE_URL` |
 | content-audit | `CONTENT_AUDIT_ADDR` | 审核规则与 PostgreSQL |
 | feature-main | `FEATURE_MAIN_ADDR` | `REDIS_URL`、PostgreSQL |
-| rank-main | `RANK_MAIN_ADDR` | `RANK_MODEL_VERSION` |
+| recommend-recall | `RECOMMEND_RECALL_ADDR` | `BBS_LINK_GRPC_URL` |
+| recommend-rank | `RECOMMEND_RANK_ADDR` | `RECOMMEND_RANK_MODEL_VERSION` |
 
 全服务共享 `STORAGE_MODE`、`DATABASE_URL`、`SERVICE_AUTH_TOKEN`、`SERVICE_AUTH_REQUIRED`、`AUTH_REQUIRED`、`AUTH_JWT_SECRET`、`HTTP_CONNECT_TIMEOUT_MS` 和 `HTTP_REQUEST_TIMEOUT_MS`。Redis 连接和命令预算分别由 `REDIS_CONNECT_TIMEOUT_MS`（默认 1000ms）与 `REDIS_COMMAND_TIMEOUT_MS`（默认 100ms）控制，缓存或限流 Redis 故障时会告警并 fail-open。生产环境必须启用两种鉴权：App 的 Bearer JWT 只在 Gateway 解析；非 Gateway 服务的业务端点只接受带服务令牌的内部请求，并信任 Gateway 注入的 `x-user-id`。健康、就绪和指标端点不要求服务令牌。
 
@@ -233,17 +230,17 @@ cargo run -p bookway-gateway
 - Transactional Outbox、Kafka/Redpanda Relay、`SKIP LOCKED`、退避和死信状态。
 - OpenSearch CJK 索引、版本化索引名、检索降级和独立重建命令。
 - Gateway 媒体 API、MinIO/S3 预签名直传、对象大小/MIME 完成校验、私有 pending 元数据和 CDN 地址。
-- `feature-main -> rank-main` 在线调用，推荐模型失败时保留启发式得分并标记降级。
+- `feature-main -> recommend-rank` 在线调用，推荐模型失败时保留启发式得分并标记降级。
 - Gateway HS256 JWT、下游服务 token、全服务请求 ID、调用超时、Prometheus 指标、按服务依赖 readiness 与 SLO 文档。
 
 ## 下一阶段阻断项
 
 1. PostgreSQL 分片、读写隔离、跨地域复制、自动故障切换和备份恢复演练。
-2. Kafka 幂等消费者、Schema Registry、事件回放工具与离线数仓/湖仓落地。
+2. Kafka 幂等消费者、Schema 管理、事件回放工具与离线数仓/湖仓落地。
 3. 图片处理、视频转码、病毒扫描、媒体审核和 CDN 回源保护。
 4. OpenTelemetry OTLP trace、日志关联、持续压测和完整容量模型。
 5. 人工审核台、申诉、举报、反作弊、未成年人和区域合规策略。
-6. 模型训练、Feature Registry、A/B 平台、影子流量、漂移监控和一键回滚。
+6. 模型训练、特征管理、A/B 平台、影子流量、漂移监控和一键回滚。
 7. 多区域容灾、Kubernetes/Service Mesh、CI/CD、密钥托管和供应链安全。
 
 应按压测、延迟、成本和故障域推进后续拆分，而不是仅以服务数量判断是否生产化。

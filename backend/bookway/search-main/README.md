@@ -8,14 +8,12 @@
 
 ## 接口
 
-- `GET /internal/v1/search`
-- `GET /internal/v1/suggestions`
-- `GET /health`
+- 内部 gRPC：`search`、`suggestions`。
 
 ## 环境变量
 
 - `SEARCH_MAIN_ADDR`：默认 `127.0.0.1:8090`。
-- `BBS_SEARCH_URL`：默认 `http://127.0.0.1:8085`。
+- `BBS_SEARCH_GRPC_URL`：默认 `http://127.0.0.1:8085`。
 
 ## 生产化待办
 

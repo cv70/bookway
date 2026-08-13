@@ -4,12 +4,9 @@
 
 `growth` 持有私人路线、行动计划、今日行动和完成状态。私人记录不会被隐式转换为公开内容。
 
-## 内部接口
+## 接口
 
-- `GET /internal/v1/journeys`
-- `POST /internal/v1/journeys`
-- `GET /internal/v1/today`
-- `POST /internal/v1/actions/{action_id}/complete`
+内部 gRPC：`list_journeys`、`create_journey`、`today`、`complete_action`。
 
 ## 环境变量
 

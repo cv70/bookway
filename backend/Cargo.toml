@@ -14,10 +14,11 @@ members = [
   "bookway/media",
   "bookway/content-audit",
   "bookway/feature-main",
-  "bookway/rank-main",
+  "bookway/recommend-recall",
+  "bookway/recommend-rank",
   "cmd/db-migrate",
   "cmd/outbox-relay",
-  "cmd/search-indexer",
+  "bookway/bbs-search/bg/bbs-indexer",
   "infra/data",
   "infra/event",
   "infra/runtime",
@@ -47,6 +48,10 @@ sqlx = { version = "0.8", default-features = false, features = ["json", "macros"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tonic = { version = "0.12", features = ["transport"] }
+prost = "0.13"
+tonic-health = "0.12"
+tonic-build = "0.12"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "request-id", "trace"] }
 tracing = "0.1"
@@ -58,6 +63,21 @@ bookway-api = { path = "pkg/api" }
 bookway-data = { path = "infra/data" }
 bookway-event = { path = "infra/event" }
 bookway-runtime = { path = "infra/runtime" }
+bookway-recommend-recall = { path = "bookway/recommend-recall" }
+bookway-recommend-rank = { path = "bookway/recommend-rank" }
+bookway-recommend-main = { path = "bookway/recommend-main" }
+bookway-bbs = { path = "bookway/bbs" }
+bookway-bbs-link = { path = "bookway/bbs-link" }
+bookway-bbs-search = { path = "bookway/bbs-search" }
+bookway-bbs-feed = { path = "bookway/bbs-feed" }
+bookway-comment = { path = "bookway/comment" }
+bookway-commonlikestatus = { path = "bookway/commonlikestatus" }
+bookway-content-audit = { path = "bookway/content-audit" }
+bookway-feature-main = { path = "bookway/feature-main" }
+bookway-growth = { path = "bookway/growth" }
+bookway-media = { path = "bookway/media" }
+bookway-search-main = { path = "bookway/search-main" }
+bookway-user-event = { path = "bookway/user-event" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

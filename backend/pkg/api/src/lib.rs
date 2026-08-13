@@ -234,6 +234,9 @@ pub struct ContentQueryRequest {
     pub status: Option<ContentStatusDto>,
     pub strategy: Option<String>,
     pub ids: Option<String>,
+    /// Optional indexed filters used by search and discovery surfaces.
+    pub content_type: Option<ContentTypeDto>,
+    pub domain: Option<GrowthDomainDto>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -293,6 +296,56 @@ pub struct FeedMetaDto {
     pub selected: usize,
     pub next_cursor: Option<String>,
     pub pipeline_id: String,
+    pub degraded: bool,
+}
+
+/// Candidate exchanged between the recommendation stages. Keeping this
+/// contract in the shared API crate lets recall, filtering, scoring and
+/// ranking services evolve independently from the feed product response.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecommendationCandidateDto {
+    pub content_id: String,
+    pub post: PostSummaryDto,
+    pub author_id: String,
+    pub status: ContentStatusDto,
+    pub quality_score: f64,
+    pub freshness: f64,
+    pub recall_score: f64,
+    pub score: f64,
+    pub source: String,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RecallRequestDto {
+    pub user_id: String,
+    pub interests: Vec<GrowthDomainDto>,
+    pub seen: Vec<String>,
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecallResponseDto {
+    pub candidates: Vec<RecommendationCandidateDto>,
+    pub next_cursor: Option<String>,
+    pub sources: Vec<String>,
+    pub degraded: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecommendRankRequestDto {
+    pub user_id: String,
+    pub features: serde_json::Value,
+    pub candidates: Vec<RecommendationCandidateDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecommendRankResponseDto {
+    pub candidates: Vec<RecommendationCandidateDto>,
+    pub model_version: String,
+    pub experiment_bucket: String,
     pub degraded: bool,
 }
 

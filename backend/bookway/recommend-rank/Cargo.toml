@@ -1,0 +1,25 @@
+[package]
+name = "bookway-recommend-rank"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+bookway-api.workspace = true
+bookway-runtime.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+tracing.workspace = true
+tower-http.workspace = true
+
+[lints]
+workspace = true

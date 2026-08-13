@@ -707,7 +707,7 @@ sync_failed
 
 ### 10.1 技术决策
 
-客户端确定采用 React Native 新架构与 Expo，后端确定采用 Rust + Axum。首版后端直接按业务服务拆分，使用模块化微服务边界；每个服务内部通过 `api`、`domain`、`service`、`datasource` 和 `registry` 组织依赖，客户端只访问 Gateway。
+客户端确定采用 React Native 新架构与 Expo，后端确定采用 Rust + Axum。首版后端直接按业务服务拆分，使用模块化微服务边界；每个服务内部由 `Domain` 持有配置、Repository 和客户端依赖，外部接口使用 `api/http.rs`，内部接口使用 `api/grpc.rs`，客户端只访问 Gateway。
 
 当前仓库已完成本阶段的生产基础设施基线：十五个 Axum 服务，SQLx/PostgreSQL Repository，Redis 限流与特征缓存，Transactional Outbox + Kafka Relay，OpenSearch 索引与检索降级，S3/MinIO 预签名直传与 CDN，内容审核，在线特征与排序服务，Gateway JWT、下游服务令牌，以及 Prometheus 指标、readiness 和 SLO。默认内存模式仅用于无依赖开发。本地真实依赖联调已覆盖数据库迁移、事件投递、对象上传、搜索/推荐降级、审核状态机和服务间鉴权。该结论不等同于已经拥有抖音或小红书的实际容量；在完成持续压测、容量模型、备份恢复与多区域故障演练前，不得以“亿级生产可用”作为发布结论。
 
@@ -844,9 +844,9 @@ flowchart TB
 - `media`：8091，S3/MinIO 上传控制面、媒体元数据和 CDN 地址。
 - `content-audit`：8092，文本规则审核、风险决策与审核证据。
 - `feature-main`：8093，Redis/PostgreSQL 特征读取与版本化默认特征。
-- `rank-main`：8094，模型排序、实验桶与启发式降级。
+- `recommend-rank`：8096，模型排序、实验桶与启发式降级。
 
-每个服务都可独立构建、发布和扩容。服务间只依赖公开 DTO 和 HTTP，不访问其他服务的 `internal` 源码；服务内部的数据源可从内存替换为 SQLx、Redis 或对象存储，而不改变 handler 和领域服务。
+每个服务都可独立构建、发布和扩容。服务间只依赖公开 DTO 和 gRPC 契约，不访问其他服务源码；服务内部的数据源可从内存替换为 SQLx、Redis 或对象存储，而不改变 API 适配器和 Domain。
 
 推荐流水线的组件顺序固定为 `query hydrator → sources → hydrators → filters → scorers → selector → side effects`。内容召回并行，BBS 关系和互动状态分别补全，副作用失败不能阻断主推荐结果；后续可按 `x-algorithm` 引入关注、相似、热门和探索召回。
 
@@ -881,61 +881,6 @@ AI 定位为“行伴”，只提供辅助建议：
 - 禁止跨目录源码引用、共享领域包或共用锁文件；业务规则以服务端为权威。
 - 后端 CI 生成并发布带版本和校验值的 OpenAPI artifact；前端固定契约版本，在自己的目录内通过 Orval 生成 SDK。
 - 根目录只保留产品文档、基础设施和 CI 编排，不设置根级 pnpm 或 Cargo workspace。
-
-```text
-bookway/
-├── frontend/
-│   └── apps/mobile/              # RN New Architecture + Expo + TypeScript
-│       ├── src/api/              # Gateway HTTP client
-│       ├── src/analytics/        # 曝光去重与批量事件上报
-│       ├── src/components/       # 通用业务组件
-│       ├── src/screens/          # 今日、发现、路线、我的
-│       ├── package.json
-│       └── package-lock.json
-├── backend/
-│   ├── bookway/
-│   │   ├── gateway/             # App 唯一入口 :8080
-│   │   ├── growth/              # 路线与行动服务 :8081
-│   │   ├── bbs/                 # BBS 社交图谱服务 :8082
-│   │   ├── recommend-main/      # 推荐主服务 :8083
-│   │   ├── bbs-link/            # 内容事实服务 :8084
-│   │   ├── bbs-search/          # 搜索服务 :8085
-│   │   ├── comment/             # 评论服务 :8086
-│   │   ├── commonlikestatus/    # 互动状态服务 :8087
-│   │   ├── bbs-feed/            # Feed 产品交付服务 :8088
-│   │   ├── user-event/          # 用户行为接收服务 :8089
-│   │   ├── search-main/         # 搜索主编排服务 :8090
-│   │   ├── media/               # 媒体控制面 :8091
-│   │   ├── content-audit/       # 内容审核 :8092
-│   │   ├── feature-main/        # 特征平台 :8093
-│   │   └── rank-main/           # 模型排序 :8094
-│   │       └── src/internal/
-│   │           ├── api/         # 与 domain/service 同级的契约模块，无 Cargo.toml
-│   │           ├── conf/        # 环境变量与服务配置
-│   │           ├── datasource/  # 数据库、缓存和 RPC/HTTP client
-│   │           ├── domain/      # 业务规则与推荐流水线
-│   │           ├── registry/    # 资源、客户端和服务装配
-│   │           └── service/     # Axum handler、路由和错误映射
-│   ├── cmd/db-migrate/          # 发布前执行 SQLx 迁移
-│   ├── cmd/outbox-relay/        # Kafka Outbox Relay
-│   ├── cmd/search-indexer/       # OpenSearch 索引创建与重建
-│   ├── deploy/                  # 本地生产依赖与 Prometheus
-│   ├── infra/data/              # SQLx/Redis 连接池与存储模式
-│   ├── infra/event/             # Kafka producer、Outbox retry/dead-letter
-│   ├── infra/runtime/           # tracing、JWT、服务 token、限流、指标和 readiness
-│   ├── pkg/api/                 # 稳定跨服务 DTO 与错误信封
-│   ├── Cargo.toml               # 独立 workspace
-│   ├── Cargo.lock
-│   └── rust-toolchain.toml
-├── infrastructure/              # IaC、容器和部署配置
-├── docs/                        # ADR、研究、接口与设计文档
-├── .github/workflows/
-│   ├── frontend.yml             # 前端独立 CI
-│   ├── backend.yml              # 后端独立 CI
-│   └── api-contract.yml         # 契约兼容与更新检查
-├── README.md
-└── LICENSE
-```
 
 ### 10.7 工程质量基线
 

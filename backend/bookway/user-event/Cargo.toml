@@ -12,12 +12,16 @@ bookway-api.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
 uuid.workspace = true
+prost.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
@@ -25,3 +29,6 @@ tower.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true

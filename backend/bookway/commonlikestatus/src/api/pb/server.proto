@@ -1,0 +1,11 @@
+syntax = "proto3";
+package bookway.commonlikestatus;
+
+message ContextRequest { string request_json = 1; }
+message SetReactionRequest { string user_id = 1; string post_id = 2; string request_json = 3; }
+message JsonResponse { string response_json = 1; }
+
+service CommonLikeStatus {
+  rpc Context(ContextRequest) returns (JsonResponse);
+  rpc SetReaction(SetReactionRequest) returns (JsonResponse);
+}

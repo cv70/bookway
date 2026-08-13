@@ -1,7 +1,7 @@
 name: bookway-growth
 owner: growth
-kind: http-service
+kind: grpc-service
 port: 8081
-healthcheck: /health
+healthcheck: grpc
 contracts:
-  - pkg/api
+  - src/api/pb/server.proto

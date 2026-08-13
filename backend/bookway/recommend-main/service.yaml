@@ -1,11 +1,13 @@
 name: bookway-recommend-main
 owner: recommendation
-kind: http-service
+kind: grpc-service
 port: 8083
-healthcheck: /health
+healthcheck: grpc
 dependencies:
   - bookway-bbs
-  - bookway-bbs-link
   - bookway-commonlikestatus
+  - bookway-recommend-recall
+  - bookway-recommend-rank
+  - bookway-feature-main
 contracts:
-  - pkg/api
+  - src/api/pb/server.proto

@@ -1,0 +1,11 @@
+syntax = "proto3";
+package bookway.bbs;
+
+message ContextRequest { string user_id = 1; }
+message SetEdgeRequest { string user_id = 1; string target_user_id = 2; string request_json = 3; }
+message JsonResponse { string response_json = 1; }
+
+service Bbs {
+  rpc Context(ContextRequest) returns (JsonResponse);
+  rpc SetEdge(SetEdgeRequest) returns (JsonResponse);
+}

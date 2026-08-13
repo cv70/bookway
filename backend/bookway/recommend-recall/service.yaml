@@ -1,0 +1,9 @@
+name: bookway-recommend-recall
+owner: recommendation
+kind: grpc-service
+port: 8095
+healthcheck: grpc
+dependencies:
+  - bookway-bbs-link
+contracts:
+  - src/api/pb/server.proto

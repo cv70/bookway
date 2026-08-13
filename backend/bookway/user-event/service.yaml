@@ -1,11 +1,11 @@
 name: bookway-user-event
 owner: data-platform
-kind: event-ingestion-service
+kind: dual-http-grpc-event-service
 port: 8089
 healthcheck: /health
 dependencies: []
 contracts:
-  - pkg/api
+  - src/api/pb/server.proto
 events:
   produces:
     - user-behavior.v1

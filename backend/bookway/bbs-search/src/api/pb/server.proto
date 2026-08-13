@@ -1,0 +1,11 @@
+syntax = "proto3";
+package bookway.bbs.search;
+
+message SearchRequest { string request_json = 1; }
+message SuggestionsRequest { string query = 1; }
+message JsonResponse { string response_json = 1; }
+
+service BbsSearch {
+  rpc Search(SearchRequest) returns (JsonResponse);
+  rpc Suggestions(SuggestionsRequest) returns (JsonResponse);
+}

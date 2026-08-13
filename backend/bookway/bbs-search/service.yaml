@@ -1,9 +1,9 @@
 name: bookway-bbs-search
 owner: bbs-search
-kind: http-service
+kind: grpc-service
 port: 8085
-healthcheck: /health
+healthcheck: grpc
 dependencies:
   - bookway-bbs-link
 contracts:
-  - pkg/api
+  - src/api/pb/server.proto

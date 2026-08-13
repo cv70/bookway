@@ -13,11 +13,11 @@
 - `POST /v1/posts`：创建内容，支持 `Idempotency-Key`。
 - `GET/PATCH /v1/posts/{id}`：读取和更新内容。
 - `POST /v1/posts/{id}/publish`：发布内容。
-- `GET /internal/v1/contents`：为搜索和推荐提供候选。
+- 内部 gRPC：`list`、`get`、`get_public`、`create`、`update`、`publish`。
 
 ## 环境变量
 
-`BBS_LINK_ADDR`，默认监听 `127.0.0.1:8084`。
+`BBS_LINK_ADDR` 和 `BBS_LINK_GRPC_ADDR`，默认分别监听 `127.0.0.1:8084`、`127.0.0.1:18004`。审核依赖使用 `CONTENT_AUDIT_GRPC_URL`。
 
 ## 生产化待办
 

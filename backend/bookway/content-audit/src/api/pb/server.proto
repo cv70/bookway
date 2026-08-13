@@ -1,0 +1,9 @@
+syntax = "proto3";
+package bookway.content.audit;
+
+message AuditRequest { string request_json = 1; }
+message JsonResponse { string response_json = 1; }
+
+service ContentAudit {
+  rpc Audit(AuditRequest) returns (JsonResponse);
+}

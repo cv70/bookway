@@ -7,13 +7,13 @@
 ## 接口
 
 - `PUT /v1/posts/{post_id}/reactions`
-- `GET /internal/v1/reaction-context?user_id=...&post_ids=...`
+- 内部 gRPC：`context`、`set_reaction`。
 
 帖子存在性由 Gateway 在公开写入前校验。推荐服务直接消费批量互动上下文，不再通过 BBS 间接获取。
 
 ## 环境变量
 
-`LIKE_STATUS_ADDR`，默认监听 `127.0.0.1:8087`。
+`LIKE_STATUS_ADDR` 和 `LIKE_STATUS_GRPC_ADDR`，默认分别监听 `127.0.0.1:8087`、`127.0.0.1:18007`。
 
 ## 生产化待办
 

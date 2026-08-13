@@ -1,9 +1,9 @@
 name: bookway-search-main
 owner: search
-kind: orchestration-service
+kind: grpc-service
 port: 8090
-healthcheck: /health
+healthcheck: grpc
 dependencies:
   - bookway-bbs-search
 contracts:
-  - pkg/api
+  - src/api/pb/server.proto

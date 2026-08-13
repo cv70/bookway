@@ -6,14 +6,14 @@
 
 ## 接口
 
-- `GET /internal/v1/social-context?user_id=...`
-- `PUT /v1/users/{user_id}/follow`，请求体使用 `edge=follow|block|mute` 和 `active`。
+- 内部 gRPC：`context`、`set_edge`。
+- 外部 HTTP：`PUT /v1/users/{user_id}/follow`，请求体使用 `edge=follow|block|mute` 和 `active`。
 
 拉黑会移除双方已有关注关系；处于拉黑关系的用户不能重新关注；服务拒绝用户对自己建立社交关系。
 
 ## 环境变量
 
-`BBS_ADDR`，默认监听 `127.0.0.1:8082`。
+`BBS_ADDR` 和 `BBS_GRPC_ADDR`，默认分别监听 `127.0.0.1:8082`、`127.0.0.1:18002`。
 
 ## 生产化待办
 
