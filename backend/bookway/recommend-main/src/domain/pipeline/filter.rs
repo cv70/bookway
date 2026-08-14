@@ -11,6 +11,14 @@ impl CandidateFilter for SeenFilter {
     }
 }
 
+pub(crate) struct ServedHistoryFilter;
+
+impl CandidateFilter for ServedHistoryFilter {
+    fn retain(&self, _query: &FeedQuery, candidate: &Candidate) -> bool {
+        !candidate.previously_served
+    }
+}
+
 pub(crate) struct SafetyFilter;
 
 impl CandidateFilter for SafetyFilter {

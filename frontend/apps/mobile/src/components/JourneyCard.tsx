@@ -5,10 +5,10 @@ import { colors, domainMeta } from '../theme';
 import { Journey } from '../types';
 import { DomainBadge } from './DomainBadge';
 
-export function JourneyCard({ journey }: { journey: Journey }) {
+export function JourneyCard({ journey, onPress }: { journey: Journey; onPress?: () => void }) {
   const meta = domainMeta[journey.domain];
   return (
-    <Pressable style={({ pressed }) => [styles.card, pressed && styles.pressed]}>
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.card, pressed && styles.pressed]}>
       <View style={styles.header}>
         <DomainBadge domain={journey.domain} />
         <View style={styles.duration}>
@@ -57,4 +57,3 @@ const styles = StyleSheet.create({
   nextLabel: { color: colors.faint, fontSize: 10, fontWeight: '600', letterSpacing: 0 },
   nextTitle: { color: colors.ink, fontSize: 13, lineHeight: 19, fontWeight: '600', marginTop: 2, letterSpacing: 0 },
 });
-

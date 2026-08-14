@@ -15,8 +15,8 @@ use crate::{
     domain::pipeline::{
         AuthorDiversityScorer, DefaultQueryHydrator, DiversitySelector, ExposureSideEffect,
         FeedPipeline, FeedPipelineComponents, IntentScorer, QualityScorer, ReactionContextHydrator,
-        RecommendRanker, RecommendRecallSource, SafetyFilter, SeenFilter, SocialContextHydrator,
-        SocialProofHydrator,
+        RecommendRanker, RecommendRecallSource, SafetyFilter, SeenFilter, ServedHistoryFilter,
+        ServedHistoryHydrator, SocialContextHydrator, SocialProofHydrator,
     },
 };
 
@@ -77,11 +77,16 @@ impl Domain {
             query_hydrator: Arc::new(DefaultQueryHydrator),
             sources: vec![Arc::new(RecommendRecallSource::new(recall_client.clone()))],
             hydrators: vec![
+                Arc::new(ServedHistoryHydrator::new(exposures.clone())),
                 Arc::new(SocialContextHydrator::new(bbs.clone())),
                 Arc::new(ReactionContextHydrator::new(like_status.clone())),
                 Arc::new(SocialProofHydrator),
             ],
-            filters: vec![Arc::new(SeenFilter), Arc::new(SafetyFilter)],
+            filters: vec![
+                Arc::new(SeenFilter),
+                Arc::new(ServedHistoryFilter),
+                Arc::new(SafetyFilter),
+            ],
             scorers: vec![
                 Arc::new(QualityScorer),
                 Arc::new(IntentScorer),

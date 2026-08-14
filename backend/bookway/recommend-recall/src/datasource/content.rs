@@ -1,4 +1,4 @@
-use bookway_api::{ContentPageDto, ContentQueryRequest, ContentStatusDto};
+use bookway_api::{ContentPageDto, ContentQueryRequest, ContentStatusDto, GrowthDomainDto};
 use bookway_bbs_link::api::pb::{self, bbs_link_client::BbsLinkClient};
 use thiserror::Error;
 
@@ -25,6 +25,7 @@ impl ContentDataSource {
         strategy: &str,
         cursor: Option<String>,
         limit: usize,
+        domain: Option<GrowthDomainDto>,
     ) -> Result<ContentPageDto, DataSourceError> {
         let request = ContentQueryRequest {
             cursor,
@@ -33,7 +34,7 @@ impl ContentDataSource {
             strategy: Some(strategy.to_string()),
             ids: None,
             content_type: None,
-            domain: None,
+            domain,
         };
         let mut client = self.client.clone();
         let response = client

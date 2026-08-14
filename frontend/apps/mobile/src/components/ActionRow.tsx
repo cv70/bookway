@@ -8,9 +8,10 @@ type Props = {
   action: Action;
   journeyTitle?: string;
   onComplete: (id: string) => void;
+  onOpen?: (action: Action) => void;
 };
 
-export function ActionRow({ action, journeyTitle, onComplete }: Props) {
+export function ActionRow({ action, journeyTitle, onComplete, onOpen }: Props) {
   const completed = action.state === 'completed';
   return (
     <View style={[styles.row, completed && styles.completedRow]}>
@@ -25,7 +26,7 @@ export function ActionRow({ action, journeyTitle, onComplete }: Props) {
       >
         {completed ? <Check color={colors.surface} size={15} strokeWidth={3} /> : null}
       </Pressable>
-      <View style={styles.content}>
+      <Pressable onPress={() => onOpen?.(action)} style={({ pressed }) => [styles.content, pressed && styles.pressed]}>
         <View style={styles.topline}>
           <Text numberOfLines={1} style={[styles.title, completed && styles.completedText]}>
             {action.title}
@@ -39,7 +40,7 @@ export function ActionRow({ action, journeyTitle, onComplete }: Props) {
           {action.detail}
         </Text>
         <Text style={styles.journey}>{journeyTitle ?? action.scheduled_label}</Text>
-      </View>
+      </Pressable>
     </View>
   );
 }
@@ -75,5 +76,5 @@ const styles = StyleSheet.create({
   durationText: { color: colors.faint, fontSize: 11, letterSpacing: 0 },
   detail: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 5, letterSpacing: 0 },
   journey: { color: colors.evergreen, fontSize: 11, fontWeight: '600', marginTop: 7, letterSpacing: 0 },
+  pressed: { opacity: 0.62 },
 });
-

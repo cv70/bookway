@@ -1,5 +1,5 @@
-import { Flame, TimerReset } from 'lucide-react-native';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { CalendarDays, TimerReset } from 'lucide-react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { ActionRow } from '../components/ActionRow';
 import { ScreenHeader } from '../components/ScreenHeader';
@@ -10,15 +10,24 @@ type Props = {
   today: Today;
   journeys: Journey[];
   onComplete: (id: string) => void;
+  onOpenAction: (action: Today['actions'][number]) => void;
+  onCreateJourney: () => void;
+  onDiscover: () => void;
+  onNotifications: () => void;
 };
 
-export function TodayScreen({ today, journeys, onComplete }: Props) {
+export function TodayScreen({ today, journeys, onComplete, onOpenAction, onCreateJourney, onDiscover, onNotifications }: Props) {
   const progress = today.total === 0 ? 0 : Math.round((today.completed / today.total) * 100);
   const journeyNames = new Map(journeys.map((journey) => [journey.id, journey.title]));
+  const dateLabel = new Intl.DateTimeFormat('zh-CN', {
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+  }).format(new Date());
 
   return (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <ScreenHeader action="bell" eyebrow="8 月 11 日 · 星期二" title="今天，走一点" />
+      <ScreenHeader action="bell" eyebrow={dateLabel} onAction={onNotifications} title="今天，走一点" />
       <View style={styles.summary}>
         <View style={styles.ring}>
           <Text style={styles.percent}>{progress}%</Text>
@@ -33,8 +42,8 @@ export function TodayScreen({ today, journeys, onComplete }: Props) {
               <Text style={styles.metricText}>专注 {today.focus_minutes} 分钟</Text>
             </View>
             <View style={styles.metric}>
-              <Flame color={colors.goldSoft} size={16} fill={colors.goldSoft} />
-              <Text style={styles.metricText}>连续 6 天</Text>
+              <CalendarDays color={colors.goldSoft} size={16} />
+              <Text style={styles.metricText}>今日共 {today.total} 项</Text>
             </View>
           </View>
         </View>
@@ -44,14 +53,15 @@ export function TodayScreen({ today, journeys, onComplete }: Props) {
         <Text style={styles.sectionMeta}>{today.actions.length} 项</Text>
       </View>
       <View style={styles.actionList}>
-        {today.actions.map((action) => (
+        {today.actions.length ? today.actions.map((action) => (
           <ActionRow
             action={action}
             journeyTitle={journeyNames.get(action.journey_id)}
             key={action.id}
             onComplete={onComplete}
+            onOpen={onOpenAction}
           />
-        ))}
+        )) : <View style={styles.empty}><Text style={styles.emptyTitle}>今天还没有安排</Text><Text style={styles.emptyText}>从一条路线开始，或先看看别人正在走的路。</Text><View style={styles.emptyActions}><Pressable onPress={onCreateJourney} style={styles.emptyPrimary}><Text style={styles.emptyPrimaryText}>创建路线</Text></Pressable><Pressable onPress={onDiscover} style={styles.emptySecondary}><Text style={styles.emptySecondaryText}>去发现</Text></Pressable></View></View>}
       </View>
       <View style={styles.reflect}>
         <Text style={styles.reflectLabel}>今日一问</Text>
@@ -77,8 +87,15 @@ const styles = StyleSheet.create({
   sectionTitle: { color: colors.ink, fontSize: 16, fontWeight: '700', letterSpacing: 0 },
   sectionMeta: { color: colors.faint, fontSize: 11, letterSpacing: 0 },
   actionList: { borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth },
+  empty: { paddingHorizontal: 20, paddingVertical: 30, alignItems: 'center', backgroundColor: colors.surface },
+  emptyTitle: { color: colors.ink, fontSize: 16, fontWeight: '700', letterSpacing: 0 },
+  emptyText: { maxWidth: 260, color: colors.muted, fontSize: 13, lineHeight: 20, textAlign: 'center', marginTop: 6, letterSpacing: 0 },
+  emptyActions: { flexDirection: 'row', gap: 10, marginTop: 17 },
+  emptyPrimary: { height: 40, paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center', borderRadius: 6, backgroundColor: colors.evergreen },
+  emptyPrimaryText: { color: colors.surface, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  emptySecondary: { height: 40, paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center', borderRadius: 6, borderWidth: 1, borderColor: colors.line },
+  emptySecondaryText: { color: colors.evergreen, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
   reflect: { marginTop: 16, paddingHorizontal: 20, paddingVertical: 19, backgroundColor: colors.goldSoft, borderLeftWidth: 4, borderLeftColor: colors.gold },
   reflectLabel: { color: colors.gold, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
   reflectText: { color: colors.ink, fontSize: 15, lineHeight: 23, fontWeight: '600', marginTop: 6, letterSpacing: 0 },
 });
-

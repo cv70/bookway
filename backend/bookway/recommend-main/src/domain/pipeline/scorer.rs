@@ -39,10 +39,18 @@ pub(crate) struct AuthorDiversityScorer;
 
 impl CandidateScorer for AuthorDiversityScorer {
     fn score(&self, _query: &FeedQuery, candidates: &mut [Candidate]) {
+        let mut ordered: Vec<_> = (0..candidates.len()).collect();
+        ordered.sort_by(|left, right| {
+            candidates[*right]
+                .score
+                .total_cmp(&candidates[*left].score)
+                .then_with(|| candidates[*left].post.id.cmp(&candidates[*right].post.id))
+        });
         let mut counts = HashMap::<String, usize>::new();
-        for candidate in candidates {
+        for index in ordered {
+            let candidate = &mut candidates[index];
             let count = counts.entry(candidate.author_id.clone()).or_default();
-            candidate.score *= 1.0 / (1.0 + *count as f64 * 0.35);
+            candidate.score *= 0.65_f64.powi(*count as i32).max(0.35);
             if *count > 0 {
                 candidate.reasons.push("为你打散了作者重复内容".to_string());
             }

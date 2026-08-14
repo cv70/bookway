@@ -27,9 +27,11 @@ export function CreateJourneyModal({ visible, onClose, onSubmit }: Props) {
   const [title, setTitle] = useState('');
   const [intent, setIntent] = useState('');
   const [domain, setDomain] = useState<GrowthDomain>('learning');
+  const [duration, setDuration] = useState('4 周');
   const [firstAction, setFirstAction] = useState('');
   const [detail, setDetail] = useState('');
-  const ready = title.trim().length > 0 && firstAction.trim().length > 0;
+  const [minutes, setMinutes] = useState('20');
+  const ready = title.trim().length > 0 && firstAction.trim().length > 0 && Number(minutes) > 0;
 
   const submit = () => {
     if (!ready) return;
@@ -37,15 +39,17 @@ export function CreateJourneyModal({ visible, onClose, onSubmit }: Props) {
       title: title.trim(),
       intent: intent.trim(),
       domain,
-      duration_label: '4 周',
+      duration_label: duration,
       first_action_title: firstAction.trim(),
       first_action_detail: detail.trim(),
-      estimated_minutes: 20,
+      estimated_minutes: Math.min(720, Math.max(1, Number(minutes))),
     });
     setTitle('');
     setIntent('');
     setFirstAction('');
     setDetail('');
+    setDuration('4 周');
+    setMinutes('20');
   };
 
   return (
@@ -91,8 +95,18 @@ export function CreateJourneyModal({ visible, onClose, onSubmit }: Props) {
                 })}
               </View>
             </View>
+            <View style={styles.field}>
+              <Text style={styles.label}>预计周期</Text>
+              <View style={styles.segmented}>
+                {['2 周', '4 周', '6 周', '长期'].map((item) => {
+                  const selected = item === duration;
+                  return <Pressable accessibilityRole="radio" accessibilityState={{ checked: selected }} key={item} onPress={() => setDuration(item)} style={[styles.segment, selected && styles.segmentSelected]}><Text style={[styles.segmentText, selected && styles.segmentTextSelected]}>{item}</Text></Pressable>;
+                })}
+              </View>
+            </View>
             <Field label="第一个行动" placeholder="从一件今天能完成的小事开始" value={firstAction} onChange={setFirstAction} />
             <Field label="行动备注" placeholder="地点、标准或提醒" value={detail} onChange={setDetail} />
+            <Field label="预计用时（分钟）" placeholder="20" value={minutes} onChange={setMinutes} keyboardType="number-pad" />
           </ScrollView>
           <Pressable
             accessibilityRole="button"
@@ -114,14 +128,16 @@ type FieldProps = {
   value: string;
   onChange: (value: string) => void;
   multiline?: boolean;
+  keyboardType?: 'default' | 'number-pad';
 };
 
-function Field({ label, placeholder, value, onChange, multiline }: FieldProps) {
+function Field({ label, placeholder, value, onChange, multiline, keyboardType }: FieldProps) {
   return (
     <View style={styles.field}>
       <Text style={styles.label}>{label}</Text>
       <TextInput
         multiline={multiline}
+        keyboardType={keyboardType}
         onChangeText={onChange}
         placeholder={placeholder}
         placeholderTextColor={colors.faint}
@@ -153,4 +169,3 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.72 },
   submitText: { color: colors.surface, fontSize: 15, fontWeight: '700', letterSpacing: 0 },
 });
-

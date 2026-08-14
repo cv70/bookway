@@ -1,17 +1,23 @@
-import { Award, ChevronRight, LockKeyhole, Settings, Sparkles, UserRound } from 'lucide-react-native';
+import { Award, BookOpenText, BookMarked, ChevronRight, FilePenLine, LockKeyhole, Settings, Sparkles, UserRound } from 'lucide-react-native';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { ScreenHeader } from '../components/ScreenHeader';
 import { colors } from '../theme';
+import { GrowthEntry, Journey, Today } from '../types';
 
 const links = [
-  { label: '成长回望', icon: Sparkles },
-  { label: '我的成就', icon: Award },
-  { label: '隐私与权限', icon: LockKeyhole },
-  { label: '设置', icon: Settings },
-];
+  { key: 'review', label: '成长回望', icon: Sparkles },
+  { key: 'saved', label: '收藏与加入', icon: BookMarked },
+  { key: 'creation', label: '创作中心', icon: FilePenLine },
+  { key: 'archive', label: '成长档案', icon: Award },
+  { key: 'privacy', label: '隐私与权限', icon: LockKeyhole },
+  { key: 'settings', label: '设置与数据', icon: Settings },
+] as const;
 
-export function ProfileScreen() {
+export type ProfileSection = typeof links[number]['key'];
+
+export function ProfileScreen({ journeys, today, entries, onOpenSection, onOpenLibrary }: { journeys: Journey[]; today: Today; entries: GrowthEntry[]; onOpenSection: (section: ProfileSection) => void; onOpenLibrary: () => void }) {
+  const activeJourneys = journeys.filter((journey) => journey.status === 'active').length;
   return (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <ScreenHeader title="我的" />
@@ -23,14 +29,19 @@ export function ProfileScreen() {
         </View>
       </View>
       <View style={styles.stats}>
-        <ProfileStat label="同行天数" value="68" />
-        <ProfileStat label="完成行动" value="142" />
-        <ProfileStat label="留下行记" value="17" />
+        <ProfileStat label="进行中路线" value={String(activeJourneys)} />
+        <ProfileStat label="今日完成" value={String(today.completed)} />
+        <ProfileStat label="留下记录" value={String(entries.length)} />
       </View>
       <Text style={styles.sectionTitle}>成长资产</Text>
       <View style={styles.links}>
-        {links.map(({ label, icon: Icon }) => (
-          <Pressable key={label} style={({ pressed }) => [styles.link, pressed && styles.pressed]}>
+        <Pressable onPress={onOpenLibrary} style={({ pressed }) => [styles.link, pressed && styles.pressed]}>
+          <View style={styles.linkIcon}><BookOpenText color={colors.evergreen} size={19} /></View>
+          <Text style={styles.linkText}>我的书架</Text>
+          <ChevronRight color={colors.faint} size={18} />
+        </Pressable>
+        {links.map(({ key, label, icon: Icon }) => (
+          <Pressable key={key} onPress={() => onOpenSection(key)} style={({ pressed }) => [styles.link, pressed && styles.pressed]}>
             <View style={styles.linkIcon}><Icon color={colors.evergreen} size={19} /></View>
             <Text style={styles.linkText}>{label}</Text>
             <ChevronRight color={colors.faint} size={18} />
@@ -68,4 +79,3 @@ const styles = StyleSheet.create({
   linkIcon: { width: 30, height: 30, borderRadius: 6, backgroundColor: colors.evergreenSoft, alignItems: 'center', justifyContent: 'center' },
   linkText: { flex: 1, color: colors.ink, fontSize: 14, fontWeight: '600', letterSpacing: 0 },
 });
-

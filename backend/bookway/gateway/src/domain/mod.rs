@@ -4,10 +4,11 @@ use crate::{conf::Config, datasource::GrpcDataSource};
 
 use super::{
     api::{
-        ActionDto, CommentDto, ContentDto, CreateCommentRequest, CreateContentRequest,
-        CreateJourneyRequest, FeedDto, FeedQueryRequest, FollowRequest, JourneyDto, MediaDto,
-        MediaUploadRequest, MediaUploadResponse, ReactionDto, ReactionRequest, SearchQueryRequest,
-        SearchResponseDto, SuggestionResponseDto, TodayDto, UpdateContentRequest,
+        ActionDto, CommentDto, ContentDto, CreateActionRequest, CreateCommentRequest,
+        CreateContentRequest, CreateJourneyRequest, FeedDto, FeedQueryRequest, FollowRequest,
+        JourneyDetailDto, JourneyDto, MediaDto, MediaUploadRequest, MediaUploadResponse,
+        ReactionDto, ReactionRequest, SearchQueryRequest, SearchResponseDto, SuggestionResponseDto,
+        TodayDto, UpdateActionRequest, UpdateContentRequest, UpdateJourneyRequest,
         UserEventBatchRequest, UserEventIngestResponse,
     },
     datasource::{
@@ -80,6 +81,33 @@ impl Domain {
         self.growth.create_journey(user_id, request).await
     }
 
+    pub(crate) async fn get_journey(
+        &self,
+        user_id: &str,
+        journey_id: &str,
+    ) -> Result<JourneyDetailDto, UpstreamError> {
+        self.growth.get_journey(user_id, journey_id).await
+    }
+
+    pub(crate) async fn update_journey(
+        &self,
+        user_id: &str,
+        journey_id: &str,
+        request: UpdateJourneyRequest,
+    ) -> Result<JourneyDto, UpstreamError> {
+        self.growth
+            .update_journey(user_id, journey_id, request)
+            .await
+    }
+
+    pub(crate) async fn create_action(
+        &self,
+        user_id: &str,
+        request: CreateActionRequest,
+    ) -> Result<ActionDto, UpstreamError> {
+        self.growth.create_action(user_id, request).await
+    }
+
     pub(crate) async fn today(&self, user_id: &str) -> Result<TodayDto, UpstreamError> {
         self.growth.today(user_id).await
     }
@@ -90,6 +118,15 @@ impl Domain {
         action_id: &str,
     ) -> Result<ActionDto, UpstreamError> {
         self.growth.complete_action(user_id, action_id).await
+    }
+
+    pub(crate) async fn update_action(
+        &self,
+        user_id: &str,
+        action_id: &str,
+        request: UpdateActionRequest,
+    ) -> Result<ActionDto, UpstreamError> {
+        self.growth.update_action(user_id, action_id, request).await
     }
 
     pub(crate) async fn feed(&self, request: FeedQueryRequest) -> Result<FeedDto, UpstreamError> {

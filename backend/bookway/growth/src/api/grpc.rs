@@ -1,5 +1,8 @@
 use super::pb::{self, growth_server::Growth};
-use crate::{api::CreateJourneyRequest, domain::Domain};
+use crate::{
+    api::{CreateActionRequest, CreateJourneyRequest, UpdateActionRequest, UpdateJourneyRequest},
+    domain::Domain,
+};
 use serde::Serialize;
 use tonic::{Request, Response, Status};
 
@@ -39,6 +42,50 @@ impl Growth for GrpcServer {
         )
     }
 
+    async fn get_journey(
+        &self,
+        request: Request<pb::JourneyRequest>,
+    ) -> Result<Response<pb::JsonResponse>, Status> {
+        let request = request.into_inner();
+        json_response(
+            &self
+                .domain
+                .get_journey(&request.user_id, &request.journey_id)
+                .await
+                .map_err(internal_error)?,
+        )
+    }
+
+    async fn update_journey(
+        &self,
+        request: Request<pb::UpdateJourneyRequest>,
+    ) -> Result<Response<pb::JsonResponse>, Status> {
+        let request = request.into_inner();
+        let payload: UpdateJourneyRequest = from_json(&request.request_json)?;
+        json_response(
+            &self
+                .domain
+                .update_journey(&request.user_id, &request.journey_id, payload)
+                .await
+                .map_err(internal_error)?,
+        )
+    }
+
+    async fn create_action(
+        &self,
+        request: Request<pb::CreateActionRequest>,
+    ) -> Result<Response<pb::JsonResponse>, Status> {
+        let request = request.into_inner();
+        let payload: CreateActionRequest = from_json(&request.request_json)?;
+        json_response(
+            &self
+                .domain
+                .create_action(&request.user_id, payload)
+                .await
+                .map_err(internal_error)?,
+        )
+    }
+
     async fn today(
         &self,
         request: Request<pb::UserRequest>,
@@ -56,6 +103,21 @@ impl Growth for GrpcServer {
             &self
                 .domain
                 .complete_action(&request.user_id, &request.action_id)
+                .await
+                .map_err(internal_error)?,
+        )
+    }
+
+    async fn update_action(
+        &self,
+        request: Request<pb::UpdateActionRequest>,
+    ) -> Result<Response<pb::JsonResponse>, Status> {
+        let request = request.into_inner();
+        let payload: UpdateActionRequest = from_json(&request.request_json)?;
+        json_response(
+            &self
+                .domain
+                .update_action(&request.user_id, &request.action_id, payload)
                 .await
                 .map_err(internal_error)?,
         )

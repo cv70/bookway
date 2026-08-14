@@ -1,7 +1,39 @@
 use async_trait::async_trait;
 
 use super::{Candidate, CandidateHydrator, FeedQuery, PipelineError};
-use crate::datasource::{SharedBbsContextDataSource, SharedLikeStatusDataSource};
+use crate::datasource::{
+    SharedBbsContextDataSource, SharedExposureDataSource, SharedLikeStatusDataSource,
+};
+
+const SERVED_HISTORY_LIMIT: usize = 500;
+
+pub(crate) struct ServedHistoryHydrator {
+    exposures: SharedExposureDataSource,
+}
+
+impl ServedHistoryHydrator {
+    pub(crate) fn new(exposures: SharedExposureDataSource) -> Self {
+        Self { exposures }
+    }
+}
+
+#[async_trait]
+impl CandidateHydrator for ServedHistoryHydrator {
+    async fn hydrate(
+        &self,
+        query: &FeedQuery,
+        candidates: &mut [Candidate],
+    ) -> Result<(), PipelineError> {
+        let served = self
+            .exposures
+            .recent_content_ids(&query.user_id, SERVED_HISTORY_LIMIT)
+            .await;
+        for candidate in candidates {
+            candidate.previously_served = served.contains(&candidate.post.id);
+        }
+        Ok(())
+    }
+}
 
 pub(crate) struct SocialContextHydrator {
     bbs: SharedBbsContextDataSource,

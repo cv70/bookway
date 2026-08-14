@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use bookway_api::{ReactionContextDto, SocialContextDto};
@@ -110,11 +110,24 @@ pub(crate) struct Exposure {
     pub(crate) user_id: String,
     pub(crate) session_id: String,
     pub(crate) surface: String,
-    pub(crate) post_ids: Vec<String>,
+    pub(crate) pipeline_id: String,
+    pub(crate) candidate_count: usize,
+    pub(crate) degraded: bool,
+    pub(crate) items: Vec<ExposureItem>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExposureItem {
+    pub(crate) position: usize,
+    pub(crate) content_id: String,
+    pub(crate) source: String,
+    pub(crate) score: f64,
+    pub(crate) reasons: Vec<String>,
 }
 #[async_trait]
 pub(crate) trait ExposureDataSource: Send + Sync {
     async fn record(&self, exposure: Exposure);
+    async fn recent_content_ids(&self, user_id: &str, limit: usize) -> HashSet<String>;
 }
 #[derive(Default)]
 pub(crate) struct MemoryExposureDataSource {
@@ -123,8 +136,32 @@ pub(crate) struct MemoryExposureDataSource {
 #[async_trait]
 impl ExposureDataSource for MemoryExposureDataSource {
     async fn record(&self, exposure: Exposure) {
-        tracing::debug!(request_id=%exposure.request_id, selected=exposure.post_ids.len(), "recommendation exposure recorded");
-        self.exposures.write().await.push(exposure);
+        tracing::debug!(request_id=%exposure.request_id, selected=exposure.items.len(), "recommendation exposure recorded");
+        let mut exposures = self.exposures.write().await;
+        exposures.push(exposure);
+        const MAX_EXPOSURES: usize = 10_000;
+        if exposures.len() > MAX_EXPOSURES {
+            let overflow = exposures.len() - MAX_EXPOSURES;
+            exposures.drain(..overflow);
+        }
+    }
+
+    async fn recent_content_ids(&self, user_id: &str, limit: usize) -> HashSet<String> {
+        let exposures = self.exposures.read().await;
+        let mut content_ids = HashSet::new();
+        for exposure in exposures
+            .iter()
+            .rev()
+            .filter(|exposure| exposure.user_id == user_id)
+        {
+            for item in &exposure.items {
+                content_ids.insert(item.content_id.clone());
+                if content_ids.len() >= limit {
+                    return content_ids;
+                }
+            }
+        }
+        content_ids
     }
 }
 pub(crate) struct PostgresExposureDataSource {
@@ -138,9 +175,69 @@ impl PostgresExposureDataSource {
 #[async_trait]
 impl ExposureDataSource for PostgresExposureDataSource {
     async fn record(&self, exposure: Exposure) {
-        let result = sqlx::query("INSERT INTO feed_exposures (request_id, user_id, session_id, surface, item_count) VALUES ($1, $2, $3, $4, $5)").bind(&exposure.request_id).bind(&exposure.user_id).bind(&exposure.session_id).bind(&exposure.surface).bind(i32::try_from(exposure.post_ids.len()).unwrap_or(i32::MAX)).execute(&self.pool).await;
-        if let Err(error) = result {
+        let mut transaction = match self.pool.begin().await {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                tracing::warn!(%error, "exposure persistence degraded");
+                return;
+            }
+        };
+        let selected_count = i32::try_from(exposure.items.len()).unwrap_or(i32::MAX);
+        let candidate_count = i32::try_from(exposure.candidate_count).unwrap_or(i32::MAX);
+        let header = sqlx::query(
+            "INSERT INTO feed_exposures (request_id, user_id, session_id, surface, pipeline_id, candidate_count, selected_count, degraded) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(&exposure.request_id)
+        .bind(&exposure.user_id)
+        .bind(&exposure.session_id)
+        .bind(&exposure.surface)
+        .bind(&exposure.pipeline_id)
+        .bind(candidate_count)
+        .bind(selected_count)
+        .bind(exposure.degraded)
+        .execute(&mut *transaction)
+        .await;
+        if let Err(error) = header {
             tracing::warn!(%error, "exposure persistence degraded");
+            return;
+        }
+        for item in &exposure.items {
+            let position = i32::try_from(item.position).unwrap_or(i32::MAX);
+            let result = sqlx::query(
+                "INSERT INTO feed_exposure_items (request_id, position, content_id, source, score, reasons) VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(&exposure.request_id)
+            .bind(position)
+            .bind(&item.content_id)
+            .bind(&item.source)
+            .bind(item.score)
+            .bind(serde_json::json!(item.reasons))
+            .execute(&mut *transaction)
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "exposure item persistence degraded");
+                return;
+            }
+        }
+        if let Err(error) = transaction.commit().await {
+            tracing::warn!(%error, "exposure persistence degraded");
+        }
+    }
+
+    async fn recent_content_ids(&self, user_id: &str, limit: usize) -> HashSet<String> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT item.content_id FROM feed_exposure_items AS item INNER JOIN feed_exposures AS exposure ON exposure.request_id = item.request_id WHERE exposure.user_id = $1 AND exposure.created_at > now() - interval '7 days' ORDER BY exposure.created_at DESC, item.position ASC LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await;
+        match rows {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(error) => {
+                tracing::warn!(%error, "served history read degraded");
+                HashSet::new()
+            }
         }
     }
 }
@@ -148,3 +245,36 @@ impl ExposureDataSource for PostgresExposureDataSource {
 pub(crate) type SharedBbsContextDataSource = Arc<dyn BbsContextDataSource>;
 pub(crate) type SharedLikeStatusDataSource = Arc<dyn LikeStatusDataSource>;
 pub(crate) type SharedExposureDataSource = Arc<dyn ExposureDataSource>;
+
+#[cfg(test)]
+mod tests {
+    use super::{Exposure, ExposureDataSource, ExposureItem, MemoryExposureDataSource};
+
+    #[tokio::test]
+    async fn memory_history_returns_recently_served_content_for_the_same_user() {
+        let source = MemoryExposureDataSource::default();
+        source
+            .record(Exposure {
+                request_id: "request-1".to_string(),
+                user_id: "user-1".to_string(),
+                session_id: "session-1".to_string(),
+                surface: "home".to_string(),
+                pipeline_id: "pipeline".to_string(),
+                candidate_count: 2,
+                degraded: false,
+                items: vec![ExposureItem {
+                    position: 0,
+                    content_id: "content-1".to_string(),
+                    source: "recall:quality".to_string(),
+                    score: 1.0,
+                    reasons: Vec::new(),
+                }],
+            })
+            .await;
+
+        let history = source.recent_content_ids("user-1", 20).await;
+
+        assert!(history.contains("content-1"));
+        assert!(source.recent_content_ids("user-2", 20).await.is_empty());
+    }
+}

@@ -2,9 +2,17 @@ import { Platform } from 'react-native';
 
 import {
   CreateJourneyInput,
+  Action,
+  ActionUpdate,
+  Comment,
+  CreateActionInput,
+  CreatePostInput,
   Feed,
   Journey,
+  JourneyDetail,
+  JourneyUpdate,
   SearchResponse,
+  SuggestionResponse,
   Today,
 } from '../types';
 
@@ -47,9 +55,11 @@ export function getJourneys(): Promise<Journey[]> {
   return request('/v1/journeys');
 }
 
-export function getFeed(interests = 'learning,movement,travel'): Promise<Feed> {
+export function getFeed(interests = 'learning,movement,travel', cursor?: string): Promise<Feed> {
+  const query = new URLSearchParams({ interests, limit: '10', surface: 'home' });
+  if (cursor) query.set('cursor', cursor);
   return request(
-    `/v1/feed?interests=${encodeURIComponent(interests)}&limit=10&surface=home`,
+    `/v1/feed?${query.toString()}`,
   );
 }
 
@@ -59,16 +69,48 @@ export function search(query: string): Promise<SearchResponse> {
   );
 }
 
-export function setPostReaction(postId: string, active: boolean): Promise<unknown> {
+export function getSuggestions(query: string): Promise<SuggestionResponse> {
+  return request(`/v1/search/suggestions?q=${encodeURIComponent(query)}`);
+}
+
+export function setPostReaction(
+  postId: string,
+  reaction: 'like' | 'bookmark',
+  active: boolean,
+): Promise<unknown> {
   return request(`/v1/posts/${encodeURIComponent(postId)}/reactions`, {
     method: 'PUT',
-    body: JSON.stringify({ reaction: 'like', active }),
-    headers: { 'x-user-id': 'demo-user' },
+    body: JSON.stringify({ reaction, active }),
   });
 }
 
-export function completeAction(actionId: string): Promise<void> {
+export function completeAction(actionId: string): Promise<Action> {
   return request(`/v1/actions/${encodeURIComponent(actionId)}/complete`, { method: 'POST' });
+}
+
+export function getJourney(journeyId: string): Promise<JourneyDetail> {
+  return request(`/v1/journeys/${encodeURIComponent(journeyId)}`);
+}
+
+export function updateJourney(journeyId: string, input: JourneyUpdate): Promise<Journey> {
+  return request(`/v1/journeys/${encodeURIComponent(journeyId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
+}
+
+export function createAction(journeyId: string, input: CreateActionInput): Promise<Action> {
+  return request(`/v1/journeys/${encodeURIComponent(journeyId)}/actions`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateAction(actionId: string, input: ActionUpdate): Promise<Action> {
+  return request(`/v1/actions/${encodeURIComponent(actionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
 }
 
 export function createJourney(input: CreateJourneyInput): Promise<Journey> {
@@ -76,4 +118,33 @@ export function createJourney(input: CreateJourneyInput): Promise<Journey> {
     method: 'POST',
     body: JSON.stringify(input),
   });
+}
+
+export function getComments(postId: string): Promise<Comment[]> {
+  return request(`/v1/posts/${encodeURIComponent(postId)}/comments`);
+}
+
+export function createComment(postId: string, body: string): Promise<Comment> {
+  return request(`/v1/posts/${encodeURIComponent(postId)}/comments`, {
+    method: 'POST',
+    body: JSON.stringify({ body, parent_id: null }),
+  });
+}
+
+export function setFollow(userId: string, active: boolean): Promise<unknown> {
+  return request(`/v1/users/${encodeURIComponent(userId)}/follow`, {
+    method: 'PUT',
+    body: JSON.stringify({ edge: 'follow', active }),
+  });
+}
+
+export function createPost(input: CreatePostInput): Promise<{ id: string }> {
+  return request('/v1/posts', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function publishPost(postId: string): Promise<{ id: string }> {
+  return request(`/v1/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST' });
 }

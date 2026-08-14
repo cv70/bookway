@@ -3,18 +3,19 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 use bookway_api::{ApiResponse, ErrorResponse, HealthResponse};
 use serde::Deserialize;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use super::{
-    ActionDto, CommentDto, ContentDto, CreateCommentRequest, CreateContentRequest,
-    CreateJourneyRequest, FeedDto, FeedQueryRequest, FollowRequest, JourneyDto, MediaDto,
-    MediaUploadRequest, MediaUploadResponse, ReactionDto, ReactionRequest, SearchQueryRequest,
-    SearchResponseDto, SuggestionResponseDto, TodayDto, UpdateContentRequest,
-    UserEventBatchRequest, UserEventIngestResponse,
+    ActionDto, CommentDto, ContentDto, CreateActionRequest, CreateCommentRequest,
+    CreateContentRequest, CreateJourneyRequest, FeedDto, FeedQueryRequest, FollowRequest,
+    JourneyDetailDto, JourneyDto, MediaDto, MediaUploadRequest, MediaUploadResponse, ReactionDto,
+    ReactionRequest, SearchQueryRequest, SearchResponseDto, SuggestionResponseDto, TodayDto,
+    UpdateActionRequest, UpdateContentRequest, UpdateJourneyRequest, UserEventBatchRequest,
+    UserEventIngestResponse,
 };
 use crate::{datasource::UpstreamError, domain::Domain};
 
@@ -42,8 +43,14 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/journeys", get(list_journeys).post(create_journey))
+        .route(
+            "/v1/journeys/{journey_id}",
+            get(get_journey).patch(update_journey),
+        )
+        .route("/v1/journeys/{journey_id}/actions", post(create_action))
         .route("/v1/today", get(today))
         .route("/v1/actions/{action_id}/complete", post(complete_action))
+        .route("/v1/actions/{action_id}", patch(update_action))
         .route("/v1/feed", get(feed))
         .route("/v1/search", get(search))
         .route("/v1/search/suggestions", get(suggestions))
@@ -94,6 +101,47 @@ async fn create_journey(
     Ok((StatusCode::CREATED, Json(ApiResponse::new(journey))))
 }
 
+async fn get_journey(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(journey_id): Path<String>,
+) -> Result<Json<ApiResponse<JourneyDetailDto>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .get_journey(&user_id(&headers), &journey_id)
+            .await?,
+    )))
+}
+
+async fn update_journey(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(journey_id): Path<String>,
+    Json(request): Json<UpdateJourneyRequest>,
+) -> Result<Json<ApiResponse<JourneyDto>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .update_journey(&user_id(&headers), &journey_id, request)
+            .await?,
+    )))
+}
+
+async fn create_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(journey_id): Path<String>,
+    Json(mut request): Json<CreateActionRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<ActionDto>>), HttpError> {
+    request.journey_id = journey_id;
+    let action = state
+        .domain
+        .create_action(&user_id(&headers), request)
+        .await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::new(action))))
+}
+
 async fn today(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -112,6 +160,20 @@ async fn complete_action(
         state
             .domain
             .complete_action(&user_id(&headers), &action_id)
+            .await?,
+    )))
+}
+
+async fn update_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(action_id): Path<String>,
+    Json(request): Json<UpdateActionRequest>,
+) -> Result<Json<ApiResponse<ActionDto>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .update_action(&user_id(&headers), &action_id, request)
             .await?,
     )))
 }
@@ -314,14 +376,41 @@ impl From<UpstreamError> for HttpError {
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         match self.0 {
-            error @ UpstreamError::Transport { .. } => (
+            error @ UpstreamError::Transport { .. } => error_response(
                 StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse::new(
-                    "upstream_unavailable",
-                    error.to_string(),
-                )),
-            )
-                .into_response(),
+                "upstream_unavailable",
+                error.to_string(),
+            ),
+            UpstreamError::Grpc {
+                service,
+                code,
+                message,
+            } => {
+                let (status, error_code) = match code {
+                    tonic::Code::InvalidArgument => (StatusCode::BAD_REQUEST, "invalid_argument"),
+                    tonic::Code::Unauthenticated => (StatusCode::UNAUTHORIZED, "unauthenticated"),
+                    tonic::Code::PermissionDenied => (StatusCode::FORBIDDEN, "forbidden"),
+                    tonic::Code::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+                    tonic::Code::AlreadyExists | tonic::Code::Aborted => {
+                        (StatusCode::CONFLICT, "conflict")
+                    }
+                    tonic::Code::ResourceExhausted => {
+                        (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
+                    }
+                    tonic::Code::FailedPrecondition => {
+                        (StatusCode::UNPROCESSABLE_ENTITY, "failed_precondition")
+                    }
+                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+                        (StatusCode::BAD_GATEWAY, "upstream_unavailable")
+                    }
+                    _ => (StatusCode::BAD_GATEWAY, "upstream_error"),
+                };
+                error_response(status, error_code, format!("{service}: {message}"))
+            }
         }
     }
+}
+
+fn error_response(status: StatusCode, code: &'static str, message: String) -> Response {
+    (status, Json(ErrorResponse::new(code, message))).into_response()
 }

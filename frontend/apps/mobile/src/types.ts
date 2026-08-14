@@ -12,6 +12,8 @@ export type Action = {
   state: ActionState;
 };
 
+export type ActionUpdate = Partial<Pick<Action, 'title' | 'detail' | 'estimated_minutes' | 'scheduled_label' | 'state'>>;
+
 export type Today = {
   completed: number;
   total: number;
@@ -30,6 +32,13 @@ export type Journey = {
   next_action: string;
   participant_count: number;
 };
+
+export type JourneyDetail = {
+  journey: Journey;
+  actions: Action[];
+};
+
+export type JourneyUpdate = Partial<Pick<Journey, 'title' | 'intent' | 'duration_label' | 'status'>>;
 
 export type CommunityPost = {
   id: string;
@@ -61,6 +70,9 @@ export type Feed = {
     sourced: number;
     filtered: number;
     selected: number;
+    next_cursor?: string;
+    pipeline_id?: string;
+    degraded?: boolean;
   };
 };
 
@@ -86,6 +98,11 @@ export type SearchResponse = {
   degraded: boolean;
 };
 
+export type SuggestionResponse = {
+  query: string;
+  items: Array<{ text: string; result_type: 'post' | 'journey' | 'user' | 'topic'; score: number }>;
+};
+
 export type CreateJourneyInput = {
   title: string;
   intent: string;
@@ -94,6 +111,95 @@ export type CreateJourneyInput = {
   first_action_title: string;
   first_action_detail: string;
   estimated_minutes: number;
+};
+
+export type CreateActionInput = {
+  title: string;
+  detail: string;
+  estimated_minutes: number;
+  scheduled_label: string;
+};
+
+export type EntryMood = 'clear' | 'steady' | 'tired' | 'energized' | 'calm';
+
+export type GrowthEntry = {
+  id: string;
+  action_id?: string;
+  journey_id?: string;
+  body: string;
+  mood: EntryMood;
+  duration_minutes?: number;
+  quantity?: string;
+  location?: string;
+  photo_url?: string;
+  created_at: string;
+  published?: boolean;
+};
+
+export type CreateEntryInput = Omit<GrowthEntry, 'id' | 'created_at'>;
+
+export type ReadingChapter = {
+  id: string;
+  title: string;
+  body: string[];
+};
+
+export type ReadingBook = {
+  id: string;
+  title: string;
+  author: string;
+  summary: string;
+  journey_id?: string;
+  progress: number;
+  current_chapter: number;
+  reading_seconds: number;
+  added_at: string;
+  last_opened_at?: string;
+  accent: string;
+  chapters: ReadingChapter[];
+};
+
+export type ReadingBookmark = {
+  book_id: string;
+  chapter_id: string;
+  created_at: string;
+};
+
+export type ReaderTheme = 'light' | 'night';
+
+export type ReaderSettings = {
+  font_size: number;
+  line_height: number;
+  theme: ReaderTheme;
+};
+
+export type CreateReadingBookInput = {
+  title: string;
+  author: string;
+  content?: string;
+};
+
+export type Comment = {
+  id: string;
+  post_id: string;
+  author_name: string;
+  body: string;
+  created_at: string;
+};
+
+export type ContentType = 'note' | 'article' | 'route';
+
+export type CreatePostInput = {
+  title: string;
+  summary: string;
+  body: string;
+  domain: GrowthDomain;
+  content_type: ContentType;
+  cover_url?: string;
+  tags: string[];
+  topics: string[];
+  route_title?: string;
+  route_duration?: string;
 };
 
 export type TabKey = 'today' | 'discover' | 'journeys' | 'profile';

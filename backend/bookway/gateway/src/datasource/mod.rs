@@ -3,11 +3,12 @@ use thiserror::Error;
 use tonic::transport::Channel;
 
 use super::api::{
-    ActionDto, CommentDto, ContentDto, CreateCommentRequest, CreateContentRequest,
-    CreateJourneyRequest, FeedDto, FeedQueryRequest, FollowRequest, JourneyDto, MediaDto,
-    MediaUploadRequest, MediaUploadResponse, ReactionDto, ReactionRequest, SearchQueryRequest,
-    SearchResponseDto, SuggestionResponseDto, TodayDto, UpdateContentRequest,
-    UserEventBatchRequest, UserEventIngestResponse,
+    ActionDto, CommentDto, ContentDto, CreateActionRequest, CreateCommentRequest,
+    CreateContentRequest, CreateJourneyRequest, FeedDto, FeedQueryRequest, FollowRequest,
+    JourneyDetailDto, JourneyDto, MediaDto, MediaUploadRequest, MediaUploadResponse, ReactionDto,
+    ReactionRequest, SearchQueryRequest, SearchResponseDto, SuggestionResponseDto, TodayDto,
+    UpdateActionRequest, UpdateContentRequest, UpdateJourneyRequest, UserEventBatchRequest,
+    UserEventIngestResponse,
 };
 
 #[derive(Debug, Error)]
@@ -15,6 +16,12 @@ pub(crate) enum UpstreamError {
     #[error("{service} grpc request failed: {message}")]
     Transport {
         service: &'static str,
+        message: String,
+    },
+    #[error("{service} grpc request failed with {code:?}: {message}")]
+    Grpc {
+        service: &'static str,
+        code: tonic::Code,
         message: String,
     },
 }
@@ -183,8 +190,9 @@ fn decode<T: serde::de::DeserializeOwned>(
 }
 
 fn status<T>(service: &'static str, result: Result<T, tonic::Status>) -> Result<T, UpstreamError> {
-    result.map_err(|error| UpstreamError::Transport {
+    result.map_err(|error| UpstreamError::Grpc {
         service,
+        code: error.code(),
         message: error.to_string(),
     })
 }
@@ -232,6 +240,74 @@ impl GrpcDataSource {
         decode("growth", response.response_json)
     }
 
+    pub(crate) async fn get_journey(
+        &self,
+        user_id: &str,
+        journey_id: &str,
+    ) -> Result<JourneyDetailDto, UpstreamError> {
+        let Client::Growth(client) = &self.client else {
+            return Err(wrong_service("growth"));
+        };
+        let mut client = client.clone();
+        let response = status(
+            "growth",
+            client
+                .get_journey(bookway_growth::api::pb::JourneyRequest {
+                    user_id: user_id.to_string(),
+                    journey_id: journey_id.to_string(),
+                })
+                .await,
+        )?
+        .into_inner();
+        decode("growth", response.response_json)
+    }
+
+    pub(crate) async fn update_journey(
+        &self,
+        user_id: &str,
+        journey_id: &str,
+        request: UpdateJourneyRequest,
+    ) -> Result<JourneyDto, UpstreamError> {
+        let Client::Growth(client) = &self.client else {
+            return Err(wrong_service("growth"));
+        };
+        let mut client = client.clone();
+        let response = status(
+            "growth",
+            client
+                .update_journey(bookway_growth::api::pb::UpdateJourneyRequest {
+                    user_id: user_id.to_string(),
+                    journey_id: journey_id.to_string(),
+                    request_json: encode("growth", &request)?,
+                })
+                .await,
+        )?
+        .into_inner();
+        decode("growth", response.response_json)
+    }
+
+    pub(crate) async fn create_action(
+        &self,
+        user_id: &str,
+        request: CreateActionRequest,
+    ) -> Result<ActionDto, UpstreamError> {
+        let Client::Growth(client) = &self.client else {
+            return Err(wrong_service("growth"));
+        };
+        let mut client = client.clone();
+        let response = status(
+            "growth",
+            client
+                .create_action(bookway_growth::api::pb::CreateActionRequest {
+                    user_id: user_id.to_string(),
+                    request_json: encode("growth", &request)?,
+                })
+                .await,
+        )?
+        .into_inner();
+        decode("growth", response.response_json)
+    }
+
     pub(crate) async fn today(&self, user_id: &str) -> Result<TodayDto, UpstreamError> {
         let Client::Growth(client) = &self.client else {
             return Err(wrong_service("growth"));
@@ -264,6 +340,30 @@ impl GrpcDataSource {
                 .complete_action(bookway_growth::api::pb::CompleteActionRequest {
                     user_id: user_id.to_string(),
                     action_id: action_id.to_string(),
+                })
+                .await,
+        )?
+        .into_inner();
+        decode("growth", response.response_json)
+    }
+
+    pub(crate) async fn update_action(
+        &self,
+        user_id: &str,
+        action_id: &str,
+        request: UpdateActionRequest,
+    ) -> Result<ActionDto, UpstreamError> {
+        let Client::Growth(client) = &self.client else {
+            return Err(wrong_service("growth"));
+        };
+        let mut client = client.clone();
+        let response = status(
+            "growth",
+            client
+                .update_action(bookway_growth::api::pb::UpdateActionRequest {
+                    user_id: user_id.to_string(),
+                    action_id: action_id.to_string(),
+                    request_json: encode("growth", &request)?,
                 })
                 .await,
         )?

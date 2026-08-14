@@ -27,7 +27,14 @@ impl CandidateSource for RecommendRecallSource {
                 interests: query
                     .interests
                     .iter()
-                    .map(|value| format!("{value:?}"))
+                    .map(|value| match value {
+                        crate::api::GrowthDomainDto::Learning => "learning",
+                        crate::api::GrowthDomainDto::Movement => "movement",
+                        crate::api::GrowthDomainDto::Wellness => "wellness",
+                        crate::api::GrowthDomainDto::Travel => "travel",
+                        crate::api::GrowthDomainDto::Leisure => "leisure",
+                    })
+                    .map(str::to_string)
                     .collect(),
                 seen: query.seen.iter().cloned().collect(),
                 cursor: query.cursor.clone().unwrap_or_default(),
@@ -62,5 +69,6 @@ fn candidate_to_domain(candidate: recall::Candidate) -> Result<Candidate, serde_
         muted_author: false,
         liked: false,
         bookmarked: false,
+        previously_served: false,
     })
 }

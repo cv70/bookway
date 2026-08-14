@@ -11,7 +11,7 @@ impl Config {
         Ok(Self {
             listen_addr: bookway_runtime::listen_addr("RECOMMEND_RANK_ADDR", "127.0.0.1:8096")?,
             model_version: env::var("RECOMMEND_RANK_MODEL_VERSION")
-                .unwrap_or_else(|_| "recommend-rank-v1".to_string()),
+                .unwrap_or_else(|_| "recommend-rank-v2".to_string()),
         })
     }
 }

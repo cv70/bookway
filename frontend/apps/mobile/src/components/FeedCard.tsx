@@ -10,11 +10,21 @@ import { DomainBadge } from './DomainBadge';
 export function FeedCard({
   item,
   liked = false,
+  bookmarked = false,
+  joined = false,
   onLike,
+  onBookmark,
+  onJoin,
+  onOpen,
 }: {
   item: FeedItem;
   liked?: boolean;
+  bookmarked?: boolean;
+  joined?: boolean;
   onLike?: (postId: string) => void;
+  onBookmark?: (postId: string) => void;
+  onJoin?: (post: FeedItem['post']) => void;
+  onOpen?: (post: FeedItem['post']) => void;
 }) {
   const { post } = item;
   useEffect(() => {
@@ -30,14 +40,21 @@ export function FeedCard({
         </View>
         <DomainBadge domain={post.domain} />
       </View>
-      <Image source={{ uri: post.cover_url }} style={styles.cover as ImageStyle} />
+      <Pressable accessibilityLabel={`查看${post.title}`} onPress={() => onOpen?.(post)}>
+        <Image source={{ uri: post.cover_url }} style={styles.cover as ImageStyle} />
+      </Pressable>
       <View style={styles.body}>
-        <Text style={styles.title}>{post.title}</Text>
-        <Text numberOfLines={3} style={styles.summary}>{post.summary}</Text>
+        <Pressable onPress={() => onOpen?.(post)}><Text style={styles.title}>{post.title}</Text><Text numberOfLines={3} style={styles.summary}>{post.summary}</Text></Pressable>
         <View style={styles.tags}>
           {post.tags.map((tag) => <Text key={tag} style={styles.tag}>#{tag}</Text>)}
         </View>
-        <Pressable style={({ pressed }) => [styles.route, pressed && styles.pressed]}>
+        <Pressable
+          accessibilityLabel={joined ? '已加入路线' : '加入路线'}
+          accessibilityRole="button"
+          disabled={joined}
+          onPress={() => onJoin?.(post)}
+          style={({ pressed }) => [styles.route, pressed && styles.pressed, joined && styles.routeJoined]}
+        >
           <View style={styles.routeIcon}><Route color={colors.evergreen} size={18} /></View>
           <View style={styles.routeCopy}>
             <Text numberOfLines={1} style={styles.routeTitle}>{post.route_title}</Text>
@@ -47,7 +64,7 @@ export function FeedCard({
               <Text style={styles.routeMetaText}>{post.join_count.toLocaleString()} 人加入</Text>
             </View>
           </View>
-          <Text style={styles.join}>加入</Text>
+          <Text style={styles.join}>{joined ? '已加入' : '加入'}</Text>
         </Pressable>
         <View style={styles.actions}>
           <Pressable
@@ -59,8 +76,14 @@ export function FeedCard({
             <Heart color={liked ? colors.coral : colors.muted} fill={liked ? colors.coral : 'transparent'} size={20} />
             <Text style={styles.actionText}>{compact(post.like_count)}</Text>
           </Pressable>
-          <Pressable accessibilityLabel="收藏" hitSlop={8} style={styles.action}>
-            <Bookmark color={colors.muted} size={20} />
+          <Pressable
+            accessibilityLabel={bookmarked ? '取消收藏' : '收藏'}
+            accessibilityRole="button"
+            hitSlop={8}
+            onPress={() => onBookmark?.(post.id)}
+            style={styles.action}
+          >
+            <Bookmark color={bookmarked ? colors.gold : colors.muted} fill={bookmarked ? colors.gold : 'transparent'} size={20} />
           </Pressable>
         </View>
       </View>
@@ -86,6 +109,7 @@ const styles = StyleSheet.create({
   tags: { flexDirection: 'row', gap: 10, marginTop: 10 },
   tag: { color: colors.blue, fontSize: 12, fontWeight: '600', letterSpacing: 0 },
   route: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: colors.background, borderRadius: 6, marginTop: 14, padding: 11 },
+  routeJoined: { backgroundColor: colors.evergreenSoft },
   pressed: { opacity: 0.62 },
   routeIcon: { width: 32, height: 32, borderRadius: 6, backgroundColor: colors.evergreenSoft, alignItems: 'center', justifyContent: 'center' },
   routeCopy: { flex: 1, minWidth: 0 },

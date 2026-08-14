@@ -15,22 +15,7 @@ impl ExposureSideEffect {
 
 #[async_trait]
 impl PipelineSideEffect for ExposureSideEffect {
-    async fn run(
-        &self,
-        request_id: String,
-        user_id: String,
-        session_id: String,
-        surface: String,
-        post_ids: Vec<String>,
-    ) {
-        self.exposures
-            .record(Exposure {
-                request_id,
-                user_id,
-                session_id,
-                surface,
-                post_ids,
-            })
-            .await;
+    async fn run(&self, exposure: Exposure) {
+        self.exposures.record(exposure).await;
     }
 }

@@ -1,7 +1,8 @@
 use uuid::Uuid;
 
 use crate::api::{
-    ActionDto, ActionStateDto, CreateJourneyRequest, JourneyDto, JourneyStatusDto, TodayDto,
+    ActionDto, ActionStateDto, CreateActionRequest, CreateJourneyRequest, JourneyDetailDto,
+    JourneyDto, JourneyStatusDto, TodayDto, UpdateActionRequest, UpdateJourneyRequest,
 };
 use crate::domain::{Domain, GrowthError};
 
@@ -58,6 +59,49 @@ impl Domain {
             .await?)
     }
 
+    pub(crate) async fn get_journey(
+        &self,
+        user_id: &str,
+        journey_id: &str,
+    ) -> Result<JourneyDetailDto, GrowthError> {
+        Ok(self.repository.get_journey(user_id, journey_id).await?)
+    }
+
+    pub(crate) async fn update_journey(
+        &self,
+        user_id: &str,
+        journey_id: &str,
+        request: UpdateJourneyRequest,
+    ) -> Result<JourneyDto, GrowthError> {
+        validate_journey_update(&request)?;
+        Ok(self
+            .repository
+            .update_journey(user_id, journey_id, request)
+            .await?)
+    }
+
+    pub(crate) async fn create_action(
+        &self,
+        user_id: &str,
+        request: CreateActionRequest,
+    ) -> Result<ActionDto, GrowthError> {
+        validate_action(
+            &request.title,
+            request.estimated_minutes,
+            &request.scheduled_label,
+        )?;
+        let action = ActionDto {
+            id: Uuid::now_v7().to_string(),
+            journey_id: request.journey_id,
+            title: request.title.trim().to_string(),
+            detail: request.detail.trim().to_string(),
+            estimated_minutes: request.estimated_minutes,
+            scheduled_label: request.scheduled_label.trim().to_string(),
+            state: ActionStateDto::Pending,
+        };
+        Ok(self.repository.create_action(user_id, action).await?)
+    }
+
     pub(crate) async fn today(&self, user_id: &str) -> Result<TodayDto, GrowthError> {
         let actions = self.repository.today(user_id).await?;
         let completed = actions
@@ -84,6 +128,74 @@ impl Domain {
     ) -> Result<ActionDto, GrowthError> {
         Ok(self.repository.complete_action(user_id, action_id).await?)
     }
+
+    pub(crate) async fn update_action(
+        &self,
+        user_id: &str,
+        action_id: &str,
+        request: UpdateActionRequest,
+    ) -> Result<ActionDto, GrowthError> {
+        if let Some(title) = &request.title {
+            if title.trim().is_empty() {
+                return Err(GrowthError::Validation("行动名称不能为空".to_string()));
+            }
+        }
+        if let Some(minutes) = request.estimated_minutes {
+            if minutes == 0 || minutes > 720 {
+                return Err(GrowthError::Validation(
+                    "行动时长需要在 1 到 720 分钟之间".to_string(),
+                ));
+            }
+        }
+        if request
+            .scheduled_label
+            .as_deref()
+            .is_some_and(|label| label.trim().is_empty())
+        {
+            return Err(GrowthError::Validation("安排时间不能为空".to_string()));
+        }
+        Ok(self
+            .repository
+            .update_action(user_id, action_id, request)
+            .await?)
+    }
+}
+
+fn validate_journey_update(request: &UpdateJourneyRequest) -> Result<(), GrowthError> {
+    if request
+        .title
+        .as_deref()
+        .is_some_and(|title| title.trim().is_empty())
+    {
+        return Err(GrowthError::Validation("路线名称不能为空".to_string()));
+    }
+    if request
+        .duration_label
+        .as_deref()
+        .is_some_and(|duration| duration.trim().is_empty())
+    {
+        return Err(GrowthError::Validation("路线周期不能为空".to_string()));
+    }
+    Ok(())
+}
+
+fn validate_action(
+    title: &str,
+    estimated_minutes: u16,
+    scheduled_label: &str,
+) -> Result<(), GrowthError> {
+    if title.trim().is_empty() {
+        return Err(GrowthError::Validation("行动名称不能为空".to_string()));
+    }
+    if estimated_minutes == 0 || estimated_minutes > 720 {
+        return Err(GrowthError::Validation(
+            "行动时长需要在 1 到 720 分钟之间".to_string(),
+        ));
+    }
+    if scheduled_label.trim().is_empty() {
+        return Err(GrowthError::Validation("安排时间不能为空".to_string()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -129,7 +241,34 @@ mod tests {
                 .await
                 .expect("today should load")
                 .total,
-            4
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_storage_keeps_journeys_and_actions_isolated_by_user() {
+        let domain = domain();
+
+        assert!(
+            domain
+                .list_journeys("another-user")
+                .await
+                .expect("journeys should load")
+                .is_empty()
+        );
+        assert!(
+            domain
+                .today("another-user")
+                .await
+                .expect("today should load")
+                .actions
+                .is_empty()
+        );
+        assert!(
+            domain
+                .complete_action("another-user", "action-stretch")
+                .await
+                .is_err()
         );
     }
 
@@ -152,5 +291,70 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(GrowthError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn manages_route_and_action_lifecycle() {
+        let domain = domain();
+        let journey = domain
+            .create_journey(
+                "user-a",
+                CreateJourneyRequest {
+                    title: "四周写作练习".to_string(),
+                    intent: "留下可回看的作品".to_string(),
+                    domain: GrowthDomainDto::Learning,
+                    duration_label: "4 周".to_string(),
+                    first_action_title: "写 100 字".to_string(),
+                    first_action_detail: String::new(),
+                    estimated_minutes: 10,
+                },
+            )
+            .await
+            .expect("journey should be created");
+
+        let detail = domain
+            .get_journey("user-a", &journey.id)
+            .await
+            .expect("journey detail should load");
+        assert_eq!(detail.actions.len(), 1);
+
+        let action = domain
+            .create_action(
+                "user-a",
+                CreateActionRequest {
+                    journey_id: journey.id.clone(),
+                    title: "修改开头".to_string(),
+                    detail: "让第一段更具体".to_string(),
+                    estimated_minutes: 15,
+                    scheduled_label: "明天".to_string(),
+                },
+            )
+            .await
+            .expect("action should be created");
+        let updated = domain
+            .update_action(
+                "user-a",
+                &action.id,
+                UpdateActionRequest {
+                    state: Some(ActionStateDto::Skipped),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("action should update");
+        assert_eq!(updated.state, ActionStateDto::Skipped);
+
+        let paused = domain
+            .update_journey(
+                "user-a",
+                &journey.id,
+                UpdateJourneyRequest {
+                    status: Some(JourneyStatusDto::Paused),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("journey should update");
+        assert_eq!(paused.status, JourneyStatusDto::Paused);
     }
 }

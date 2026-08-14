@@ -3,12 +3,20 @@ package bookway.growth;
 
 message UserRequest { string user_id = 1; }
 message CreateJourneyRequest { string user_id = 1; string request_json = 2; }
+message JourneyRequest { string user_id = 1; string journey_id = 2; }
+message UpdateJourneyRequest { string user_id = 1; string journey_id = 2; string request_json = 3; }
+message CreateActionRequest { string user_id = 1; string request_json = 2; }
 message CompleteActionRequest { string user_id = 1; string action_id = 2; }
+message UpdateActionRequest { string user_id = 1; string action_id = 2; string request_json = 3; }
 message JsonResponse { string response_json = 1; }
 
 service Growth {
   rpc ListJourneys(UserRequest) returns (JsonResponse);
   rpc CreateJourney(CreateJourneyRequest) returns (JsonResponse);
+  rpc GetJourney(JourneyRequest) returns (JsonResponse);
+  rpc UpdateJourney(UpdateJourneyRequest) returns (JsonResponse);
+  rpc CreateAction(CreateActionRequest) returns (JsonResponse);
   rpc Today(UserRequest) returns (JsonResponse);
   rpc CompleteAction(CompleteActionRequest) returns (JsonResponse);
+  rpc UpdateAction(UpdateActionRequest) returns (JsonResponse);
 }

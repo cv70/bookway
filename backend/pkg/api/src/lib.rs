@@ -152,6 +152,38 @@ pub struct CreateJourneyRequest {
     pub estimated_minutes: u16,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpdateJourneyRequest {
+    pub title: Option<String>,
+    pub intent: Option<String>,
+    pub duration_label: Option<String>,
+    pub status: Option<JourneyStatusDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JourneyDetailDto {
+    pub journey: JourneyDto,
+    pub actions: Vec<ActionDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateActionRequest {
+    pub journey_id: String,
+    pub title: String,
+    pub detail: String,
+    pub estimated_minutes: u16,
+    pub scheduled_label: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpdateActionRequest {
+    pub title: Option<String>,
+    pub detail: Option<String>,
+    pub estimated_minutes: Option<u16>,
+    pub scheduled_label: Option<String>,
+    pub state: Option<ActionStateDto>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContentMediaDto {
     pub id: String,

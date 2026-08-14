@@ -11,6 +11,7 @@ type EventType =
   | 'share'
   | 'hide'
   | 'complete'
+  | 'join_route'
   | 'follow'
   | 'search_submit';
 

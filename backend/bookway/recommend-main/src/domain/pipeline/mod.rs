@@ -19,8 +19,10 @@ use crate::api::{
     PostSummaryDto,
 };
 
-pub(crate) use filter::{DuplicateFilter, SafetyFilter, SeenFilter};
-pub(crate) use hydrator::{ReactionContextHydrator, SocialContextHydrator, SocialProofHydrator};
+pub(crate) use filter::{DuplicateFilter, SafetyFilter, SeenFilter, ServedHistoryFilter};
+pub(crate) use hydrator::{
+    ReactionContextHydrator, ServedHistoryHydrator, SocialContextHydrator, SocialProofHydrator,
+};
 pub(crate) use query_hydrator::DefaultQueryHydrator;
 pub(crate) use ranker::RecommendRanker;
 pub(crate) use scorer::{AuthorDiversityScorer, IntentScorer, QualityScorer};
@@ -29,7 +31,8 @@ pub(crate) use side_effect::ExposureSideEffect;
 pub(crate) use source::RecommendRecallSource;
 
 use crate::datasource::{
-    BbsClientError, LikeStatusClientError, ModelClientError, RecallClientError,
+    BbsClientError, Exposure, ExposureItem, LikeStatusClientError, ModelClientError,
+    RecallClientError,
 };
 
 #[derive(Clone, Debug)]
@@ -57,6 +60,7 @@ pub(crate) struct Candidate {
     pub(crate) muted_author: bool,
     pub(crate) liked: bool,
     pub(crate) bookmarked: bool,
+    pub(crate) previously_served: bool,
 }
 
 pub(crate) struct SourceResult {
@@ -117,14 +121,7 @@ pub(crate) trait CandidateSelector: Send + Sync {
 
 #[async_trait]
 pub(crate) trait PipelineSideEffect: Send + Sync {
-    async fn run(
-        &self,
-        request_id: String,
-        user_id: String,
-        session_id: String,
-        surface: String,
-        post_ids: Vec<String>,
-    );
+    async fn run(&self, exposure: Exposure);
 }
 
 #[derive(Clone)]
@@ -232,22 +229,31 @@ impl FeedPipeline {
             selected.retain(|candidate| filter.retain(&query, candidate));
         }
         let request_id = Uuid::now_v7().to_string();
-        let post_ids: Vec<_> = selected
-            .iter()
-            .map(|candidate| candidate.post.id.clone())
-            .collect();
+        let pipeline_id = format!("bookway-recommend-main-{}", query.surface);
+        let exposure = Exposure {
+            request_id: request_id.clone(),
+            user_id: query.user_id.clone(),
+            session_id: query.session_id.clone(),
+            surface: query.surface.clone(),
+            pipeline_id: pipeline_id.clone(),
+            candidate_count: sourced,
+            degraded,
+            items: selected
+                .iter()
+                .enumerate()
+                .map(|(position, candidate)| ExposureItem {
+                    position,
+                    content_id: candidate.post.id.clone(),
+                    source: candidate.source.clone(),
+                    score: candidate.score,
+                    reasons: candidate.reasons.clone(),
+                })
+                .collect(),
+        };
         for side_effect in &self.side_effects {
             let side_effect = Arc::clone(side_effect);
-            let request_id = request_id.clone();
-            let user_id = query.user_id.clone();
-            let session_id = query.session_id.clone();
-            let surface = query.surface.clone();
-            let post_ids = post_ids.clone();
-            tokio::spawn(async move {
-                side_effect
-                    .run(request_id, user_id, session_id, surface, post_ids)
-                    .await
-            });
+            let exposure = exposure.clone();
+            tokio::spawn(async move { side_effect.run(exposure).await });
         }
 
         let items = selected
@@ -268,7 +274,7 @@ impl FeedPipeline {
                 filtered,
                 selected: selected_count,
                 next_cursor,
-                pipeline_id: format!("bookway-recommend-main-{}", query.surface),
+                pipeline_id,
                 degraded,
             },
         }
