@@ -3,7 +3,7 @@ use std::{env, net::SocketAddr};
 use axum::{
     Router,
     extract::Request,
-    http::{StatusCode, header::HeaderValue},
+    http::{Method, StatusCode, header::HeaderValue},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::get,
@@ -18,10 +18,20 @@ use tracing_subscriber::EnvFilter;
 pub enum RuntimeError {
     #[error("invalid listen address in {key}: {value}")]
     InvalidAddress { key: String, value: String },
+    #[error("invalid CORS allowed origins: {value}")]
+    InvalidCorsOrigins { value: String },
     #[error("failed to bind service: {0}")]
     Bind(#[source] std::io::Error),
     #[error("service failed: {0}")]
     Serve(#[source] std::io::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum GrpcServiceAuthError {
+    #[error("SERVICE_AUTH_TOKEN is required when SERVICE_AUTH_REQUIRED=true")]
+    MissingToken,
+    #[error("SERVICE_AUTH_TOKEN is not valid gRPC metadata")]
+    InvalidToken,
 }
 
 static REQUESTS_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -193,17 +203,63 @@ fn service_headers() -> axum::http::HeaderMap {
     headers
 }
 
+/// Wraps an internal gRPC message with the service credential when production
+/// service authentication is enabled.
+pub fn grpc_service_request<T>(message: T) -> Result<tonic::Request<T>, GrpcServiceAuthError> {
+    let mut request = tonic::Request::new(message);
+    if !service_auth_required() {
+        return Ok(request);
+    }
+    let token = env::var("SERVICE_AUTH_TOKEN").unwrap_or_default();
+    if token.is_empty() {
+        return Err(GrpcServiceAuthError::MissingToken);
+    }
+    let value = tonic::metadata::MetadataValue::try_from(token.as_str())
+        .map_err(|_| GrpcServiceAuthError::InvalidToken)?;
+    request.metadata_mut().insert("x-service-token", value);
+    Ok(request)
+}
+
+/// Tonic interceptor for business-only gRPC services. Health is registered as
+/// a separate service and therefore remains available to infrastructure probes.
+#[allow(clippy::result_large_err)] // Tonic interceptor requires tonic::Status.
+pub fn grpc_service_auth_interceptor(
+    request: tonic::Request<()>,
+) -> Result<tonic::Request<()>, tonic::Status> {
+    if !service_auth_required() {
+        return Ok(request);
+    }
+    let expected = env::var("SERVICE_AUTH_TOKEN").unwrap_or_default();
+    let actual = request
+        .metadata()
+        .get("x-service-token")
+        .and_then(|value| value.to_str().ok());
+    if !valid_service_token(&expected, actual) {
+        return Err(tonic::Status::unauthenticated(
+            "invalid service credentials",
+        ));
+    }
+    Ok(request)
+}
+
+fn service_auth_required() -> bool {
+    env::var("SERVICE_AUTH_REQUIRED").is_ok_and(|value| value == "true")
+}
+
+fn valid_service_token(expected: &str, actual: Option<&str>) -> bool {
+    !expected.is_empty() && actual == Some(expected)
+}
+
 async fn service_auth(service: &'static str, request: Request, next: Next) -> Response {
-    let required = env::var("SERVICE_AUTH_REQUIRED").is_ok_and(|value| value == "true");
     let path = request.uri().path();
     let is_probe = matches!(path, "/health" | "/ready" | "/metrics");
-    if required && service != "gateway" && !is_probe {
+    if service_auth_required() && service != "gateway" && !is_probe {
         let expected = env::var("SERVICE_AUTH_TOKEN").unwrap_or_default();
         let actual = request
             .headers()
             .get("x-service-token")
             .and_then(|v| v.to_str().ok());
-        if expected.is_empty() || actual != Some(expected.as_str()) {
+        if !valid_service_token(&expected, actual) {
             return (StatusCode::UNAUTHORIZED, "invalid service credentials\n").into_response();
         }
     }
@@ -218,13 +274,22 @@ async fn service_auth(service: &'static str, request: Request, next: Next) -> Re
 struct Claims {
     sub: String,
     exp: usize,
+    #[serde(default)]
+    roles: Vec<String>,
 }
 
 async fn auth_user(service: &'static str, mut request: Request, next: Next) -> Response {
     let required = env::var("AUTH_REQUIRED").is_ok_and(|value| value == "true");
-    if service != "gateway" || !required || !request.uri().path().starts_with("/v1/") {
+    if service != "gateway"
+        || !required
+        || request.method() == Method::OPTIONS
+        || !request.uri().path().starts_with("/v1/")
+    {
         return next.run(request).await;
     }
+    // Authenticated identity is the only trusted source for these internal headers.
+    request.headers_mut().remove("x-user-id");
+    request.headers_mut().remove("x-user-roles");
     let Some(secret) = env::var("AUTH_JWT_SECRET")
         .ok()
         .filter(|value| !value.is_empty())
@@ -253,15 +318,42 @@ async fn auth_user(service: &'static str, mut request: Request, next: Next) -> R
         _ => return (StatusCode::UNAUTHORIZED, "invalid bearer token\n").into_response(),
     };
     let _expires_at = claims.exp;
-    if let Ok(user_id) = HeaderValue::try_from(claims.sub) {
-        request.headers_mut().insert("x-user-id", user_id);
+    let user_id = match HeaderValue::try_from(claims.sub) {
+        Ok(value) => value,
+        Err(_) => return (StatusCode::UNAUTHORIZED, "invalid bearer token\n").into_response(),
+    };
+    request.headers_mut().insert("x-user-id", user_id);
+    if let Some(roles) = trusted_roles_header(claims.roles) {
+        request.headers_mut().insert("x-user-roles", roles);
     }
     next.run(request).await
 }
 
+fn trusted_roles_header(roles: Vec<String>) -> Option<HeaderValue> {
+    let roles = roles
+        .into_iter()
+        .map(|role| role.trim().to_ascii_lowercase())
+        .filter(|role| {
+            !role.is_empty()
+                && role.len() <= 64
+                && role
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+        .collect::<Vec<_>>();
+    if !roles.is_empty()
+        && let Ok(roles) = HeaderValue::try_from(roles.join(","))
+    {
+        return Some(roles);
+    }
+    None
+}
+
 async fn rate_limit(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
-    if matches!(path.as_str(), "/health" | "/ready" | "/metrics") || env::var("REDIS_URL").is_err()
+    if request.method() == Method::OPTIONS
+        || matches!(path.as_str(), "/health" | "/ready" | "/metrics")
+        || env::var("REDIS_URL").is_err()
     {
         return next.run(request).await;
     }
@@ -382,5 +474,31 @@ async fn shutdown_signal() {
     tokio::select! {
         () = interrupt => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{trusted_roles_header, valid_service_token};
+
+    #[test]
+    fn injects_only_normalized_safe_roles() {
+        let header = trusted_roles_header(vec![
+            " Moderator ".to_string(),
+            "trust_safety".to_string(),
+            "admin,spoofed".to_string(),
+            "moderator role".to_string(),
+        ])
+        .expect("safe roles");
+
+        assert_eq!(header, "moderator,trust_safety");
+    }
+
+    #[test]
+    fn rejects_missing_or_mismatched_service_tokens() {
+        assert!(valid_service_token("service-token", Some("service-token")));
+        assert!(!valid_service_token("", Some("service-token")));
+        assert!(!valid_service_token("service-token", None));
+        assert!(!valid_service_token("service-token", Some("wrong-token")));
     }
 }

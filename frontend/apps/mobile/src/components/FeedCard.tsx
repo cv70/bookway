@@ -1,4 +1,4 @@
-import { Bookmark, Heart, Route, UsersRound } from 'lucide-react-native';
+import { Bookmark, EyeOff, Heart, Route, UsersRound } from 'lucide-react-native';
 import { useEffect } from 'react';
 import { Image, Pressable, StyleSheet, Text, View, type ImageStyle } from 'react-native';
 
@@ -12,8 +12,11 @@ export function FeedCard({
   liked = false,
   bookmarked = false,
   joined = false,
+  joining = false,
+  joinCount,
   onLike,
   onBookmark,
+  onHide,
   onJoin,
   onOpen,
 }: {
@@ -21,10 +24,13 @@ export function FeedCard({
   liked?: boolean;
   bookmarked?: boolean;
   joined?: boolean;
+  joining?: boolean;
+  joinCount?: number;
   onLike?: (postId: string) => void;
   onBookmark?: (postId: string) => void;
+  onHide?: (postId: string) => void;
   onJoin?: (post: FeedItem['post']) => void;
-  onOpen?: (post: FeedItem['post']) => void;
+  onOpen?: (item: FeedItem) => void;
 }) {
   const { post } = item;
   useEffect(() => {
@@ -40,18 +46,18 @@ export function FeedCard({
         </View>
         <DomainBadge domain={post.domain} />
       </View>
-      <Pressable accessibilityLabel={`查看${post.title}`} onPress={() => onOpen?.(post)}>
+      <Pressable accessibilityLabel={`查看${post.title}`} onPress={() => onOpen?.(item)}>
         <Image source={{ uri: post.cover_url }} style={styles.cover as ImageStyle} />
       </Pressable>
       <View style={styles.body}>
-        <Pressable onPress={() => onOpen?.(post)}><Text style={styles.title}>{post.title}</Text><Text numberOfLines={3} style={styles.summary}>{post.summary}</Text></Pressable>
+        <Pressable onPress={() => onOpen?.(item)}><Text style={styles.title}>{post.title}</Text><Text numberOfLines={3} style={styles.summary}>{post.summary}</Text></Pressable>
         <View style={styles.tags}>
           {post.tags.map((tag) => <Text key={tag} style={styles.tag}>#{tag}</Text>)}
         </View>
         <Pressable
-          accessibilityLabel={joined ? '已加入路线' : '加入路线'}
+          accessibilityLabel={joining ? '正在加入路线' : joined ? '已加入路线' : '加入路线'}
           accessibilityRole="button"
-          disabled={joined}
+          disabled={joined || joining}
           onPress={() => onJoin?.(post)}
           style={({ pressed }) => [styles.route, pressed && styles.pressed, joined && styles.routeJoined]}
         >
@@ -61,10 +67,10 @@ export function FeedCard({
             <View style={styles.routeMeta}>
               <Text style={styles.routeMetaText}>{post.route_duration}</Text>
               <UsersRound color={colors.faint} size={13} />
-              <Text style={styles.routeMetaText}>{post.join_count.toLocaleString()} 人加入</Text>
+              <Text style={styles.routeMetaText}>{(joinCount ?? post.join_count).toLocaleString()} 人加入</Text>
             </View>
           </View>
-          <Text style={styles.join}>{joined ? '已加入' : '加入'}</Text>
+          <Text style={styles.join}>{joining ? '加入中' : joined ? '已加入' : '加入'}</Text>
         </Pressable>
         <View style={styles.actions}>
           <Pressable
@@ -75,6 +81,15 @@ export function FeedCard({
           >
             <Heart color={liked ? colors.coral : colors.muted} fill={liked ? colors.coral : 'transparent'} size={20} />
             <Text style={styles.actionText}>{compact(post.like_count)}</Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel="减少此类内容"
+            accessibilityRole="button"
+            hitSlop={8}
+            onPress={() => onHide?.(post.id)}
+            style={styles.action}
+          >
+            <EyeOff color={colors.muted} size={20} />
           </Pressable>
           <Pressable
             accessibilityLabel={bookmarked ? '取消收藏' : '收藏'}

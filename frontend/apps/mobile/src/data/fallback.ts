@@ -41,6 +41,9 @@ export const fallbackJourneys: Journey[] = [
     title: '读懂现代城市',
     intent: '用阅读建立观察一座城市的方法',
     domain: 'learning',
+    journey_type: 'project',
+    completion_criteria: '完成六周阅读与观察记录',
+    stages: [],
     status: 'active',
     progress: 36,
     duration_label: '6 周',
@@ -52,6 +55,9 @@ export const fallbackJourneys: Journey[] = [
     title: '重新跑起来',
     intent: '以不受伤的方式恢复规律运动',
     domain: 'movement',
+    journey_type: 'habit',
+    completion_criteria: '在四周内建立稳定、可恢复的跑步节奏',
+    stages: [],
     status: 'active',
     progress: 58,
     duration_label: '4 周',
@@ -65,6 +71,7 @@ export const fallbackFeed: Feed = {
   meta: { sourced: 5, filtered: 0, selected: 5 },
   items: [
     {
+      author_id: 'author-city-walk',
       score: 4.82,
       source: 'recommend-main:quality',
       reasons: ['符合你的旅行兴趣', '4862 人正在同行'],
@@ -87,6 +94,7 @@ export const fallbackFeed: Feed = {
       },
     },
     {
+      author_id: 'author-reading',
       score: 4.78,
       source: 'recommend-main:quality',
       reasons: ['符合你的学习兴趣', '7130 人正在同行'],
@@ -109,6 +117,7 @@ export const fallbackFeed: Feed = {
       },
     },
     {
+      author_id: 'author-running',
       score: 4.75,
       source: 'recommend-main:quality',
       reasons: ['符合你的运动兴趣', '9854 人正在同行'],
@@ -131,6 +140,7 @@ export const fallbackFeed: Feed = {
       },
     },
     {
+      author_id: 'author-pottery',
       score: 2.43,
       source: 'recommend-main:quality',
       reasons: ['2176 人正在同行'],

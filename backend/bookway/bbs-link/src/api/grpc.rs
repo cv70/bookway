@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)] // tonic::Status is fixed by the transport API.
+
 use super::pb::{self, bbs_link_server::BbsLink};
 use crate::domain::Domain;
 use bookway_api::{ContentQueryRequest, CreateContentRequest, UpdateContentRequest};
@@ -82,6 +84,34 @@ impl BbsLink for GrpcServer {
                 .map_err(internal_error)?,
         )
     }
+
+    async fn restrict(
+        &self,
+        request: Request<pb::RestrictRequest>,
+    ) -> Result<Response<pb::JsonResponse>, Status> {
+        let content_id = request.into_inner().content_id;
+        json_response(
+            &self
+                .domain
+                .restrict(&content_id)
+                .await
+                .map_err(internal_error)?,
+        )
+    }
+
+    async fn restore(
+        &self,
+        request: Request<pb::RestoreRequest>,
+    ) -> Result<Response<pb::JsonResponse>, Status> {
+        let content_id = request.into_inner().content_id;
+        json_response(
+            &self
+                .domain
+                .restore(&content_id)
+                .await
+                .map_err(internal_error)?,
+        )
+    }
 }
 
 pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
@@ -91,9 +121,12 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .await;
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(pb::bbs_link_server::BbsLinkServer::new(GrpcServer {
-            domain: domain.clone(),
-        }))
+        .add_service(pb::bbs_link_server::BbsLinkServer::with_interceptor(
+            GrpcServer {
+                domain: domain.clone(),
+            },
+            bookway_runtime::grpc_service_auth_interceptor,
+        ))
         .serve(domain.config.grpc_addr)
         .await
 }
@@ -107,7 +140,23 @@ fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, Status> {
 }
 
 fn internal_error(error: crate::domain::ContentError) -> Status {
-    Status::internal(error.to_string())
+    match error {
+        crate::domain::ContentError::Validation(message) => Status::invalid_argument(message),
+        crate::domain::ContentError::Forbidden => {
+            Status::permission_denied("content belongs to another author")
+        }
+        crate::domain::ContentError::Repository(crate::datasource::RepositoryError::NotFound(
+            message,
+        )) => Status::not_found(message),
+        crate::domain::ContentError::Repository(
+            crate::datasource::RepositoryError::IdempotencyConflict(message),
+        ) => Status::already_exists(message),
+        crate::domain::ContentError::Repository(
+            crate::datasource::RepositoryError::VersionConflict,
+        ) => Status::aborted("content version conflict"),
+        crate::domain::ContentError::Audit(message) => Status::unavailable(message),
+        crate::domain::ContentError::Repository(error) => Status::internal(error.to_string()),
+    }
 }
 
 fn json_response<T: Serialize>(value: &T) -> Result<Response<pb::JsonResponse>, Status> {

@@ -11,8 +11,18 @@ import {
 } from 'react-native';
 
 import { colors, domainMeta } from '../theme';
-import { Action, CreateActionInput, Journey } from '../types';
+import { Action, CreateActionInput, Journey, JourneyType, Weekday } from '../types';
+import { defaultScheduleTime, scheduleForDay, ScheduleDay } from '../utils/scheduling';
 import { DomainBadge } from './DomainBadge';
+
+const weekdayByIndex: Weekday[] = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const journeyTypeLabels: Record<JourneyType, string> = {
+  habit: '习惯型',
+  project: '项目型',
+  quantity: '数量型',
+  travel: '旅程型',
+  challenge: '挑战型',
+};
 
 type Props = {
   journey?: Journey;
@@ -39,6 +49,10 @@ export function JourneyDetailModal({
   const [title, setTitle] = useState('');
   const [detail, setDetail] = useState('');
   const [minutes, setMinutes] = useState('20');
+  const [scheduleDay, setScheduleDay] = useState<ScheduleDay>('today');
+  const [scheduleTime, setScheduleTime] = useState(defaultScheduleTime());
+  const [stageId, setStageId] = useState<string>();
+  const [repeat, setRepeat] = useState<'none' | 'daily' | 'weekly'>('none');
 
   useEffect(() => {
     if (!visible) return;
@@ -46,6 +60,10 @@ export function JourneyDetailModal({
     setTitle('');
     setDetail('');
     setMinutes('20');
+    setScheduleDay('today');
+    setScheduleTime(defaultScheduleTime());
+    setStageId(undefined);
+    setRepeat('none');
   }, [journey?.id, visible]);
 
   if (!journey) return null;
@@ -54,19 +72,31 @@ export function JourneyDetailModal({
   const done = actions.filter((action) => action.state === 'completed');
   const paused = journey.status === 'paused';
   const completed = journey.status === 'completed';
-  const canAdd = title.trim().length > 0 && Number(minutes) > 0;
+  const schedule = scheduleForDay(scheduleDay, scheduleTime);
+  const canAdd = title.trim().length > 0 && Number(minutes) > 0 && schedule !== null;
 
   const addAction = () => {
-    if (!canAdd) return;
+    if (!canAdd || !schedule) return;
+    const recurrence: CreateActionInput['recurrence'] = repeat === 'none' ? undefined : {
+      frequency: repeat,
+      interval: 1,
+      weekdays: repeat === 'weekly' ? [weekdayForSchedule(schedule.scheduled_for)] : [],
+    };
     onAddAction(journey.id, {
       title: title.trim(),
       detail: detail.trim(),
       estimated_minutes: Math.min(720, Math.max(1, Number(minutes))),
-      scheduled_label: '今天',
+      stage_id: stageId,
+      ...schedule,
+      recurrence,
     });
     setAdding(false);
     setTitle('');
     setDetail('');
+    setScheduleDay('today');
+    setScheduleTime(defaultScheduleTime());
+    setStageId(undefined);
+    setRepeat('none');
   };
 
   return (
@@ -88,6 +118,7 @@ export function JourneyDetailModal({
           </View>
           <Text style={styles.title}>{journey.title}</Text>
           <Text style={styles.intent}>{journey.intent || '为自己留下一条可以慢慢走的路。'}</Text>
+          <Text style={styles.planMeta}>{journeyTypeLabels[journey.journey_type]} · {journey.completion_criteria || '按自己的节奏确认完成条件'}</Text>
 
           <View style={styles.progressCard}>
             <View style={styles.progressLine}>
@@ -129,6 +160,17 @@ export function JourneyDetailModal({
             </View>
           ) : null}
 
+          {journey.stages.length ? (
+            <View style={styles.stagesCard}>
+              <Text style={styles.stagesTitle}>路线阶段</Text>
+              {journey.stages.map((stage) => {
+                const stageActions = actions.filter((action) => action.stage_id === stage.id);
+                const completedActions = stageActions.filter((action) => action.state === 'completed').length;
+                return <View key={stage.id} style={styles.stageRow}><View style={styles.stagePosition}><Text style={styles.stagePositionText}>{stage.position + 1}</Text></View><View style={styles.stageCopy}><Text style={styles.stageName}>{stage.title}</Text><Text style={styles.stageMeta}>{stage.completion_criteria || `${completedActions}/${stageActions.length} 项行动已完成`}</Text></View></View>;
+              })}
+            </View>
+          ) : null}
+
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>行动安排</Text>
             {!completed ? (
@@ -141,6 +183,20 @@ export function JourneyDetailModal({
             <View style={styles.addForm}>
               <TextInput onChangeText={setTitle} placeholder="行动名称" placeholderTextColor={colors.faint} style={styles.input} value={title} />
               <TextInput onChangeText={setDetail} placeholder="备注或完成标准（可选）" placeholderTextColor={colors.faint} style={styles.input} value={detail} />
+              {journey.stages.length ? <View style={styles.stagePicker}><Text style={styles.stagePickerLabel}>所属阶段</Text><ScrollView contentContainerStyle={styles.stageOptions} horizontal showsHorizontalScrollIndicator={false}><Pressable accessibilityRole="radio" accessibilityState={{ checked: !stageId }} onPress={() => setStageId(undefined)} style={[styles.stageOption, !stageId && styles.stageOptionSelected]}><Text style={[styles.stageOptionText, !stageId && styles.stageOptionTextSelected]}>暂不归类</Text></Pressable>{journey.stages.map((stage) => <Pressable accessibilityRole="radio" accessibilityState={{ checked: stageId === stage.id }} key={stage.id} onPress={() => setStageId(stage.id)} style={[styles.stageOption, stageId === stage.id && styles.stageOptionSelected]}><Text style={[styles.stageOptionText, stageId === stage.id && styles.stageOptionTextSelected]}>{stage.title}</Text></Pressable>)}</ScrollView></View> : null}
+              <View style={styles.scheduleRow}>
+                <View style={styles.scheduleDays}>
+                  {([['today', '今天'], ['tomorrow', '明天']] as const).map(([day, label]) => {
+                    const selected = scheduleDay === day;
+                    return <Pressable accessibilityRole="radio" accessibilityState={{ checked: selected }} key={day} onPress={() => setScheduleDay(day)} style={[styles.scheduleDay, selected && styles.scheduleDaySelected]}><Text style={[styles.scheduleDayText, selected && styles.scheduleDayTextSelected]}>{label}</Text></Pressable>;
+                  })}
+                </View>
+                <TextInput accessibilityLabel="行动开始时间" autoCapitalize="none" maxLength={5} onChangeText={setScheduleTime} placeholder="19:00" placeholderTextColor={colors.faint} style={styles.scheduleTime} value={scheduleTime} />
+              </View>
+              {!schedule ? <Text style={styles.scheduleError}>请输入 24 小时制时间，例如 19:00。</Text> : null}
+              <View style={styles.repeatRow}>
+                {([['none', '不重复'], ['daily', '每天'], ['weekly', '每周']] as const).map(([value, label]) => <Pressable accessibilityRole="radio" accessibilityState={{ checked: repeat === value }} key={value} onPress={() => setRepeat(value)} style={[styles.repeatOption, repeat === value && styles.repeatOptionSelected]}><Text style={[styles.repeatOptionText, repeat === value && styles.repeatOptionTextSelected]}>{label}</Text></Pressable>)}
+              </View>
               <View style={styles.addFooter}>
                 <View style={styles.minutesInput}><Clock3 color={colors.faint} size={16} /><TextInput keyboardType="number-pad" onChangeText={setMinutes} style={styles.minutesText} value={minutes} /><Text style={styles.minutesUnit}>分钟</Text></View>
                 <Pressable disabled={!canAdd} onPress={addAction} style={[styles.saveButton, !canAdd && styles.disabled]}><Text style={styles.saveText}>加入安排</Text></Pressable>
@@ -160,6 +216,10 @@ export function JourneyDetailModal({
       </View>
     </Modal>
   );
+}
+
+function weekdayForSchedule(timestamp: string): Weekday {
+  return weekdayByIndex[new Date(timestamp).getDay()] ?? 'monday';
 }
 
 function ActionItem({ action, onPress }: { action: Action; onPress: () => void }) {
@@ -185,6 +245,7 @@ const styles = StyleSheet.create({
   status: { fontSize: 12, fontWeight: '700', letterSpacing: 0 },
   title: { color: colors.ink, fontSize: 26, lineHeight: 35, fontWeight: '700', marginTop: 13, letterSpacing: 0 },
   intent: { color: colors.muted, fontSize: 14, lineHeight: 22, marginTop: 7, letterSpacing: 0 },
+  planMeta: { color: colors.faint, fontSize: 11, lineHeight: 17, marginTop: 8, letterSpacing: 0 },
   progressCard: { marginTop: 23, padding: 16, borderRadius: 8, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
   progressLine: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
   progressTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
@@ -195,11 +256,39 @@ const styles = StyleSheet.create({
   routeActions: { flexDirection: 'row', gap: 10, marginTop: 12 },
   smallAction: { flex: 1, height: 42, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, borderRadius: 6, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
   smallActionText: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  stagesCard: { marginTop: 12, padding: 15, gap: 11, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
+  stagesTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  stageRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  stagePosition: { width: 20, height: 20, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: colors.evergreenSoft },
+  stagePositionText: { color: colors.evergreen, fontSize: 10, fontWeight: '800', letterSpacing: 0 },
+  stageCopy: { flex: 1, minWidth: 0 },
+  stageName: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  stageMeta: { color: colors.faint, fontSize: 11, lineHeight: 16, marginTop: 2, letterSpacing: 0 },
   sectionHeader: { height: 64, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 16 },
   sectionTitle: { color: colors.ink, fontSize: 16, fontWeight: '700', letterSpacing: 0 },
   addButton: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 6, backgroundColor: colors.evergreenSoft },
   addForm: { padding: 13, gap: 9, borderRadius: 7, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, marginBottom: 10 },
   input: { minHeight: 42, borderRadius: 5, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 10, color: colors.ink, backgroundColor: colors.background, fontSize: 13, letterSpacing: 0 },
+  stagePicker: { gap: 6 },
+  stagePickerLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
+  stageOptions: { gap: 7 },
+  stageOption: { height: 30, paddingHorizontal: 10, alignItems: 'center', justifyContent: 'center', borderRadius: 15, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.background },
+  stageOptionSelected: { borderColor: colors.evergreen, backgroundColor: colors.evergreenSoft },
+  stageOptionText: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
+  stageOptionTextSelected: { color: colors.evergreen },
+  scheduleRow: { height: 40, flexDirection: 'row', gap: 8 },
+  scheduleDays: { flex: 1, flexDirection: 'row', overflow: 'hidden', borderWidth: 1, borderColor: colors.line, borderRadius: 5 },
+  scheduleDay: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background },
+  scheduleDaySelected: { backgroundColor: colors.evergreen },
+  scheduleDayText: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
+  scheduleDayTextSelected: { color: colors.surface },
+  scheduleTime: { width: 82, borderRadius: 5, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 10, color: colors.ink, backgroundColor: colors.background, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  scheduleError: { marginTop: -3, color: colors.coral, fontSize: 11, lineHeight: 16, letterSpacing: 0 },
+  repeatRow: { height: 34, flexDirection: 'row', overflow: 'hidden', borderWidth: 1, borderColor: colors.line, borderRadius: 5 },
+  repeatOption: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background },
+  repeatOptionSelected: { backgroundColor: colors.evergreen },
+  repeatOptionText: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
+  repeatOptionTextSelected: { color: colors.surface },
   addFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   minutesInput: { flex: 1, height: 40, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 5, backgroundColor: colors.background },
   minutesText: { width: 28, paddingVertical: 0, color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },

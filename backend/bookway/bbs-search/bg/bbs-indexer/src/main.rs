@@ -94,7 +94,7 @@ async fn ensure_index(
     if exists.status().is_success() {
         return Ok(());
     }
-    let body = serde_json::json!({ "settings": { "number_of_shards": 3, "number_of_replicas": 1, "analysis": { "analyzer": { "bookway_cjk": { "type": "cjk" } } } }, "mappings": { "dynamic": true, "properties": { "title": { "type": "text", "analyzer": "bookway_cjk" }, "summary": { "type": "text", "analyzer": "bookway_cjk" }, "body": { "type": "text", "analyzer": "bookway_cjk" }, "status": { "type": "keyword" }, "author_id": { "type": "keyword" }, "content_type": { "type": "keyword" }, "domain": { "type": "keyword" }, "topics": { "type": "keyword" }, "tags": { "type": "keyword" } } } });
+    let body = serde_json::json!({ "settings": { "number_of_shards": 3, "number_of_replicas": 1, "analysis": { "analyzer": { "bookway_cjk": { "type": "cjk" } } } }, "mappings": { "dynamic": true, "properties": { "id": { "type": "text", "fields": { "keyword": { "type": "keyword" } } }, "title": { "type": "text", "analyzer": "bookway_cjk" }, "summary": { "type": "text", "analyzer": "bookway_cjk" }, "body": { "type": "text", "analyzer": "bookway_cjk" }, "status": { "type": "keyword" }, "author_id": { "type": "keyword" }, "content_type": { "type": "keyword" }, "domain": { "type": "keyword" }, "topics": { "type": "keyword" }, "tags": { "type": "keyword" } } } });
     let created = client
         .put(format!("{url}/{index}"))
         .json(&body)

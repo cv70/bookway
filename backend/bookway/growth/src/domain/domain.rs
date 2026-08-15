@@ -34,6 +34,7 @@ impl Domain {
         Ok(Self { config, repository })
     }
 
+    #[cfg(test)]
     pub(crate) fn from_repository(config: Config, repository: Arc<dyn GrowthRepository>) -> Self {
         Self { config, repository }
     }

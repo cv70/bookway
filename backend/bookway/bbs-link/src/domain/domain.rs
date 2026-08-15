@@ -53,6 +53,7 @@ impl Domain {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn from_repositories(
         config: Config,
         repository: Arc<dyn ContentRepository>,
@@ -65,6 +66,7 @@ impl Domain {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_auditor(mut self, auditor: Arc<dyn ContentAuditor>) -> Self {
         self.auditor = auditor;
         self

@@ -27,13 +27,14 @@ const moods: Array<{ key: EntryMood; label: string; color: string }> = [
 type Props = {
   visible: boolean;
   actionId?: string;
+  initialDurationMinutes?: number;
   journeyId?: string;
   journeys: Journey[];
   onClose: () => void;
   onSubmit: (entry: CreateEntryInput) => void;
 };
 
-export function CreateEntryModal({ visible, actionId, journeyId, journeys, onClose, onSubmit }: Props) {
+export function CreateEntryModal({ visible, actionId, initialDurationMinutes, journeyId, journeys, onClose, onSubmit }: Props) {
   const [body, setBody] = useState('');
   const [mood, setMood] = useState<EntryMood>('steady');
   const [minutes, setMinutes] = useState('');
@@ -46,12 +47,12 @@ export function CreateEntryModal({ visible, actionId, journeyId, journeys, onClo
     if (!visible) return;
     setBody('');
     setMood('steady');
-    setMinutes('');
+    setMinutes(initialDurationMinutes ? String(initialDurationMinutes) : '');
     setQuantity('');
     setLocation('');
     setPhotoUrl('');
     setPublish(false);
-  }, [actionId, journeyId, visible]);
+  }, [actionId, initialDurationMinutes, journeyId, visible]);
 
   const resolvedJourneyId = journeyId ?? journeys[0]?.id;
   const ready = body.trim().length > 0;
@@ -120,6 +121,7 @@ export function CreateEntryModal({ visible, actionId, journeyId, journeys, onClo
                 <TextInput onChangeText={setQuantity} placeholder="如 3 km" placeholderTextColor={colors.faint} style={styles.compactTextInput} value={quantity} />
               </View>
             </View>
+            {initialDurationMinutes ? <Text style={styles.timerHint}>已根据本次专注计时填入 {initialDurationMinutes} 分钟，你仍可手动调整。</Text> : null}
             <View style={styles.field}>
               <Text style={styles.label}>地点</Text>
               <View style={styles.inputWithIcon}><MapPin color={colors.faint} size={16} /><TextInput onChangeText={setLocation} placeholder="可选" placeholderTextColor={colors.faint} style={styles.compactInput} value={location} /></View>
@@ -157,6 +159,7 @@ const styles = StyleSheet.create({
   moodText: { color: colors.faint, fontSize: 10, fontWeight: '600', letterSpacing: 0 },
   moodTextSelected: { color: colors.ink },
   metrics: { flexDirection: 'row', gap: 12 },
+  timerHint: { marginTop: -10, color: colors.evergreen, fontSize: 11, lineHeight: 17, letterSpacing: 0 },
   metricField: { flex: 1, minWidth: 0 },
   inputWithIcon: { height: 44, paddingHorizontal: 11, flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 6, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.background },
   compactInput: { flex: 1, minWidth: 0, paddingVertical: 0, color: colors.ink, fontSize: 13, letterSpacing: 0 },

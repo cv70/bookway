@@ -2,6 +2,7 @@ import { BookOpenText, ChevronRight, Clock3, Plus, X } from 'lucide-react-native
 import { useEffect, useMemo, useState } from 'react';
 import {
   KeyboardAvoidingView,
+  ActivityIndicator,
   Modal,
   Platform,
   Pressable,
@@ -22,7 +23,7 @@ type Props = {
   visible: boolean;
   onClose: () => void;
   onOpenBook: (book: ReadingBook) => void;
-  onCreateBook: (input: CreateReadingBookInput) => void;
+  onCreateBook: (input: CreateReadingBookInput) => Promise<void>;
 };
 
 export function ReadingLibraryModal({ books, bookmarks, visible, onClose, onOpenBook, onCreateBook }: Props) {
@@ -30,6 +31,8 @@ export function ReadingLibraryModal({ books, bookmarks, visible, onClose, onOpen
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [content, setContent] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState(false);
 
   useEffect(() => {
     if (!visible) return;
@@ -37,6 +40,8 @@ export function ReadingLibraryModal({ books, bookmarks, visible, onClose, onOpen
     setTitle('');
     setAuthor('');
     setContent('');
+    setCreating(false);
+    setCreateError(false);
   }, [visible]);
 
   const orderedBooks = useMemo(
@@ -46,13 +51,21 @@ export function ReadingLibraryModal({ books, bookmarks, visible, onClose, onOpen
   const currentBook = orderedBooks[0];
   const canCreate = title.trim().length > 0;
 
-  const createBook = () => {
-    if (!canCreate) return;
-    onCreateBook({ title: title.trim(), author: author.trim(), content: content.trim() || undefined });
-    setAdding(false);
-    setTitle('');
-    setAuthor('');
-    setContent('');
+  const createBook = async () => {
+    if (!canCreate || creating) return;
+    setCreating(true);
+    setCreateError(false);
+    try {
+      await onCreateBook({ title: title.trim(), author: author.trim(), content: content.trim() || undefined });
+      setAdding(false);
+      setTitle('');
+      setAuthor('');
+      setContent('');
+    } catch {
+      setCreateError(true);
+    } finally {
+      setCreating(false);
+    }
   };
 
   return (
@@ -63,7 +76,7 @@ export function ReadingLibraryModal({ books, bookmarks, visible, onClose, onOpen
           <Pressable accessibilityLabel="关闭书架" hitSlop={10} onPress={onClose} style={styles.iconButton}>
             <X color={colors.ink} size={22} />
           </Pressable>
-          <Text style={styles.headerTitle}>我的书架</Text>
+          <Text style={styles.headerTitle}>资源与知识库</Text>
           <Pressable accessibilityLabel="新建阅读文本" hitSlop={10} onPress={() => setAdding((value) => !value)} style={styles.iconButton}>
             {adding ? <X color={colors.ink} size={21} /> : <Plus color={colors.evergreen} size={23} />}
           </Pressable>
@@ -76,9 +89,10 @@ export function ReadingLibraryModal({ books, bookmarks, visible, onClose, onOpen
               <TextInput accessibilityLabel="书名" onChangeText={setTitle} placeholder="书名" placeholderTextColor={colors.faint} style={styles.input} value={title} />
               <TextInput accessibilityLabel="作者" onChangeText={setAuthor} placeholder="作者或来源（可选）" placeholderTextColor={colors.faint} style={styles.input} value={author} />
               <TextInput accessibilityLabel="阅读正文" multiline onChangeText={setContent} placeholder="写下要阅读的段落或导读（可选）" placeholderTextColor={colors.faint} style={styles.contentInput} textAlignVertical="top" value={content} />
-              <Pressable accessibilityRole="button" disabled={!canCreate} onPress={createBook} style={({ pressed }) => [styles.createButton, !canCreate && styles.disabled, pressed && canCreate && styles.pressed]}>
-                <BookOpenText color={colors.surface} size={18} />
-                <Text style={styles.createButtonText}>创建并阅读</Text>
+              {createError ? <Text style={styles.createError}>保存失败，请检查网络后重试</Text> : null}
+              <Pressable accessibilityRole="button" disabled={!canCreate || creating} onPress={createBook} style={({ pressed }) => [styles.createButton, (!canCreate || creating) && styles.disabled, pressed && canCreate && !creating && styles.pressed]}>
+                {creating ? <ActivityIndicator color={colors.surface} size="small" /> : <BookOpenText color={colors.surface} size={18} />}
+                <Text style={styles.createButtonText}>{creating ? '正在保存' : '创建并阅读'}</Text>
               </Pressable>
             </View>
           ) : null}
@@ -103,7 +117,7 @@ export function ReadingLibraryModal({ books, bookmarks, visible, onClose, onOpen
           ) : null}
 
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>书架</Text>
+            <Text style={styles.sectionTitle}>阅读资源</Text>
             <Text style={styles.sectionMeta}>{books.length} 本</Text>
           </View>
           <View style={styles.bookList}>
@@ -164,6 +178,7 @@ const styles = StyleSheet.create({
   contentInput: { minHeight: 112, padding: 12, borderWidth: 1, borderColor: colors.line, borderRadius: 6, color: colors.ink, backgroundColor: colors.background, fontSize: 14, lineHeight: 21, letterSpacing: 0 },
   createButton: { height: 46, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 6, backgroundColor: colors.evergreen },
   createButtonText: { color: colors.surface, fontSize: 14, fontWeight: '700', letterSpacing: 0 },
+  createError: { color: colors.coral, fontSize: 12, lineHeight: 18, letterSpacing: 0 },
   disabled: { opacity: 0.35 },
   continueSection: { padding: 20, backgroundColor: colors.surface },
   eyebrow: { color: colors.evergreen, fontSize: 11, fontWeight: '700', marginBottom: 11, letterSpacing: 0 },

@@ -1,13 +1,16 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use bookway_api::{ReactionContextDto, SocialContextDto};
+use bookway_api::{
+    ReactionContextDto, RouteParticipationContextDto, SocialContextDto, SocialVisibilityDto,
+};
 use bookway_bbs::api::pb::{self as bbs_pb, bbs_client::BbsClient};
 use bookway_commonlikestatus::api::pb::{
     self as like_pb, common_like_status_client::CommonLikeStatusClient,
 };
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tonic::Request;
 
 #[derive(Debug, Error)]
 pub(crate) enum RecallClientError {
@@ -35,6 +38,15 @@ pub(crate) enum ModelClientError {
 #[async_trait]
 pub(crate) trait BbsContextDataSource: Send + Sync {
     async fn context(&self, user_id: &str) -> Result<SocialContextDto, BbsClientError>;
+    async fn visibility_context(
+        &self,
+        user_id: &str,
+    ) -> Result<SocialVisibilityDto, BbsClientError>;
+    async fn route_context(
+        &self,
+        user_id: &str,
+        route_ids: Vec<String>,
+    ) -> Result<RouteParticipationContextDto, BbsClientError>;
 }
 pub(crate) struct GrpcBbsContextDataSource {
     client: BbsClient<tonic::transport::Channel>,
@@ -51,15 +63,54 @@ impl BbsContextDataSource for GrpcBbsContextDataSource {
     async fn context(&self, user_id: &str) -> Result<SocialContextDto, BbsClientError> {
         let mut client = self.client.clone();
         let response = client
-            .context(bbs_pb::ContextRequest {
+            .context(privileged_bbs_request(bbs_pb::ContextRequest {
                 user_id: user_id.to_string(),
-            })
+            })?)
             .await
             .map_err(|error| BbsClientError::Request(error.to_string()))?
             .into_inner();
         serde_json::from_str(&response.response_json)
             .map_err(|error| BbsClientError::Request(error.to_string()))
     }
+
+    async fn visibility_context(
+        &self,
+        user_id: &str,
+    ) -> Result<SocialVisibilityDto, BbsClientError> {
+        let mut client = self.client.clone();
+        let response = client
+            .visibility_context(privileged_bbs_request(bbs_pb::ContextRequest {
+                user_id: user_id.to_string(),
+            })?)
+            .await
+            .map_err(|error| BbsClientError::Request(error.to_string()))?
+            .into_inner();
+        serde_json::from_str(&response.response_json)
+            .map_err(|error| BbsClientError::Request(error.to_string()))
+    }
+
+    async fn route_context(
+        &self,
+        user_id: &str,
+        route_ids: Vec<String>,
+    ) -> Result<RouteParticipationContextDto, BbsClientError> {
+        let mut client = self.client.clone();
+        let response = client
+            .route_context(privileged_bbs_request(bbs_pb::RouteContextRequest {
+                user_id: user_id.to_string(),
+                route_ids,
+            })?)
+            .await
+            .map_err(|error| BbsClientError::Request(error.to_string()))?
+            .into_inner();
+        serde_json::from_str(&response.response_json)
+            .map_err(|error| BbsClientError::Request(error.to_string()))
+    }
+}
+
+fn privileged_bbs_request<T>(message: T) -> Result<Request<T>, BbsClientError> {
+    bookway_runtime::grpc_service_request(message)
+        .map_err(|error| BbsClientError::Request(error.to_string()))
 }
 
 #[async_trait]
@@ -127,7 +178,12 @@ pub(crate) struct ExposureItem {
 #[async_trait]
 pub(crate) trait ExposureDataSource: Send + Sync {
     async fn record(&self, exposure: Exposure);
-    async fn recent_content_ids(&self, user_id: &str, limit: usize) -> HashSet<String>;
+    async fn recent_content_ids(
+        &self,
+        user_id: &str,
+        surface: &str,
+        limit: usize,
+    ) -> HashSet<String>;
 }
 #[derive(Default)]
 pub(crate) struct MemoryExposureDataSource {
@@ -146,13 +202,18 @@ impl ExposureDataSource for MemoryExposureDataSource {
         }
     }
 
-    async fn recent_content_ids(&self, user_id: &str, limit: usize) -> HashSet<String> {
+    async fn recent_content_ids(
+        &self,
+        user_id: &str,
+        surface: &str,
+        limit: usize,
+    ) -> HashSet<String> {
         let exposures = self.exposures.read().await;
         let mut content_ids = HashSet::new();
         for exposure in exposures
             .iter()
             .rev()
-            .filter(|exposure| exposure.user_id == user_id)
+            .filter(|exposure| exposure.user_id == user_id && exposure.surface == surface)
         {
             for item in &exposure.items {
                 content_ids.insert(item.content_id.clone());
@@ -224,11 +285,17 @@ impl ExposureDataSource for PostgresExposureDataSource {
         }
     }
 
-    async fn recent_content_ids(&self, user_id: &str, limit: usize) -> HashSet<String> {
+    async fn recent_content_ids(
+        &self,
+        user_id: &str,
+        surface: &str,
+        limit: usize,
+    ) -> HashSet<String> {
         let rows = sqlx::query_scalar::<_, String>(
-            "SELECT item.content_id FROM feed_exposure_items AS item INNER JOIN feed_exposures AS exposure ON exposure.request_id = item.request_id WHERE exposure.user_id = $1 AND exposure.created_at > now() - interval '7 days' ORDER BY exposure.created_at DESC, item.position ASC LIMIT $2",
+            "SELECT item.content_id FROM feed_exposure_items AS item INNER JOIN feed_exposures AS exposure ON exposure.request_id = item.request_id WHERE exposure.user_id = $1 AND exposure.surface = $2 AND exposure.created_at > now() - interval '7 days' ORDER BY exposure.created_at DESC, item.position ASC LIMIT $3",
         )
         .bind(user_id)
+        .bind(surface)
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .fetch_all(&self.pool)
         .await;
@@ -272,9 +339,20 @@ mod tests {
             })
             .await;
 
-        let history = source.recent_content_ids("user-1", 20).await;
+        let history = source.recent_content_ids("user-1", "home", 20).await;
 
         assert!(history.contains("content-1"));
-        assert!(source.recent_content_ids("user-2", 20).await.is_empty());
+        assert!(
+            source
+                .recent_content_ids("user-1", "following", 20)
+                .await
+                .is_empty()
+        );
+        assert!(
+            source
+                .recent_content_ids("user-2", "home", 20)
+                .await
+                .is_empty()
+        );
     }
 }

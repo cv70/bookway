@@ -5,6 +5,56 @@ pub struct AuditRequest {
     pub request_json: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReportRequest {
+    #[prost(string, tag = "1")]
+    pub reporter_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub content_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub idempotency_key: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AppealRequest {
+    #[prost(string, tag = "1")]
+    pub appellant_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub content_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub idempotency_key: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListReportsRequest {
+    #[prost(string, tag = "1")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReviewReportRequest {
+    #[prost(string, tag = "1")]
+    pub reviewer_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub report_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListAppealsRequest {
+    #[prost(string, tag = "1")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReviewAppealRequest {
+    #[prost(string, tag = "1")]
+    pub reviewer_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub appeal_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JsonResponse {
     #[prost(string, tag = "1")]
     pub response_json: ::prost::alloc::string::String,
@@ -121,6 +171,140 @@ pub mod content_audit_client {
                 .insert(GrpcMethod::new("bookway.content.audit.ContentAudit", "Audit"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn report(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReportRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.content.audit.ContentAudit/Report",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.content.audit.ContentAudit", "Report"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn appeal(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AppealRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.content.audit.ContentAudit/Appeal",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.content.audit.ContentAudit", "Appeal"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_reports(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListReportsRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.content.audit.ContentAudit/ListReports",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.content.audit.ContentAudit", "ListReports"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn review_report(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReviewReportRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.content.audit.ContentAudit/ReviewReport",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.content.audit.ContentAudit", "ReviewReport"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_appeals(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListAppealsRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.content.audit.ContentAudit/ListAppeals",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.content.audit.ContentAudit", "ListAppeals"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn review_appeal(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReviewAppealRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.content.audit.ContentAudit/ReviewAppeal",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.content.audit.ContentAudit", "ReviewAppeal"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -139,6 +323,30 @@ pub mod content_audit_server {
         async fn audit(
             &self,
             request: tonic::Request<super::AuditRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn report(
+            &self,
+            request: tonic::Request<super::ReportRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn appeal(
+            &self,
+            request: tonic::Request<super::AppealRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn list_reports(
+            &self,
+            request: tonic::Request<super::ListReportsRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn review_report(
+            &self,
+            request: tonic::Request<super::ReviewReportRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn list_appeals(
+            &self,
+            request: tonic::Request<super::ListAppealsRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn review_appeal(
+            &self,
+            request: tonic::Request<super::ReviewAppealRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
     }
     #[derive(Debug)]
@@ -246,6 +454,276 @@ pub mod content_audit_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = AuditSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.content.audit.ContentAudit/Report" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReportSvc<T: ContentAudit>(pub Arc<T>);
+                    impl<
+                        T: ContentAudit,
+                    > tonic::server::UnaryService<super::ReportRequest>
+                    for ReportSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReportRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ContentAudit>::report(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReportSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.content.audit.ContentAudit/Appeal" => {
+                    #[allow(non_camel_case_types)]
+                    struct AppealSvc<T: ContentAudit>(pub Arc<T>);
+                    impl<
+                        T: ContentAudit,
+                    > tonic::server::UnaryService<super::AppealRequest>
+                    for AppealSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AppealRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ContentAudit>::appeal(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AppealSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.content.audit.ContentAudit/ListReports" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListReportsSvc<T: ContentAudit>(pub Arc<T>);
+                    impl<
+                        T: ContentAudit,
+                    > tonic::server::UnaryService<super::ListReportsRequest>
+                    for ListReportsSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListReportsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ContentAudit>::list_reports(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListReportsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.content.audit.ContentAudit/ReviewReport" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReviewReportSvc<T: ContentAudit>(pub Arc<T>);
+                    impl<
+                        T: ContentAudit,
+                    > tonic::server::UnaryService<super::ReviewReportRequest>
+                    for ReviewReportSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReviewReportRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ContentAudit>::review_report(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReviewReportSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.content.audit.ContentAudit/ListAppeals" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListAppealsSvc<T: ContentAudit>(pub Arc<T>);
+                    impl<
+                        T: ContentAudit,
+                    > tonic::server::UnaryService<super::ListAppealsRequest>
+                    for ListAppealsSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListAppealsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ContentAudit>::list_appeals(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListAppealsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.content.audit.ContentAudit/ReviewAppeal" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReviewAppealSvc<T: ContentAudit>(pub Arc<T>);
+                    impl<
+                        T: ContentAudit,
+                    > tonic::server::UnaryService<super::ReviewAppealRequest>
+                    for ReviewAppealSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReviewAppealRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ContentAudit>::review_appeal(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReviewAppealSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use super::{Candidate, CandidateSelector};
 
 pub(crate) struct DiversitySelector;
@@ -13,29 +11,94 @@ impl CandidateSelector for DiversitySelector {
                 .then_with(|| left.post.id.cmp(&right.post.id))
         });
         let mut selected: Vec<Candidate> = Vec::with_capacity(limit.min(candidates.len()));
-        let mut author_counts = HashMap::<String, usize>::new();
 
         while !candidates.is_empty() && selected.len() < limit {
-            let last_domain = selected.last().map(|candidate| candidate.post.domain);
-            let index = candidates
-                .iter()
-                .position(|candidate| {
-                    Some(candidate.post.domain) != last_domain
-                        && author_counts
-                            .get(&candidate.author_id)
-                            .copied()
-                            .unwrap_or_default()
-                            < 2
-                })
-                .unwrap_or(0);
-            let candidate = candidates.remove(index);
-            *author_counts
-                .entry(candidate.author_id.clone())
-                .or_default() += 1;
+            // Apply strict local-window rules first, then progressively relax
+            // them so a narrow candidate pool can still fill the response.
+            let index = [
+                RuleLevel::Strict,
+                RuleLevel::Balanced,
+                RuleLevel::AuthorOnly,
+            ]
+            .into_iter()
+            .find_map(|level| {
+                candidates
+                    .iter()
+                    .position(|candidate| passes(level, &selected, candidate))
+            })
+            .unwrap_or_default();
+            let mut candidate = candidates.remove(index);
+            if index > 0 {
+                candidate
+                    .reasons
+                    .push("已做作者与主题多样性打散".to_string());
+            }
             selected.push(candidate);
         }
         selected
     }
+}
+
+#[derive(Clone, Copy)]
+enum RuleLevel {
+    Strict,
+    Balanced,
+    AuthorOnly,
+}
+
+fn passes(level: RuleLevel, selected: &[Candidate], next: &Candidate) -> bool {
+    let author_window = match level {
+        RuleLevel::Strict => 4,
+        RuleLevel::Balanced => 3,
+        RuleLevel::AuthorOnly => 2,
+    };
+    if selected
+        .iter()
+        .rev()
+        .take(author_window)
+        .any(|item| item.author_id == next.author_id)
+    {
+        return false;
+    }
+    if matches!(level, RuleLevel::AuthorOnly) {
+        return true;
+    }
+
+    if matches!(level, RuleLevel::Strict)
+        && selected
+            .last()
+            .is_some_and(|previous| previous.post.domain == next.post.domain)
+    {
+        return false;
+    }
+
+    let domain_limit = if matches!(level, RuleLevel::Strict) {
+        2
+    } else {
+        3
+    };
+    if selected
+        .iter()
+        .rev()
+        .take(4)
+        .filter(|item| item.post.domain == next.post.domain)
+        .count()
+        >= domain_limit
+    {
+        return false;
+    }
+    if matches!(level, RuleLevel::Strict)
+        && selected.last().is_some_and(|previous| {
+            previous
+                .post
+                .tags
+                .iter()
+                .any(|tag| next.post.tags.contains(tag))
+        })
+    {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -74,6 +137,7 @@ mod tests {
             muted_author: false,
             liked: false,
             bookmarked: false,
+            hidden: false,
             previously_served: false,
         }
     }
@@ -96,5 +160,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["travel-1", "learning-1", "travel-2"]
         );
+    }
+
+    #[test]
+    fn uses_progressive_fallback_without_starving_narrow_pools() {
+        let selected = DiversitySelector.select(
+            vec![
+                candidate("a-1", "author-a", GrowthDomainDto::Learning, 4.0),
+                candidate("a-2", "author-a", GrowthDomainDto::Learning, 3.0),
+                candidate("a-3", "author-a", GrowthDomainDto::Learning, 2.0),
+            ],
+            3,
+        );
+
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].post.id, "a-1");
     }
 }

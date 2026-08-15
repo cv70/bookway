@@ -33,15 +33,19 @@ impl ContentDataSource {
             status: Some(ContentStatusDto::Published),
             strategy: Some(strategy.to_string()),
             ids: None,
+            author_id: None,
             content_type: None,
             domain,
         };
         let mut client = self.client.clone();
         let response = client
-            .list(pb::ListRequest {
-                request_json: serde_json::to_string(&request)
-                    .map_err(|error| DataSourceError::Request(error.to_string()))?,
-            })
+            .list(
+                bookway_runtime::grpc_service_request(pb::ListRequest {
+                    request_json: serde_json::to_string(&request)
+                        .map_err(|error| DataSourceError::Request(error.to_string()))?,
+                })
+                .map_err(|error| DataSourceError::Request(error.to_string()))?,
+            )
             .await
             .map_err(|error| DataSourceError::Request(error.to_string()))?
             .into_inner();

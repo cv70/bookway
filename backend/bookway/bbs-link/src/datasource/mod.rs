@@ -297,6 +297,12 @@ impl ContentRepository for MemoryContentRepository {
             })
             .filter(|content| {
                 query
+                    .author_id
+                    .as_deref()
+                    .is_none_or(|author_id| content.author_id == author_id)
+            })
+            .filter(|content| {
+                query
                     .content_type
                     .is_none_or(|content_type| content.content_type == content_type)
             })
@@ -421,11 +427,12 @@ impl ContentRepository for PostgresContentRepository {
             "quality_score DESC, created_at DESC, id DESC"
         };
         let sql = format!(
-            "SELECT payload, COUNT(*) OVER() AS total_count FROM content_items WHERE deleted_at IS NULL AND ($1::text IS NULL OR status = $1) AND ($2::text IS NULL OR id = ANY(string_to_array($2, ','))) AND ($5::text IS NULL OR content_type = $5) AND ($6::text IS NULL OR domain = $6) ORDER BY {order} LIMIT $3 OFFSET $4"
+            "SELECT payload, COUNT(*) OVER() AS total_count FROM content_items WHERE deleted_at IS NULL AND ($1::text IS NULL OR status = $1) AND ($2::text IS NULL OR id = ANY(string_to_array($2, ','))) AND ($3::text IS NULL OR author_id = $3) AND ($6::text IS NULL OR content_type = $6) AND ($7::text IS NULL OR domain = $7) ORDER BY {order} LIMIT $4 OFFSET $5"
         );
         let rows = sqlx::query_as::<_, (serde_json::Value, i64)>(&sql)
             .bind(status)
             .bind(query.ids.as_deref())
+            .bind(query.author_id.as_deref())
             .bind(limit + 1)
             .bind(offset)
             .bind(query.content_type.map(content_type_name))

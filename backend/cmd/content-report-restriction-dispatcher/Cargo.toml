@@ -1,0 +1,21 @@
+[package]
+name = "bookway-content-report-restriction-dispatcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bookway-bbs-link.workspace = true
+bookway-data.workspace = true
+bookway-runtime.workspace = true
+futures.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

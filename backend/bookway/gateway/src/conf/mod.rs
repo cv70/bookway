@@ -1,6 +1,10 @@
 use std::{env, net::SocketAddr};
 
+use axum::http::HeaderValue;
 use bookway_runtime::RuntimeError;
+
+const DEFAULT_CORS_ALLOWED_ORIGINS: &str =
+    "http://127.0.0.1:8081,http://localhost:8081,http://127.0.0.1:19006,http://localhost:19006";
 
 #[derive(Clone)]
 pub(crate) struct Config {
@@ -14,6 +18,8 @@ pub(crate) struct Config {
     pub(crate) like_status_url: String,
     pub(crate) user_event_url: String,
     pub(crate) media_url: String,
+    pub(crate) content_audit_url: String,
+    pub(crate) cors_allowed_origins: Vec<HeaderValue>,
 }
 
 impl Config {
@@ -29,10 +35,75 @@ impl Config {
             like_status_url: grpc_url("LIKE_STATUS_GRPC_URL", "http://127.0.0.1:18007"),
             user_event_url: grpc_url("USER_EVENT_GRPC_URL", "http://127.0.0.1:18089"),
             media_url: grpc_url("MEDIA_GRPC_URL", "http://127.0.0.1:18091"),
+            content_audit_url: grpc_url("CONTENT_AUDIT_GRPC_URL", "http://127.0.0.1:8092"),
+            cors_allowed_origins: cors_allowed_origins()?,
         })
     }
 }
 
 fn grpc_url(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn cors_allowed_origins() -> Result<Vec<HeaderValue>, RuntimeError> {
+    let configured = env::var("CORS_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| DEFAULT_CORS_ALLOWED_ORIGINS.to_string());
+    parse_cors_allowed_origins(&configured)
+}
+
+fn parse_cors_allowed_origins(value: &str) -> Result<Vec<HeaderValue>, RuntimeError> {
+    let origins = value
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(|origin| {
+            let is_http_origin = origin.starts_with("http://") || origin.starts_with("https://");
+            let origin_without_scheme = origin
+                .split_once("://")
+                .map(|(_, value)| value)
+                .unwrap_or_default();
+            if origin == "*"
+                || !is_http_origin
+                || origin_without_scheme.is_empty()
+                || origin_without_scheme.contains(['/', '?', '#'])
+            {
+                return Err(RuntimeError::InvalidCorsOrigins {
+                    value: value.to_string(),
+                });
+            }
+            origin
+                .parse::<HeaderValue>()
+                .map_err(|_| RuntimeError::InvalidCorsOrigins {
+                    value: value.to_string(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if origins.is_empty() {
+        return Err(RuntimeError::InvalidCorsOrigins {
+            value: value.to_string(),
+        });
+    }
+    Ok(origins)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cors_allowed_origins;
+
+    #[test]
+    fn accepts_explicit_http_origins() {
+        let origins =
+            parse_cors_allowed_origins("https://app.bookway.example, http://localhost:8081")
+                .expect("origins should parse");
+
+        assert_eq!(origins.len(), 2);
+        assert_eq!(origins[0], "https://app.bookway.example");
+    }
+
+    #[test]
+    fn rejects_wildcards_and_non_origins() {
+        assert!(parse_cors_allowed_origins("*").is_err());
+        assert!(parse_cors_allowed_origins("https://app.bookway.example/path").is_err());
+        assert!(parse_cors_allowed_origins("bookway://mobile").is_err());
+    }
 }

@@ -36,7 +36,7 @@ impl Domain {
 mod tests {
     use std::sync::Arc;
 
-    use bookway_api::{ReactionRequest, ReactionTypeDto};
+    use bookway_api::{ReactionContextRequest, ReactionRequest, ReactionTypeDto};
 
     use super::*;
     use crate::{conf::Config, datasource::MemoryLikeStatusRepository};
@@ -45,8 +45,8 @@ mod tests {
     async fn repeated_like_is_idempotent() {
         let domain = Domain::from_repository(
             Config {
-                listen_addr: "127.0.0.1:0".parse().unwrap(),
-                grpc_addr: "127.0.0.1:0".parse().unwrap(),
+                listen_addr: "127.0.0.1:0".parse().expect("valid HTTP address"),
+                grpc_addr: "127.0.0.1:0".parse().expect("valid gRPC address"),
             },
             Arc::new(MemoryLikeStatusRepository::seeded()),
         );
@@ -64,5 +64,37 @@ mod tests {
             .expect("second reaction");
         assert_eq!(first.count, second.count);
         assert_eq!(second.count, 1);
+    }
+
+    #[tokio::test]
+    async fn hide_is_returned_in_the_users_recommendation_context() {
+        let domain = Domain::from_repository(
+            Config {
+                listen_addr: "127.0.0.1:0".parse().expect("valid HTTP address"),
+                grpc_addr: "127.0.0.1:0".parse().expect("valid gRPC address"),
+            },
+            Arc::new(MemoryLikeStatusRepository::seeded()),
+        );
+        domain
+            .set_reaction(
+                "user-a",
+                "post-a",
+                ReactionRequest {
+                    reaction: ReactionTypeDto::Hide,
+                    active: true,
+                },
+            )
+            .await
+            .expect("hide reaction");
+
+        let context = domain
+            .context(ReactionContextRequest {
+                user_id: Some("user-a".to_string()),
+                post_ids: Some("post-a,post-b".to_string()),
+            })
+            .await
+            .expect("reaction context");
+
+        assert_eq!(context.hidden_post_ids, ["post-a"]);
     }
 }

@@ -11,15 +11,16 @@ import {
 
 import { colors } from '../theme';
 import { Action, ActionUpdate } from '../types';
+import { tomorrowScheduleFrom } from '../utils/scheduling';
 
 type Props = {
   action?: Action;
   journeyTitle?: string;
   visible: boolean;
   onClose: () => void;
-  onComplete: (actionId: string) => void;
+  onComplete: (actionId: string) => Promise<boolean>;
   onUpdate: (actionId: string, updates: ActionUpdate) => void;
-  onCreateEntry: (action: Action) => void;
+  onCreateEntry: (action: Action, elapsedSeconds: number) => void;
 };
 
 export function ActionDetailModal({
@@ -33,11 +34,15 @@ export function ActionDetailModal({
 }: Props) {
   const [elapsed, setElapsed] = useState(0);
   const [running, setRunning] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const [completeError, setCompleteError] = useState(false);
 
   useEffect(() => {
     if (!visible) return;
     setElapsed(0);
     setRunning(false);
+    setCompleting(false);
+    setCompleteError(false);
   }, [action?.id, visible]);
 
   useEffect(() => {
@@ -50,9 +55,19 @@ export function ActionDetailModal({
   if (!action) return null;
   const finished = action.state === 'completed';
 
-  const complete = () => {
+  const complete = async () => {
+    if (completing) return false;
     setRunning(false);
-    onComplete(action.id);
+    setCompleting(true);
+    setCompleteError(false);
+    const completed = await onComplete(action.id);
+    setCompleting(false);
+    setCompleteError(!completed);
+    return completed;
+  };
+
+  const completeAndCreateEntry = async () => {
+    if (await complete()) onCreateEntry(action, elapsed);
   };
 
   return (
@@ -94,12 +109,23 @@ export function ActionDetailModal({
             <View style={styles.actionGroup}>
               <Pressable
                 accessibilityRole="button"
-                onPress={complete}
-                style={({ pressed }) => [styles.primaryAction, pressed && styles.pressed]}
+                disabled={completing}
+                onPress={() => void completeAndCreateEntry()}
+                style={({ pressed }) => [styles.primaryAction, completing && styles.disabled, pressed && styles.pressed]}
               >
-                <Check color={colors.surface} size={19} strokeWidth={3} />
-                <Text style={styles.primaryText}>完成行动</Text>
+                <NotebookPen color={colors.surface} size={19} />
+                <Text style={styles.primaryText}>{completing ? '正在完成…' : '完成并留痕'}</Text>
               </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={completing}
+                onPress={() => void complete()}
+                style={({ pressed }) => [styles.completeOnlyAction, completing && styles.disabled, pressed && styles.pressed]}
+              >
+                <Check color={colors.evergreen} size={18} strokeWidth={3} />
+                <Text style={styles.completeOnlyText}>仅标记完成</Text>
+              </Pressable>
+              {completeError ? <Text accessibilityLiveRegion="polite" style={styles.completeError}>暂时无法完成，行动已恢复为待办，请重试。</Text> : null}
               <View style={styles.secondaryActions}>
                 <Pressable
                   accessibilityLabel="跳过行动"
@@ -115,7 +141,7 @@ export function ActionDetailModal({
                 <Pressable
                   accessibilityLabel="改到明天"
                   onPress={() => {
-                    onUpdate(action.id, { scheduled_label: '明天' });
+                    onUpdate(action.id, tomorrowScheduleFrom(action.scheduled_for));
                     onClose();
                   }}
                   style={({ pressed }) => [styles.secondaryAction, pressed && styles.pressed]}
@@ -129,7 +155,7 @@ export function ActionDetailModal({
 
           <Pressable
             accessibilityRole="button"
-            onPress={() => onCreateEntry(action)}
+            onPress={() => onCreateEntry(action, elapsed)}
             style={({ pressed }) => [styles.entryAction, pressed && styles.pressed]}
           >
             <NotebookPen color={colors.evergreen} size={19} />
@@ -174,6 +200,9 @@ const styles = StyleSheet.create({
   actionGroup: { marginTop: 26, gap: 10 },
   primaryAction: { height: 52, borderRadius: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: colors.evergreen },
   primaryText: { color: colors.surface, fontSize: 15, fontWeight: '700', letterSpacing: 0 },
+  completeOnlyAction: { height: 44, borderRadius: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, borderWidth: 1, borderColor: colors.evergreen, backgroundColor: colors.surface },
+  completeOnlyText: { color: colors.evergreen, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  completeError: { color: colors.coral, fontSize: 11, lineHeight: 17, textAlign: 'center', letterSpacing: 0 },
   secondaryActions: { flexDirection: 'row', gap: 10 },
   secondaryAction: { flex: 1, height: 46, borderRadius: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
   secondaryText: { color: colors.muted, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
@@ -182,4 +211,5 @@ const styles = StyleSheet.create({
   entryTitle: { color: colors.ink, fontSize: 14, fontWeight: '700', letterSpacing: 0 },
   entryText: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 3, letterSpacing: 0 },
   pressed: { opacity: 0.62 },
+  disabled: { opacity: 0.45 },
 });

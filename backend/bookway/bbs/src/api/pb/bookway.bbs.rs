@@ -14,6 +14,22 @@ pub struct SetEdgeRequest {
     pub request_json: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RouteContextRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub route_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RouteParticipationRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JsonResponse {
     #[prost(string, tag = "1")]
     pub response_json: ::prost::alloc::string::String,
@@ -127,6 +143,27 @@ pub mod bbs_client {
             req.extensions_mut().insert(GrpcMethod::new("bookway.bbs.Bbs", "Context"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn visibility_context(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ContextRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.Bbs/VisibilityContext",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.Bbs", "VisibilityContext"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn set_edge(
             &mut self,
             request: impl tonic::IntoRequest<super::SetEdgeRequest>,
@@ -143,6 +180,69 @@ pub mod bbs_client {
             let path = http::uri::PathAndQuery::from_static("/bookway.bbs.Bbs/SetEdge");
             let mut req = request.into_request();
             req.extensions_mut().insert(GrpcMethod::new("bookway.bbs.Bbs", "SetEdge"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_route_participations(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ContextRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.Bbs/ListRouteParticipations",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.Bbs", "ListRouteParticipations"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn route_context(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RouteContextRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.Bbs/RouteContext",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.Bbs", "RouteContext"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_route_participation(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RouteParticipationRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.Bbs/SetRouteParticipation",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.Bbs", "SetRouteParticipation"));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -164,9 +264,25 @@ pub mod bbs_server {
             &self,
             request: tonic::Request<super::ContextRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn visibility_context(
+            &self,
+            request: tonic::Request<super::ContextRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
         async fn set_edge(
             &self,
             request: tonic::Request<super::SetEdgeRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn list_route_participations(
+            &self,
+            request: tonic::Request<super::ContextRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn route_context(
+            &self,
+            request: tonic::Request<super::RouteContextRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn set_route_participation(
+            &self,
+            request: tonic::Request<super::RouteParticipationRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
     }
     #[derive(Debug)]
@@ -288,6 +404,49 @@ pub mod bbs_server {
                     };
                     Box::pin(fut)
                 }
+                "/bookway.bbs.Bbs/VisibilityContext" => {
+                    #[allow(non_camel_case_types)]
+                    struct VisibilityContextSvc<T: Bbs>(pub Arc<T>);
+                    impl<T: Bbs> tonic::server::UnaryService<super::ContextRequest>
+                    for VisibilityContextSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ContextRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Bbs>::visibility_context(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = VisibilityContextSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/bookway.bbs.Bbs/SetEdge" => {
                     #[allow(non_camel_case_types)]
                     struct SetEdgeSvc<T: Bbs>(pub Arc<T>);
@@ -316,6 +475,137 @@ pub mod bbs_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SetEdgeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.Bbs/ListRouteParticipations" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListRouteParticipationsSvc<T: Bbs>(pub Arc<T>);
+                    impl<T: Bbs> tonic::server::UnaryService<super::ContextRequest>
+                    for ListRouteParticipationsSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ContextRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Bbs>::list_route_participations(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListRouteParticipationsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.Bbs/RouteContext" => {
+                    #[allow(non_camel_case_types)]
+                    struct RouteContextSvc<T: Bbs>(pub Arc<T>);
+                    impl<T: Bbs> tonic::server::UnaryService<super::RouteContextRequest>
+                    for RouteContextSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RouteContextRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Bbs>::route_context(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RouteContextSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.Bbs/SetRouteParticipation" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetRouteParticipationSvc<T: Bbs>(pub Arc<T>);
+                    impl<
+                        T: Bbs,
+                    > tonic::server::UnaryService<super::RouteParticipationRequest>
+                    for SetRouteParticipationSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RouteParticipationRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Bbs>::set_route_participation(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetRouteParticipationSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

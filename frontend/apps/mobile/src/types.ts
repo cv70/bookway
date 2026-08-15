@@ -1,18 +1,71 @@
 export type GrowthDomain = 'learning' | 'movement' | 'wellness' | 'travel' | 'leisure';
 export type ActionState = 'pending' | 'completed' | 'skipped';
 export type JourneyStatus = 'active' | 'paused' | 'completed';
+export type JourneyType = 'habit' | 'project' | 'quantity' | 'travel' | 'challenge';
+export type Weekday = 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday' | 'sunday';
+export type ActionRecurrence = {
+  frequency: 'daily' | 'weekly';
+  interval: number;
+  weekdays: Weekday[];
+  ends_on?: string;
+  anchor_date?: string;
+};
+
+export type JourneyStage = {
+  id: string;
+  title: string;
+  detail: string;
+  completion_criteria: string;
+  position: number;
+};
+
+export type CreateJourneyStageInput = Pick<JourneyStage, 'title' | 'detail' | 'completion_criteria'>;
 
 export type Action = {
   id: string;
   journey_id: string;
+  stage_id?: string;
   title: string;
   detail: string;
   estimated_minutes: number;
   scheduled_label: string;
+  scheduled_for?: string;
+  scheduled_timezone?: string;
+  recurrence?: ActionRecurrence;
   state: ActionState;
 };
 
-export type ActionUpdate = Partial<Pick<Action, 'title' | 'detail' | 'estimated_minutes' | 'scheduled_label' | 'state'>>;
+export type ActionUpdate = Partial<Pick<Action, 'title' | 'detail' | 'estimated_minutes' | 'scheduled_label' | 'scheduled_for' | 'scheduled_timezone' | 'state'>>;
+
+export type ReminderPreferences = {
+  enabled: boolean;
+  lead_minutes: number;
+  timezone: string;
+  quiet_hours_start?: string;
+  quiet_hours_end?: string;
+  updated_at: string;
+};
+
+export type ReminderPreferencesInput = Omit<ReminderPreferences, 'updated_at'>;
+
+export type NotificationKind = 'action_reminder' | 'community' | 'system';
+
+export type UserNotification = {
+  id: string;
+  kind: NotificationKind;
+  source_id: string;
+  title: string;
+  body: string;
+  data: Record<string, unknown>;
+  read_at?: string | null;
+  created_at: string;
+};
+
+export type NotificationPage = {
+  items: UserNotification[];
+  next_cursor?: string | null;
+  unread_count: number;
+};
 
 export type Today = {
   completed: number;
@@ -21,11 +74,27 @@ export type Today = {
   actions: Action[];
 };
 
+export type CompanionBrief = {
+  mode: 'start_small' | 'keep_going' | 'celebrate' | 'plan_next';
+  headline: string;
+  message: string;
+  reason: string;
+  suggested_action: Action | null;
+  suggested_minutes: number | null;
+  completed_actions: number;
+  total_actions: number;
+  active_journeys: number;
+  reflection_prompt: string;
+};
+
 export type Journey = {
   id: string;
   title: string;
   intent: string;
   domain: GrowthDomain;
+  journey_type: JourneyType;
+  completion_criteria: string;
+  stages: JourneyStage[];
   status: JourneyStatus;
   progress: number;
   duration_label: string;
@@ -56,7 +125,52 @@ export type CommunityPost = {
   tags: string[];
 };
 
+export type ContentDetail = {
+  id: string;
+  post: CommunityPost;
+  author_id: string;
+};
+
+export type ContentStatus = 'draft' | 'reviewing' | 'published' | 'restricted' | 'deleted';
+
+export type OwnedContent = {
+  id: string;
+  post: CommunityPost;
+  author_id: string;
+  status: ContentStatus;
+  created_at: string;
+  published_at?: string | null;
+};
+
+export type OwnedContentPage = {
+  items: OwnedContent[];
+  next_cursor?: string | null;
+  total_estimate: number;
+};
+
+export type ContentAppealStatus = 'pending' | 'reviewing' | 'resolved' | 'rejected';
+export type ContentAppealAction = 'no_action' | 'restrict_content' | 'restore_content';
+
+export type ContentAppeal = {
+  id: string;
+  content_id: string;
+  appellant_id: string;
+  details: string;
+  status: ContentAppealStatus;
+  assignee_id?: string | null;
+  resolution?: string | null;
+  action: ContentAppealAction;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ContentAppealPage = {
+  items: ContentAppeal[];
+  next_cursor?: string | null;
+};
+
 export type FeedItem = {
+  author_id: string;
   post: CommunityPost;
   score: number;
   source: string;
@@ -73,6 +187,8 @@ export type Feed = {
     next_cursor?: string;
     pipeline_id?: string;
     degraded?: boolean;
+    model_version?: string;
+    experiment_bucket?: string;
   };
 };
 
@@ -82,6 +198,7 @@ export type SearchResult = {
   title: string;
   snippet: string;
   cover_url?: string;
+  author_id?: string;
   author_name?: string;
   domain?: GrowthDomain;
   score: number;
@@ -107,17 +224,29 @@ export type CreateJourneyInput = {
   title: string;
   intent: string;
   domain: GrowthDomain;
+  journey_type: JourneyType;
+  completion_criteria: string;
+  stages: CreateJourneyStageInput[];
   duration_label: string;
   first_action_title: string;
   first_action_detail: string;
   estimated_minutes: number;
+  first_action_scheduled_label?: string;
+  first_action_scheduled_for?: string;
+  first_action_scheduled_timezone?: string;
+  first_action_stage_index?: number;
+  first_action_recurrence?: ActionRecurrence;
 };
 
 export type CreateActionInput = {
+  stage_id?: string;
   title: string;
   detail: string;
   estimated_minutes: number;
   scheduled_label: string;
+  scheduled_for: string;
+  scheduled_timezone: string;
+  recurrence?: ActionRecurrence;
 };
 
 export type EntryMood = 'clear' | 'steady' | 'tired' | 'energized' | 'calm';
@@ -137,6 +266,95 @@ export type GrowthEntry = {
 };
 
 export type CreateEntryInput = Omit<GrowthEntry, 'id' | 'created_at'>;
+
+export type WeeklyReview = {
+  period_start: string;
+  period_end: string;
+  completed_actions: number;
+  skipped_actions: number;
+  focus_minutes: number;
+  entry_count: number;
+  active_journeys: number;
+  completion_rate: number;
+  domains: Array<{
+    domain: GrowthDomain;
+    completed_actions: number;
+    total_actions: number;
+  }>;
+  reflection_prompts: string[];
+  adjustment_suggestions: ReviewAdjustmentSuggestion[];
+};
+
+export type ReviewAdjustmentSuggestion = {
+  kind: 'reduce_action_duration' | 'reschedule_action' | 'pause_journey';
+  title: string;
+  rationale: string;
+  action_patch?: {
+    action_id: string;
+    estimated_minutes?: number;
+    scheduled_label?: string;
+  };
+  journey_patch?: {
+    journey_id: string;
+    status: JourneyStatus;
+  };
+};
+
+export type KnowledgeResourceKind = 'book' | 'article' | 'course' | 'video' | 'link' | 'note';
+export type KnowledgeResourceStatus = 'inbox' | 'active' | 'completed' | 'archived';
+
+export type KnowledgeResource = {
+  id: string;
+  title: string;
+  creator: string;
+  summary: string;
+  kind: KnowledgeResourceKind;
+  status: KnowledgeResourceStatus;
+  source_url?: string;
+  body?: string;
+  tags: string[];
+  journey_id?: string;
+  progress: number;
+  current_position: number;
+  reading_seconds: number;
+  bookmarks: string[];
+  created_at: string;
+  updated_at: string;
+  last_opened_at?: string;
+};
+
+export type CreateKnowledgeResourceInput = Pick<KnowledgeResource, 'title' | 'creator' | 'summary' | 'kind' | 'status' | 'tags'> &
+  Partial<Pick<KnowledgeResource, 'source_url' | 'body' | 'journey_id'>>;
+
+export type UpdateKnowledgeResourceInput = Partial<Pick<KnowledgeResource,
+  'title' | 'creator' | 'summary' | 'kind' | 'status' | 'source_url' | 'body' | 'tags' |
+  'journey_id' | 'progress' | 'current_position' | 'reading_seconds' | 'bookmarks' | 'last_opened_at'
+>>;
+
+export type SocialContext = {
+  followed_author_ids: string[];
+  blocked_author_ids: string[];
+  muted_author_ids: string[];
+};
+
+export type RouteParticipation = {
+  route_id: string;
+  private_journey_id?: string | null;
+  joined_at: string;
+};
+
+export type RouteParticipationState = {
+  route_id: string;
+  joined: boolean;
+  private_journey_id?: string | null;
+  joined_at?: string | null;
+  participant_count: number;
+};
+
+export type RouteJoinResult = {
+  journey: Journey;
+  participation: RouteParticipationState;
+};
 
 export type ReadingChapter = {
   id: string;
@@ -182,10 +400,21 @@ export type CreateReadingBookInput = {
 export type Comment = {
   id: string;
   post_id: string;
+  author_id: string;
   author_name: string;
   body: string;
+  parent_id?: string | null;
+  like_count: number;
   created_at: string;
+  status?: 'reviewing' | 'published' | 'restricted' | 'deleted';
 };
+
+export type CommentPage = {
+  items: Comment[];
+  next_cursor?: string;
+};
+
+export type ReportReason = 'spam' | 'harassment' | 'unsafe' | 'misinformation' | 'copyright' | 'privacy' | 'other';
 
 export type ContentType = 'note' | 'article' | 'route';
 

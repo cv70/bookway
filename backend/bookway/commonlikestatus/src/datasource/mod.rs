@@ -60,6 +60,12 @@ impl LikeStatusRepository for MemoryLikeStatusRepository {
                 post_ids,
                 ReactionTypeDto::Bookmark,
             ),
+            hidden_post_ids: matching_post_ids(
+                &reactions,
+                user_id,
+                post_ids,
+                ReactionTypeDto::Hide,
+            ),
         })
     }
 
@@ -112,6 +118,7 @@ impl LikeStatusRepository for PostgresLikeStatusRepository {
             return Ok(ReactionContextDto {
                 liked_post_ids: Vec::new(),
                 bookmarked_post_ids: Vec::new(),
+                hidden_post_ids: Vec::new(),
             });
         }
         let rows = sqlx::query_as::<_, (String, String)>(
@@ -120,11 +127,13 @@ impl LikeStatusRepository for PostgresLikeStatusRepository {
         let mut result = ReactionContextDto {
             liked_post_ids: Vec::new(),
             bookmarked_post_ids: Vec::new(),
+            hidden_post_ids: Vec::new(),
         };
         for (target, kind) in rows {
             match kind.as_str() {
                 "like" => result.liked_post_ids.push(target),
                 "bookmark" => result.bookmarked_post_ids.push(target),
+                "hide" => result.hidden_post_ids.push(target),
                 _ => {}
             }
         }
@@ -141,6 +150,7 @@ impl LikeStatusRepository for PostgresLikeStatusRepository {
         let kind = match reaction {
             ReactionTypeDto::Like => "like",
             ReactionTypeDto::Bookmark => "bookmark",
+            ReactionTypeDto::Hide => "hide",
         };
         if active {
             sqlx::query("INSERT INTO reactions (user_id,target_type,target_id,reaction_type,deleted_at) VALUES ($1,'post',$2,$3,NULL) ON CONFLICT (user_id,target_type,target_id,reaction_type) DO UPDATE SET deleted_at = NULL")

@@ -2,8 +2,20 @@ syntax = "proto3";
 package bookway.content.audit;
 
 message AuditRequest { string request_json = 1; }
+message ReportRequest { string reporter_id = 1; string content_id = 2; string request_json = 3; string idempotency_key = 4; }
+message AppealRequest { string appellant_id = 1; string content_id = 2; string request_json = 3; string idempotency_key = 4; }
+message ListReportsRequest { string request_json = 1; }
+message ReviewReportRequest { string reviewer_id = 1; string report_id = 2; string request_json = 3; }
+message ListAppealsRequest { string request_json = 1; }
+message ReviewAppealRequest { string reviewer_id = 1; string appeal_id = 2; string request_json = 3; }
 message JsonResponse { string response_json = 1; }
 
 service ContentAudit {
   rpc Audit(AuditRequest) returns (JsonResponse);
+  rpc Report(ReportRequest) returns (JsonResponse);
+  rpc Appeal(AppealRequest) returns (JsonResponse);
+  rpc ListReports(ListReportsRequest) returns (JsonResponse);
+  rpc ReviewReport(ReviewReportRequest) returns (JsonResponse);
+  rpc ListAppeals(ListAppealsRequest) returns (JsonResponse);
+  rpc ReviewAppeal(ReviewAppealRequest) returns (JsonResponse);
 }

@@ -39,9 +39,16 @@ impl QueryHydrator for DefaultQueryHydrator {
             session_id: request
                 .session_id
                 .unwrap_or_else(|| "anonymous-session".to_string()),
-            surface: request.surface.unwrap_or_else(|| "home".to_string()),
+            surface: normalize_surface(request.surface),
             cursor: request.cursor,
         }
+    }
+}
+
+fn normalize_surface(surface: Option<String>) -> String {
+    match surface.as_deref().map(str::trim) {
+        Some("following") => "following".to_string(),
+        _ => "home".to_string(),
     }
 }
 

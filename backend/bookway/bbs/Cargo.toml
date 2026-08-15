@@ -22,6 +22,7 @@ tonic-health.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 tower.workspace = true
+time.workspace = true
 
 [lints]
 workspace = true

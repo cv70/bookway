@@ -35,6 +35,16 @@ pub struct PublishRequest {
     pub id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RestrictRequest {
+    #[prost(string, tag = "1")]
+    pub content_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RestoreRequest {
+    #[prost(string, tag = "1")]
+    pub content_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JsonResponse {
     #[prost(string, tag = "1")]
     pub response_json: ::prost::alloc::string::String,
@@ -256,6 +266,48 @@ pub mod bbs_link_client {
                 .insert(GrpcMethod::new("bookway.bbs.link.BbsLink", "Publish"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn restrict(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RestrictRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.link.BbsLink/Restrict",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.link.BbsLink", "Restrict"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn restore(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RestoreRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.link.BbsLink/Restore",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.link.BbsLink", "Restore"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -294,6 +346,14 @@ pub mod bbs_link_server {
         async fn publish(
             &self,
             request: tonic::Request<super::PublishRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn restrict(
+            &self,
+            request: tonic::Request<super::RestrictRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn restore(
+            &self,
+            request: tonic::Request<super::RestoreRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
     }
     #[derive(Debug)]
@@ -615,6 +675,92 @@ pub mod bbs_link_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = PublishSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.link.BbsLink/Restrict" => {
+                    #[allow(non_camel_case_types)]
+                    struct RestrictSvc<T: BbsLink>(pub Arc<T>);
+                    impl<T: BbsLink> tonic::server::UnaryService<super::RestrictRequest>
+                    for RestrictSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RestrictRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BbsLink>::restrict(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RestrictSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.link.BbsLink/Restore" => {
+                    #[allow(non_camel_case_types)]
+                    struct RestoreSvc<T: BbsLink>(pub Arc<T>);
+                    impl<T: BbsLink> tonic::server::UnaryService<super::RestoreRequest>
+                    for RestoreSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RestoreRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BbsLink>::restore(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RestoreSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

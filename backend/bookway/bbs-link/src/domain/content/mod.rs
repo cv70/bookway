@@ -167,6 +167,50 @@ impl Domain {
         content.version = next_version;
         Ok(self.repository.update(content).await?)
     }
+
+    /// Restriction is an internal moderation transition. It is deliberately
+    /// idempotent so a failed orchestrator retry cannot re-expose content.
+    pub(crate) async fn restrict(&self, id: &str) -> Result<ContentDto, ContentError> {
+        if id.trim().is_empty() {
+            return Err(ContentError::Validation(
+                "content id must not be empty".to_string(),
+            ));
+        }
+        let mut content = self.repository.get(id.trim()).await?;
+        if matches!(
+            content.status,
+            ContentStatusDto::Restricted | ContentStatusDto::Deleted
+        ) {
+            return Ok(content);
+        }
+        content.status = ContentStatusDto::Restricted;
+        content.published_at = None;
+        content.version = content.version.saturating_add(1);
+        Ok(self.repository.update(content).await?)
+    }
+
+    /// A granted author appeal may restore only content previously restricted by
+    /// moderation. Drafts and pending edits still use the normal publish path.
+    pub(crate) async fn restore(&self, id: &str) -> Result<ContentDto, ContentError> {
+        if id.trim().is_empty() {
+            return Err(ContentError::Validation(
+                "content id must not be empty".to_string(),
+            ));
+        }
+        let mut content = self.repository.get(id.trim()).await?;
+        if content.status == ContentStatusDto::Published {
+            return Ok(content);
+        }
+        if content.status != ContentStatusDto::Restricted {
+            return Err(ContentError::Validation(
+                "only restricted content can be restored".to_string(),
+            ));
+        }
+        content.status = ContentStatusDto::Published;
+        content.published_at = Some(now_rfc3339());
+        content.version = content.version.saturating_add(1);
+        Ok(self.repository.update(content).await?)
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -190,8 +234,8 @@ mod tests {
 
     fn config() -> Config {
         Config {
-            listen_addr: "127.0.0.1:0".parse().unwrap(),
-            grpc_addr: "127.0.0.1:0".parse().unwrap(),
+            listen_addr: "127.0.0.1:0".parse().expect("valid HTTP address"),
+            grpc_addr: "127.0.0.1:0".parse().expect("valid gRPC address"),
             content_audit_grpc_url: None,
         }
     }
@@ -242,6 +286,39 @@ mod tests {
             .expect("retry create");
         assert_eq!(first.id, second.id);
         assert_eq!(first.status, ContentStatusDto::Draft);
+    }
+
+    #[tokio::test]
+    async fn public_reads_do_not_expose_a_draft() {
+        let domain = Domain::from_repositories(
+            config(),
+            Arc::new(MemoryContentRepository::seeded()),
+            Arc::new(LocalContentAuditor),
+        );
+        let draft = domain
+            .create(
+                "user-a",
+                CreateContentRequest {
+                    title: "仅作者可见的草稿".to_string(),
+                    summary: "不应公开".to_string(),
+                    body: "在审核或发布前，内容不能从公开读取接口返回。".to_string(),
+                    domain: bookway_api::GrowthDomainDto::Learning,
+                    content_type: bookway_api::ContentTypeDto::Note,
+                    cover_url: None,
+                    tags: Vec::new(),
+                    topics: Vec::new(),
+                    route_title: None,
+                    route_duration: None,
+                },
+                None,
+            )
+            .await
+            .expect("create draft");
+
+        assert!(matches!(
+            domain.get_public(&draft.id).await,
+            Err(ContentError::Repository(RepositoryError::NotFound(id))) if id == draft.id
+        ));
     }
 
     #[tokio::test]
@@ -337,5 +414,63 @@ mod tests {
             assert_eq!(published.status, expected_status);
             assert_eq!(published.published_at.is_some(), should_have_timestamp);
         }
+    }
+
+    #[tokio::test]
+    async fn moderator_restriction_removes_published_content_from_public_reads() {
+        let domain = Domain::from_repositories(
+            config(),
+            Arc::new(MemoryContentRepository::seeded()),
+            Arc::new(LocalContentAuditor),
+        );
+
+        let restricted = domain
+            .restrict("post-city-walk")
+            .await
+            .expect("restrict published content");
+
+        assert_eq!(restricted.status, ContentStatusDto::Restricted);
+        assert!(restricted.published_at.is_none());
+        assert!(matches!(
+            domain.get_public("post-city-walk").await,
+            Err(ContentError::Repository(RepositoryError::NotFound(id))) if id == "post-city-walk"
+        ));
+        assert_eq!(
+            domain
+                .restrict("post-city-walk")
+                .await
+                .expect("retry restriction")
+                .version,
+            restricted.version
+        );
+    }
+
+    #[tokio::test]
+    async fn granted_appeal_restores_only_restricted_content() {
+        let domain = Domain::from_repositories(
+            config(),
+            Arc::new(MemoryContentRepository::seeded()),
+            Arc::new(LocalContentAuditor),
+        );
+        domain
+            .restrict("post-city-walk")
+            .await
+            .expect("restrict content");
+
+        let restored = domain
+            .restore("post-city-walk")
+            .await
+            .expect("restore restricted content");
+
+        assert_eq!(restored.status, ContentStatusDto::Published);
+        assert!(restored.published_at.is_some());
+        assert_eq!(
+            domain
+                .get_public("post-city-walk")
+                .await
+                .expect("restored content is public")
+                .id,
+            "post-city-walk"
+        );
     }
 }

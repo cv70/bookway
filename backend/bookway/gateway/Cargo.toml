@@ -14,6 +14,7 @@ bookway-bbs-feed.workspace = true
 bookway-bbs-link.workspace = true
 bookway-comment.workspace = true
 bookway-commonlikestatus.workspace = true
+bookway-content-audit.workspace = true
 bookway-growth.workspace = true
 bookway-media.workspace = true
 bookway-search-main.workspace = true
@@ -26,6 +27,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

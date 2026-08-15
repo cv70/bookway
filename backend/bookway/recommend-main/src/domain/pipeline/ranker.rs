@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tonic::transport::Channel;
 
-use super::{Candidate, CandidateRanker, FeedQuery, PipelineError};
+use super::{Candidate, CandidateRanker, FeedQuery, PipelineError, RankOutcome};
 use crate::datasource::ModelClientError;
 use bookway_feature_main::api::pb::{self as feature, feature_main_client::FeatureMainClient};
 use bookway_recommend_rank::api::pb as rank;
@@ -28,7 +28,7 @@ impl RecommendRanker {
         &self,
         user_id: &str,
         candidates: &[Candidate],
-    ) -> Result<HashMap<String, f64>, ModelClientError> {
+    ) -> Result<rank::RankResponse, ModelClientError> {
         let ids: Vec<String> = candidates
             .iter()
             .map(|candidate| candidate.post.id.clone())
@@ -55,11 +55,7 @@ impl RecommendRanker {
             .await
             .map_err(|status| ModelClientError::Grpc(status.to_string()))?
             .into_inner();
-        Ok(response
-            .candidates
-            .into_iter()
-            .map(|candidate| (candidate.content_id, candidate.score))
-            .collect())
+        Ok(response)
     }
 }
 
@@ -69,21 +65,28 @@ impl CandidateRanker for RecommendRanker {
         &self,
         query: &FeedQuery,
         candidates: &mut [Candidate],
-    ) -> Result<(), PipelineError> {
-        let scores = match self.request_scores(&query.user_id, candidates).await {
-            Ok(scores) => scores.into_iter().collect::<HashMap<_, _>>(),
-            Err(error) => {
-                tracing::warn!(%error, "recommend-rank degraded; retaining local scores");
-                return Ok(());
-            }
-        };
+    ) -> Result<RankOutcome, PipelineError> {
+        let response = self.request_scores(&query.user_id, candidates).await?;
+        let expected_scores = candidates.len();
+        let scores = response
+            .candidates
+            .into_iter()
+            .map(|candidate| (candidate.content_id, candidate.score))
+            .collect::<HashMap<_, _>>();
+        let mut scored_candidates = 0;
         for candidate in candidates {
             if let Some(score) = scores.get(&candidate.post.id) {
+                scored_candidates += 1;
                 candidate.score = *score;
                 candidate.reasons.push("模型排序".to_string());
             }
         }
-        Ok(())
+        Ok(RankOutcome {
+            model_version: (!response.model_version.is_empty()).then_some(response.model_version),
+            experiment_bucket: (!response.experiment_bucket.is_empty())
+                .then_some(response.experiment_bucket),
+            degraded: response.degraded || scored_candidates != expected_scores,
+        })
     }
 }
 

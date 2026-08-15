@@ -5,11 +5,40 @@ pub struct UserRequest {
     pub user_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScheduleRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub local_date: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub timezone: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateJourneyRequest {
     #[prost(string, tag = "1")]
     pub user_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateRouteJourneyRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetRouteParticipationIntentRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub active: bool,
+    #[prost(string, tag = "4")]
+    pub private_journey_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JourneyRequest {
@@ -47,6 +76,80 @@ pub struct UpdateActionRequest {
     pub user_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub action_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PushDeviceRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub device_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateReminderPreferencesRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RegisterPushDeviceRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NotificationQueryRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NotificationRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub notification_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateNotificationRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateEntryRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KnowledgeQueryRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub request_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateKnowledgeRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub request_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub idempotency_key: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateKnowledgeRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub resource_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub request_json: ::prost::alloc::string::String,
 }
@@ -188,6 +291,53 @@ pub mod growth_client {
                 .insert(GrpcMethod::new("bookway.growth.Growth", "CreateJourney"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn create_route_journey(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateRouteJourneyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/CreateRouteJourney",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "CreateRouteJourney"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_route_participation_intent(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetRouteParticipationIntentRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/SetRouteParticipationIntent",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "bookway.growth.Growth",
+                        "SetRouteParticipationIntent",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn get_journey(
             &mut self,
             request: impl tonic::IntoRequest<super::JourneyRequest>,
@@ -253,7 +403,7 @@ pub mod growth_client {
         }
         pub async fn today(
             &mut self,
-            request: impl tonic::IntoRequest<super::UserRequest>,
+            request: impl tonic::IntoRequest<super::ScheduleRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
             self.inner
                 .ready()
@@ -314,6 +464,304 @@ pub mod growth_client {
                 .insert(GrpcMethod::new("bookway.growth.Growth", "UpdateAction"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn reminder_preferences(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UserRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/ReminderPreferences",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "ReminderPreferences"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn update_reminder_preferences(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateReminderPreferencesRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/UpdateReminderPreferences",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.growth.Growth", "UpdateReminderPreferences"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn register_push_device(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RegisterPushDeviceRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/RegisterPushDevice",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "RegisterPushDevice"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn revoke_push_device(
+            &mut self,
+            request: impl tonic::IntoRequest<super::PushDeviceRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/RevokePushDevice",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "RevokePushDevice"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_notifications(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NotificationQueryRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/ListNotifications",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "ListNotifications"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn create_notification(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateNotificationRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/CreateNotification",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "CreateNotification"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn mark_notification_read(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NotificationRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/MarkNotificationRead",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.growth.Growth", "MarkNotificationRead"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_entries(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UserRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/ListEntries",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "ListEntries"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn create_entry(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateEntryRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/CreateEntry",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "CreateEntry"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn weekly_review(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UserRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/WeeklyReview",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "WeeklyReview"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn companion(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ScheduleRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/Companion",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "Companion"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_knowledge(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KnowledgeQueryRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/ListKnowledge",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "ListKnowledge"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn create_knowledge(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateKnowledgeRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/CreateKnowledge",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "CreateKnowledge"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn update_knowledge(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateKnowledgeRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/UpdateKnowledge",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "UpdateKnowledge"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -337,6 +785,14 @@ pub mod growth_server {
             &self,
             request: tonic::Request<super::CreateJourneyRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn create_route_journey(
+            &self,
+            request: tonic::Request<super::CreateRouteJourneyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn set_route_participation_intent(
+            &self,
+            request: tonic::Request<super::SetRouteParticipationIntentRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
         async fn get_journey(
             &self,
             request: tonic::Request<super::JourneyRequest>,
@@ -351,7 +807,7 @@ pub mod growth_server {
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
         async fn today(
             &self,
-            request: tonic::Request<super::UserRequest>,
+            request: tonic::Request<super::ScheduleRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
         async fn complete_action(
             &self,
@@ -360,6 +816,62 @@ pub mod growth_server {
         async fn update_action(
             &self,
             request: tonic::Request<super::UpdateActionRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn reminder_preferences(
+            &self,
+            request: tonic::Request<super::UserRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn update_reminder_preferences(
+            &self,
+            request: tonic::Request<super::UpdateReminderPreferencesRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn register_push_device(
+            &self,
+            request: tonic::Request<super::RegisterPushDeviceRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn revoke_push_device(
+            &self,
+            request: tonic::Request<super::PushDeviceRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn list_notifications(
+            &self,
+            request: tonic::Request<super::NotificationQueryRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn create_notification(
+            &self,
+            request: tonic::Request<super::CreateNotificationRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn mark_notification_read(
+            &self,
+            request: tonic::Request<super::NotificationRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn list_entries(
+            &self,
+            request: tonic::Request<super::UserRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn create_entry(
+            &self,
+            request: tonic::Request<super::CreateEntryRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn weekly_review(
+            &self,
+            request: tonic::Request<super::UserRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn companion(
+            &self,
+            request: tonic::Request<super::ScheduleRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn list_knowledge(
+            &self,
+            request: tonic::Request<super::KnowledgeQueryRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn create_knowledge(
+            &self,
+            request: tonic::Request<super::CreateKnowledgeRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn update_knowledge(
+            &self,
+            request: tonic::Request<super::UpdateKnowledgeRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
     }
     #[derive(Debug)]
@@ -526,6 +1038,103 @@ pub mod growth_server {
                     };
                     Box::pin(fut)
                 }
+                "/bookway.growth.Growth/CreateRouteJourney" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateRouteJourneySvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::CreateRouteJourneyRequest>
+                    for CreateRouteJourneySvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateRouteJourneyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::create_route_journey(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateRouteJourneySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/SetRouteParticipationIntent" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetRouteParticipationIntentSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<
+                        super::SetRouteParticipationIntentRequest,
+                    > for SetRouteParticipationIntentSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SetRouteParticipationIntentRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::set_route_participation_intent(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetRouteParticipationIntentSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/bookway.growth.Growth/GetJourney" => {
                     #[allow(non_camel_case_types)]
                     struct GetJourneySvc<T: Growth>(pub Arc<T>);
@@ -662,7 +1271,7 @@ pub mod growth_server {
                 "/bookway.growth.Growth/Today" => {
                     #[allow(non_camel_case_types)]
                     struct TodaySvc<T: Growth>(pub Arc<T>);
-                    impl<T: Growth> tonic::server::UnaryService<super::UserRequest>
+                    impl<T: Growth> tonic::server::UnaryService<super::ScheduleRequest>
                     for TodaySvc<T> {
                         type Response = super::JsonResponse;
                         type Future = BoxFuture<
@@ -671,7 +1280,7 @@ pub mod growth_server {
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::UserRequest>,
+                            request: tonic::Request<super::ScheduleRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
@@ -777,6 +1386,630 @@ pub mod growth_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = UpdateActionSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/ReminderPreferences" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReminderPreferencesSvc<T: Growth>(pub Arc<T>);
+                    impl<T: Growth> tonic::server::UnaryService<super::UserRequest>
+                    for ReminderPreferencesSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UserRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::reminder_preferences(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReminderPreferencesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/UpdateReminderPreferences" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateReminderPreferencesSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<
+                        super::UpdateReminderPreferencesRequest,
+                    > for UpdateReminderPreferencesSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::UpdateReminderPreferencesRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::update_reminder_preferences(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateReminderPreferencesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/RegisterPushDevice" => {
+                    #[allow(non_camel_case_types)]
+                    struct RegisterPushDeviceSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::RegisterPushDeviceRequest>
+                    for RegisterPushDeviceSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RegisterPushDeviceRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::register_push_device(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RegisterPushDeviceSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/RevokePushDevice" => {
+                    #[allow(non_camel_case_types)]
+                    struct RevokePushDeviceSvc<T: Growth>(pub Arc<T>);
+                    impl<T: Growth> tonic::server::UnaryService<super::PushDeviceRequest>
+                    for RevokePushDeviceSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::PushDeviceRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::revoke_push_device(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RevokePushDeviceSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/ListNotifications" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListNotificationsSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::NotificationQueryRequest>
+                    for ListNotificationsSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NotificationQueryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::list_notifications(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListNotificationsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/CreateNotification" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateNotificationSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::CreateNotificationRequest>
+                    for CreateNotificationSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateNotificationRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::create_notification(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateNotificationSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/MarkNotificationRead" => {
+                    #[allow(non_camel_case_types)]
+                    struct MarkNotificationReadSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::NotificationRequest>
+                    for MarkNotificationReadSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NotificationRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::mark_notification_read(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = MarkNotificationReadSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/ListEntries" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListEntriesSvc<T: Growth>(pub Arc<T>);
+                    impl<T: Growth> tonic::server::UnaryService<super::UserRequest>
+                    for ListEntriesSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UserRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::list_entries(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListEntriesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/CreateEntry" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateEntrySvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::CreateEntryRequest>
+                    for CreateEntrySvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateEntryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::create_entry(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateEntrySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/WeeklyReview" => {
+                    #[allow(non_camel_case_types)]
+                    struct WeeklyReviewSvc<T: Growth>(pub Arc<T>);
+                    impl<T: Growth> tonic::server::UnaryService<super::UserRequest>
+                    for WeeklyReviewSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UserRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::weekly_review(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = WeeklyReviewSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/Companion" => {
+                    #[allow(non_camel_case_types)]
+                    struct CompanionSvc<T: Growth>(pub Arc<T>);
+                    impl<T: Growth> tonic::server::UnaryService<super::ScheduleRequest>
+                    for CompanionSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ScheduleRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::companion(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CompanionSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/ListKnowledge" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListKnowledgeSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::KnowledgeQueryRequest>
+                    for ListKnowledgeSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KnowledgeQueryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::list_knowledge(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListKnowledgeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/CreateKnowledge" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateKnowledgeSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::CreateKnowledgeRequest>
+                    for CreateKnowledgeSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateKnowledgeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::create_knowledge(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateKnowledgeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/UpdateKnowledge" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateKnowledgeSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::UpdateKnowledgeRequest>
+                    for UpdateKnowledgeSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpdateKnowledgeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::update_knowledge(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateKnowledgeSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

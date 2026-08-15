@@ -10,11 +10,13 @@
 - 内部 gRPC：`ingest`。
 - `GET /health`：健康检查。
 
-首版支持 `impression`、`click`、`view`、`like`、`bookmark`、`share`、`hide`、`complete`、`follow` 和 `search_submit`。`session_id`、`component_id`、`occurred_at`、`source` 和 `event_id` 必填；实体 ID 使用 UUID，事件时间使用 RFC 3339，单个请求体上限为 256 KiB。
+首版支持 `impression`、`click`、`view`、`like`、`bookmark`、`share`、`hide`、`complete`、`join_route`、`follow`、`report` 和 `search_submit`。`session_id`、`component_id`、`occurred_at`、`source` 和 `event_id` 必填；实体 ID 使用 UUID，事件时间使用 RFC 3339，单个请求体上限为 256 KiB。
 
 ## 环境变量
 
 `USER_EVENT_ADDR` 和 `USER_EVENT_GRPC_ADDR`，默认分别监听 `127.0.0.1:8089`、`127.0.0.1:18089`。
+
+设置 `REDIS_URL` 后，任一新事件在 PostgreSQL 成功提交后都会删除该用户的 `bookway:features:{user_id}` 缓存，使下一次推荐重新派生在线特征。Redis 不可用只记录告警，绝不会阻塞事件落库或 Outbox 投递。
 
 ## 数据与生产化
 

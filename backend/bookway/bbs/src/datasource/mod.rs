@@ -1,10 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use super::api::{SocialContextDto, SocialEdgeTypeDto};
+use super::api::{
+    RouteParticipationContextDto, RouteParticipationDto, RouteParticipationStateDto,
+    SocialContextDto, SocialEdgeTypeDto, SocialVisibilityDto,
+};
 
 #[derive(Debug, Error)]
 pub(crate) enum RepositoryError {
@@ -12,11 +15,17 @@ pub(crate) enum RepositoryError {
     BlockedRelationship,
     #[error("database operation failed: {0}")]
     Database(#[source] sqlx::Error),
+    #[error("timestamp formatting failed: {0}")]
+    Timestamp(#[from] time::error::Format),
 }
 
 #[async_trait]
 pub(crate) trait BbsRepository: Send + Sync {
     async fn context(&self, user_id: &str) -> Result<SocialContextDto, RepositoryError>;
+    async fn visibility_context(
+        &self,
+        user_id: &str,
+    ) -> Result<SocialVisibilityDto, RepositoryError>;
     async fn set_edge(
         &self,
         user_id: &str,
@@ -24,10 +33,29 @@ pub(crate) trait BbsRepository: Send + Sync {
         edge: SocialEdgeTypeDto,
         active: bool,
     ) -> Result<SocialContextDto, RepositoryError>;
+    async fn list_route_participations(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<RouteParticipationDto>, RepositoryError>;
+    async fn route_context(
+        &self,
+        user_id: &str,
+        route_ids: &[String],
+    ) -> Result<RouteParticipationContextDto, RepositoryError>;
+    async fn set_route_participation(
+        &self,
+        user_id: &str,
+        route_id: &str,
+        active: bool,
+        private_journey_id: Option<String>,
+        intent_version: Option<u64>,
+    ) -> Result<RouteParticipationStateDto, RepositoryError>;
 }
 
 pub(crate) struct MemoryBbsRepository {
     edges: RwLock<HashSet<(String, String, SocialEdgeTypeDto)>>,
+    route_participations: RwLock<HashMap<(String, String), RouteParticipationDto>>,
+    route_intent_versions: RwLock<HashMap<(String, String), u64>>,
 }
 
 impl MemoryBbsRepository {
@@ -38,6 +66,8 @@ impl MemoryBbsRepository {
                 "author-changfeng".to_string(),
                 SocialEdgeTypeDto::Follow,
             )])),
+            route_participations: RwLock::new(HashMap::new()),
+            route_intent_versions: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -52,6 +82,28 @@ impl BbsRepository for MemoryBbsRepository {
             muted_author_ids: targets(&edges, user_id, SocialEdgeTypeDto::Mute),
             liked_post_ids: Vec::new(),
             bookmarked_post_ids: Vec::new(),
+        })
+    }
+
+    async fn visibility_context(
+        &self,
+        user_id: &str,
+    ) -> Result<SocialVisibilityDto, RepositoryError> {
+        let edges = self.edges.read().await;
+        let mut excluded_author_ids = edges
+            .iter()
+            .filter_map(|(source, target, edge)| match edge {
+                SocialEdgeTypeDto::Block | SocialEdgeTypeDto::Mute if source == user_id => {
+                    Some(target.clone())
+                }
+                SocialEdgeTypeDto::Block if target == user_id => Some(source.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        excluded_author_ids.sort();
+        excluded_author_ids.dedup();
+        Ok(SocialVisibilityDto {
+            excluded_author_ids,
         })
     }
 
@@ -108,6 +160,90 @@ impl BbsRepository for MemoryBbsRepository {
         drop(edges);
         self.context(user_id).await
     }
+
+    async fn list_route_participations(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<RouteParticipationDto>, RepositoryError> {
+        let participations = self.route_participations.read().await;
+        let mut items = participations
+            .iter()
+            .filter(|((_, participant_id), _)| participant_id == user_id)
+            .map(|(_, participation)| participation.clone())
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| right.joined_at.cmp(&left.joined_at));
+        Ok(items)
+    }
+
+    async fn route_context(
+        &self,
+        user_id: &str,
+        route_ids: &[String],
+    ) -> Result<RouteParticipationContextDto, RepositoryError> {
+        let requested = route_ids.iter().collect::<HashSet<_>>();
+        let participations = self.route_participations.read().await;
+        let mut context = RouteParticipationContextDto::default();
+        for (route_id, participant_id) in participations.keys() {
+            if !requested.contains(route_id) {
+                continue;
+            }
+            *context
+                .participant_counts
+                .entry(route_id.clone())
+                .or_default() += 1;
+            if participant_id == user_id {
+                context.joined_route_ids.push(route_id.clone());
+            }
+        }
+        context.joined_route_ids.sort();
+        Ok(context)
+    }
+
+    async fn set_route_participation(
+        &self,
+        user_id: &str,
+        route_id: &str,
+        active: bool,
+        private_journey_id: Option<String>,
+        intent_version: Option<u64>,
+    ) -> Result<RouteParticipationStateDto, RepositoryError> {
+        let key = (route_id.to_string(), user_id.to_string());
+        let mut versions = self.route_intent_versions.write().await;
+        let mut participations = self.route_participations.write().await;
+        let current_version = versions.get(&key).copied().unwrap_or_default();
+        let accepted = command_is_accepted(current_version, intent_version);
+        if accepted && let Some(version) = intent_version {
+            versions.insert(key.clone(), version);
+        }
+        if accepted && active {
+            let joined_at = participations
+                .get(&key)
+                .map(|item| item.joined_at.clone())
+                .unwrap_or(format_timestamp(time::OffsetDateTime::now_utc())?);
+            participations.insert(
+                key.clone(),
+                RouteParticipationDto {
+                    route_id: route_id.to_string(),
+                    private_journey_id: private_journey_id.clone(),
+                    joined_at: joined_at.clone(),
+                },
+            );
+        } else if accepted {
+            participations.remove(&key);
+        }
+        let participant_count = participations
+            .keys()
+            .filter(|(current_route_id, _)| current_route_id == route_id)
+            .count() as u64;
+        let participation = participations.get(&key);
+        Ok(RouteParticipationStateDto {
+            route_id: route_id.to_string(),
+            joined: participation.is_some(),
+            private_journey_id: participation.and_then(|item| item.private_journey_id.clone()),
+            joined_at: participation.map(|item| item.joined_at.clone()),
+            participant_count,
+        })
+    }
 }
 
 pub(crate) struct PostgresBbsRepository {
@@ -146,6 +282,22 @@ impl BbsRepository for PostgresBbsRepository {
             }
         }
         Ok(context)
+    }
+
+    async fn visibility_context(
+        &self,
+        user_id: &str,
+    ) -> Result<SocialVisibilityDto, RepositoryError> {
+        let excluded_author_ids = sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT CASE WHEN source_user_id = $1 THEN target_user_id ELSE source_user_id END FROM social_edges WHERE deleted_at IS NULL AND ((source_user_id = $1 AND edge_type IN ('block', 'mute')) OR (target_user_id = $1 AND edge_type = 'block')) ORDER BY 1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::Database)?;
+        Ok(SocialVisibilityDto {
+            excluded_author_ids,
+        })
     }
 
     async fn set_edge(
@@ -207,6 +359,152 @@ impl BbsRepository for PostgresBbsRepository {
             .map_err(RepositoryError::Database)?;
         self.context(user_id).await
     }
+
+    async fn list_route_participations(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<RouteParticipationDto>, RepositoryError> {
+        let rows = sqlx::query_as::<_, (String, Option<String>, time::OffsetDateTime)>(
+            "SELECT route_id, private_journey_id, joined_at FROM route_participations WHERE user_id = $1 AND left_at IS NULL ORDER BY joined_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::Database)?;
+        rows.into_iter()
+            .map(|(route_id, private_journey_id, joined_at)| {
+                Ok(RouteParticipationDto {
+                    route_id,
+                    private_journey_id,
+                    joined_at: format_timestamp(joined_at)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn route_context(
+        &self,
+        user_id: &str,
+        route_ids: &[String],
+    ) -> Result<RouteParticipationContextDto, RepositoryError> {
+        if route_ids.is_empty() {
+            return Ok(RouteParticipationContextDto::default());
+        }
+        let counts = sqlx::query_as::<_, (String, i64)>(
+            "SELECT route_id, SUM(active_count)::BIGINT FROM route_participation_count_shards WHERE route_id = ANY($1) GROUP BY route_id",
+        )
+        .bind(route_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::Database)?;
+        let joined_route_ids = sqlx::query_scalar::<_, String>(
+            "SELECT route_id FROM route_participations WHERE user_id = $1 AND route_id = ANY($2) AND left_at IS NULL ORDER BY route_id",
+        )
+        .bind(user_id)
+        .bind(route_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::Database)?;
+        Ok(RouteParticipationContextDto {
+            joined_route_ids,
+            participant_counts: counts
+                .into_iter()
+                .map(|(route_id, count)| (route_id, count.max(0) as u64))
+                .collect(),
+        })
+    }
+
+    async fn set_route_participation(
+        &self,
+        user_id: &str,
+        route_id: &str,
+        active: bool,
+        private_journey_id: Option<String>,
+        intent_version: Option<u64>,
+    ) -> Result<RouteParticipationStateDto, RepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(RepositoryError::Database)?;
+        // Only commands for the same user and route need ordering. Hot routes can use all shards.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::TEXT), hashtext($2::TEXT))")
+            .bind(user_id)
+            .bind(route_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::Database)?;
+
+        let intent_version =
+            intent_version.map(|version| i64::try_from(version).unwrap_or(i64::MAX));
+
+        if active {
+            sqlx::query(
+                "INSERT INTO route_participations (route_id, user_id, private_journey_id, left_at, last_intent_version) VALUES ($1, $2, $3, NULL, COALESCE($4, 0)) ON CONFLICT (route_id, user_id) DO UPDATE SET private_journey_id = EXCLUDED.private_journey_id, joined_at = CASE WHEN route_participations.left_at IS NULL THEN route_participations.joined_at ELSE now() END, left_at = NULL, last_intent_version = COALESCE($4, route_participations.last_intent_version) WHERE ($4 IS NOT NULL AND $4 >= route_participations.last_intent_version) OR ($4 IS NULL AND route_participations.last_intent_version = 0)",
+            )
+            .bind(route_id)
+            .bind(user_id)
+            .bind(private_journey_id)
+            .bind(intent_version)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::Database)?;
+        } else {
+            sqlx::query(
+                "INSERT INTO route_participations (route_id, user_id, private_journey_id, left_at, last_intent_version) VALUES ($1, $2, NULL, now(), COALESCE($3, 0)) ON CONFLICT (route_id, user_id) DO UPDATE SET private_journey_id = NULL, left_at = CASE WHEN route_participations.left_at IS NULL THEN now() ELSE route_participations.left_at END, last_intent_version = COALESCE($3, route_participations.last_intent_version) WHERE ($3 IS NOT NULL AND $3 >= route_participations.last_intent_version) OR ($3 IS NULL AND route_participations.last_intent_version = 0)",
+            )
+            .bind(route_id)
+            .bind(user_id)
+            .bind(intent_version)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::Database)?;
+        }
+        let (private_journey_id, joined_at, left_at) = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                time::OffsetDateTime,
+                Option<time::OffsetDateTime>,
+            ),
+        >(
+            "SELECT private_journey_id, joined_at, left_at FROM route_participations WHERE route_id = $1 AND user_id = $2",
+        )
+        .bind(route_id)
+        .bind(user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(RepositoryError::Database)?;
+        let joined = left_at.is_none();
+        let participant_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(active_count), 0)::BIGINT FROM route_participation_count_shards WHERE route_id = $1",
+        )
+        .bind(route_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(RepositoryError::Database)?;
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::Database)?;
+        Ok(RouteParticipationStateDto {
+            route_id: route_id.to_string(),
+            joined,
+            private_journey_id: joined.then_some(private_journey_id).flatten(),
+            joined_at: if joined {
+                Some(format_timestamp(joined_at)?)
+            } else {
+                None
+            },
+            participant_count: participant_count.max(0) as u64,
+        })
+    }
+}
+
+fn command_is_accepted(current_version: u64, incoming_version: Option<u64>) -> bool {
+    incoming_version
+        .map(|version| version >= current_version)
+        .unwrap_or(current_version == 0)
+}
+
+fn format_timestamp(value: time::OffsetDateTime) -> Result<String, time::error::Format> {
+    value.format(&time::format_description::well_known::Rfc3339)
 }
 
 fn edge_name(edge: SocialEdgeTypeDto) -> &'static str {

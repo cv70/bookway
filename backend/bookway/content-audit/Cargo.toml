@@ -16,10 +16,12 @@ sqlx.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+time.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 tower.workspace = true
 prost.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

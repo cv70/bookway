@@ -10,10 +10,12 @@ async-trait.workspace = true
 axum.workspace = true
 bookway-api.workspace = true
 bookway-bbs-link.workspace = true
+bookway-data.workspace = true
 bookway-runtime.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
@@ -21,6 +23,7 @@ tracing.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 prost.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

@@ -6,8 +6,12 @@ pub struct SearchRequest {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SuggestionsRequest {
+    /// Kept for read compatibility with callers deployed before viewer visibility.
     #[prost(string, tag = "1")]
     pub query: ::prost::alloc::string::String,
+    /// JSON-encoded SuggestionQueryRequest from a trusted internal caller.
+    #[prost(string, tag = "2")]
+    pub request_json: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JsonResponse {

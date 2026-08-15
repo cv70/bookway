@@ -3,6 +3,8 @@
 pub struct ListRequest {
     #[prost(string, tag = "1")]
     pub post_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub request_json: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateRequest {
@@ -12,6 +14,17 @@ pub struct CreateRequest {
     pub post_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub request_json: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "4")]
+    pub idempotency_key: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeleteRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub post_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub comment_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JsonResponse {
@@ -151,6 +164,27 @@ pub mod comment_client {
                 .insert(GrpcMethod::new("bookway.comment.Comment", "Create"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn delete(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.comment.Comment/Delete",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.comment.Comment", "Delete"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -173,6 +207,10 @@ pub mod comment_server {
         async fn create(
             &self,
             request: tonic::Request<super::CreateRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
+        async fn delete(
+            &self,
+            request: tonic::Request<super::DeleteRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonResponse>, tonic::Status>;
     }
     #[derive(Debug)]
@@ -322,6 +360,49 @@ pub mod comment_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CreateSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.comment.Comment/Delete" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteSvc<T: Comment>(pub Arc<T>);
+                    impl<T: Comment> tonic::server::UnaryService<super::DeleteRequest>
+                    for DeleteSvc<T> {
+                        type Response = super::JsonResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeleteRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Comment>::delete(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

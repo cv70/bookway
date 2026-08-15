@@ -1,5 +1,5 @@
 import { Search, X } from 'lucide-react-native';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -10,12 +10,12 @@ import {
   View,
 } from 'react-native';
 
-import { getSuggestions, search as searchApi } from '../api/client';
+import { ApiRequestError, getSuggestions, search as searchApi } from '../api/client';
 import { eventReporter } from '../analytics/eventReporter';
 import { FeedCard } from '../components/FeedCard';
 import { ScreenHeader } from '../components/ScreenHeader';
 import { colors, domainMeta } from '../theme';
-import { Feed, GrowthDomain, SearchResult } from '../types';
+import { Feed, GrowthDomain, SearchResponse } from '../types';
 
 type Filter = 'all' | GrowthDomain;
 type FeedMode = 'recommend' | 'following';
@@ -27,88 +27,128 @@ const filters: Array<{ key: Filter; label: string }> = [
 
 export function DiscoverScreen({
   feed,
+  followingFeed,
+  feedLoadingMore = false,
+  followingFeedLoadingMore = false,
   likedPostIds,
   bookmarkedPostIds,
   joinedRouteIds,
-  followingAuthorNames,
+  joiningRouteIds,
+  routeParticipantCounts,
   offline = false,
   onLike,
   onBookmark,
+  onHide,
   onJoin,
+  onLoadMoreFeed,
   onOpen,
 }: {
   feed: Feed;
+  followingFeed: Feed;
+  feedLoadingMore?: boolean;
+  followingFeedLoadingMore?: boolean;
   likedPostIds?: Set<string>;
   bookmarkedPostIds?: Set<string>;
   joinedRouteIds?: Set<string>;
-  followingAuthorNames?: Set<string>;
+  joiningRouteIds?: Set<string>;
+  routeParticipantCounts?: Record<string, number>;
   offline?: boolean;
   onLike?: (postId: string) => void;
   onBookmark?: (postId: string) => void;
+  onHide?: (postId: string) => void;
   onJoin?: (post: Feed['items'][number]['post']) => void;
-  onOpen?: (post: Feed['items'][number]['post']) => void;
+  onLoadMoreFeed?: (surface: FeedMode) => void;
+  onOpen?: (item: Feed['items'][number]) => void;
 }) {
   const [filter, setFilter] = useState<Filter>('all');
   const [mode, setMode] = useState<FeedMode>('recommend');
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<SearchResult[] | null>(null);
+  const [searchResponse, setSearchResponse] = useState<SearchResponse | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [recentQueries, setRecentQueries] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
-  const visibleFeed = mode === 'following'
-    ? feed.items.filter((item) => followingAuthorNames?.has(item.post.author_name))
-    : feed.items;
+  const [loadingMore, setLoadingMore] = useState(false);
+  const searchRequestId = useRef(0);
+  const suggestionRequestId = useRef(0);
+  const loadingMoreRef = useRef(false);
+  const activeFeed = mode === 'following' ? followingFeed : feed;
+  const visibleFeed = activeFeed.items;
+  const feedLoading = mode === 'following' ? followingFeedLoadingMore : feedLoadingMore;
   const items = filter === 'all' ? visibleFeed : visibleFeed.filter((item) => item.post.domain === filter);
+  const searchResults = searchResponse?.items ?? null;
+  const visibleSearchResults = filter === 'all'
+    ? searchResults
+    : searchResults?.filter((result) => (result.post?.domain ?? result.domain) === filter);
 
   useEffect(() => {
     const trimmed = query.trim();
+    const requestId = ++searchRequestId.current;
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
     if (!trimmed) {
-      setResults(null);
+      setSearchResponse(null);
       setSearching(false);
       return;
     }
+    setSearchResponse(null);
     setSearching(true);
     const timer = setTimeout(() => {
       eventReporter.track({ event_type: 'search_submit', component_id: 'discover-search', source: 'mobile', content_id: undefined });
       searchApi(trimmed)
         .then((response) => {
+          if (requestId !== searchRequestId.current) return;
           setRecentQueries((current) => [trimmed, ...current.filter((item) => item !== trimmed)].slice(0, 6));
-          setResults(response.items);
+          setSearchResponse(response);
         })
         .catch(() => {
+          if (requestId !== searchRequestId.current) return;
           const lower = trimmed.toLowerCase();
-          setResults(
-            feed.items
+          setSearchResponse({
+            query: trimmed,
+            items: feed.items
               .filter(({ post }) => `${post.title} ${post.summary} ${post.tags.join(' ')}`.toLowerCase().includes(lower))
-              .map(({ post, score }) => ({
+              .map(({ author_id, post, score }) => ({
                 id: post.id,
                 result_type: 'post' as const,
                 title: post.title,
                 snippet: post.summary,
                 cover_url: post.cover_url,
+                author_id,
                 author_name: post.author_name,
                 domain: post.domain,
                 score,
                 highlights: [post.title],
                 post,
               })),
-          );
+            total_estimate: feed.items.length,
+            took_ms: 0,
+            degraded: true,
+          });
         })
-        .finally(() => setSearching(false));
+        .finally(() => {
+          if (requestId === searchRequestId.current) setSearching(false);
+        });
     }, 260);
     return () => clearTimeout(timer);
-  }, [feed, query]);
+  }, [feed.items, query]);
 
   useEffect(() => {
     const trimmed = query.trim();
+    const requestId = ++suggestionRequestId.current;
     if (!trimmed) {
       setSuggestions([]);
       return;
     }
     const timer = setTimeout(() => {
       getSuggestions(trimmed)
-        .then((response) => setSuggestions(response.items.map((item) => item.text)))
-        .catch(() => setSuggestions(feed.items.flatMap((item) => item.post.tags).filter((tag) => tag.includes(trimmed)).slice(0, 6)));
+        .then((response) => {
+          if (requestId === suggestionRequestId.current) setSuggestions(response.items.map((item) => item.text));
+        })
+        .catch(() => {
+          if (requestId === suggestionRequestId.current) {
+            setSuggestions(feed.items.flatMap((item) => item.post.tags).filter((tag) => tag.includes(trimmed)).slice(0, 6));
+          }
+        });
     }, 140);
     return () => clearTimeout(timer);
   }, [feed.items, query]);
@@ -119,8 +159,60 @@ export function DiscoverScreen({
     setRecentQueries((current) => [trimmed, ...current.filter((item) => item !== trimmed)].slice(0, 6));
   };
 
+  const loadMoreSearch = () => {
+    const trimmed = query.trim();
+    const cursor = searchResponse?.next_cursor;
+    if (!trimmed || searchResponse?.query !== trimmed || !cursor || loadingMoreRef.current) return;
+
+    const requestId = searchRequestId.current;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    searchApi(trimmed, cursor)
+      .then((response) => {
+        if (requestId !== searchRequestId.current) return;
+        setSearchResponse((current) => {
+          if (!current || current.query !== trimmed) return current;
+          const seenIds = new Set(current.items.map((item) => item.id));
+          return {
+            ...response,
+            items: [...current.items, ...response.items.filter((item) => !seenIds.has(item.id))],
+            total_estimate: Math.max(current.total_estimate, response.total_estimate),
+            degraded: current.degraded || response.degraded,
+          };
+        });
+      })
+      .catch((error: unknown) => {
+        if (!(error instanceof ApiRequestError) || error.code !== 'failed_precondition') {
+          // Retain the already-rendered page: an intermittent next-page failure is recoverable.
+          return;
+        }
+        // PIT-backed cursors are deliberately short-lived. Restart from page one so a user
+        // can continue searching instead of retrying an expired cursor forever.
+        return searchApi(trimmed).then((response) => {
+          if (requestId === searchRequestId.current) setSearchResponse(response);
+        }).catch(() => {
+          // Keep already rendered results if the refresh itself cannot be completed.
+        });
+      })
+      .finally(() => {
+        if (requestId === searchRequestId.current) {
+          loadingMoreRef.current = false;
+          setLoadingMore(false);
+        }
+      });
+  };
+
   return (
-    <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+    <ScrollView
+      contentContainerStyle={styles.content}
+      onScroll={({ nativeEvent }) => {
+        if (nativeEvent.layoutMeasurement.height + nativeEvent.contentOffset.y < nativeEvent.contentSize.height - 180) return;
+        if (query) loadMoreSearch();
+        else onLoadMoreFeed?.(mode);
+      }}
+      scrollEventThrottle={200}
+      showsVerticalScrollIndicator={false}
+    >
       <ScreenHeader title="发现" />
       {offline ? <Text style={styles.offline}>当前展示离线预览，连接恢复后会自动更新</Text> : null}
       <View style={styles.searchBox}>
@@ -146,7 +238,7 @@ export function DiscoverScreen({
           {searching ? <ActivityIndicator color={colors.evergreen} size="small" /> : null}
         </View>
       ) : null}
-      {query && !searching && results === null && suggestions.length ? <View style={styles.suggestions}>{suggestions.map((suggestion) => <Pressable key={suggestion} onPress={() => { setQuery(suggestion); rememberQuery(suggestion); }} style={styles.suggestion}><Search color={colors.faint} size={15} /><Text style={styles.suggestionText}>{suggestion}</Text></Pressable>)}</View> : null}
+      {query && searchResults === null && suggestions.length ? <View style={styles.suggestions}>{suggestions.map((suggestion) => <Pressable key={suggestion} onPress={() => { setQuery(suggestion); rememberQuery(suggestion); }} style={styles.suggestion}><Search color={colors.faint} size={15} /><Text style={styles.suggestionText}>{suggestion}</Text></Pressable>)}</View> : null}
       {!query && recentQueries.length ? <View style={styles.recent}><View style={styles.recentHeader}><Text style={styles.recentTitle}>最近搜索</Text><Pressable accessibilityLabel="清除搜索历史" onPress={() => setRecentQueries([])}><X color={colors.faint} size={15} /></Pressable></View><View style={styles.recentItems}>{recentQueries.map((item) => <Pressable key={item} onPress={() => setQuery(item)} style={styles.recentItem}><Text style={styles.recentText}>{item}</Text></Pressable>)}</View></View> : null}
       {!query ? (
         <View style={styles.modeTabs}>
@@ -178,15 +270,18 @@ export function DiscoverScreen({
       </ScrollView>
       <View>
         {query
-          ? results?.map((result) =>
+          ? visibleSearchResults?.map((result) =>
               result.post ? (
                 <FeedCard
-                  item={{ post: result.post, score: result.score, source: 'search', reasons: result.highlights }}
+                  item={{ author_id: result.author_id ?? '', post: result.post, score: result.score, source: 'search', reasons: result.highlights }}
                   bookmarked={bookmarkedPostIds?.has(result.id)}
                   key={result.id}
                   joined={joinedRouteIds?.has(result.id)}
+                  joining={joiningRouteIds?.has(result.id)}
+                  joinCount={routeParticipantCounts?.[result.id]}
                   liked={likedPostIds?.has(result.id)}
                   onBookmark={onBookmark}
+                  onHide={onHide}
                   onJoin={onJoin}
                   onLike={onLike}
                   onOpen={onOpen}
@@ -204,15 +299,29 @@ export function DiscoverScreen({
                 bookmarked={bookmarkedPostIds?.has(item.post.id)}
                 key={item.post.id}
                 joined={joinedRouteIds?.has(item.post.id)}
+                joining={joiningRouteIds?.has(item.post.id)}
+                joinCount={routeParticipantCounts?.[item.post.id]}
                 liked={likedPostIds?.has(item.post.id)}
                 onBookmark={onBookmark}
+                onHide={onHide}
                 onJoin={onJoin}
                 onLike={onLike}
                 onOpen={onOpen}
               />
             ))}
       </View>
-      {((query && results?.length === 0) || (!query && items.length === 0)) ? (
+      {query && searchResponse?.degraded ? <Text style={styles.degraded}>搜索服务暂不可用，已在当前已加载内容中查找</Text> : null}
+      {query && searchResponse?.next_cursor ? (
+        <Pressable accessibilityRole="button" disabled={loadingMore} onPress={loadMoreSearch} style={[styles.loadMore, loadingMore && styles.loadMoreDisabled]}>
+          {loadingMore ? <ActivityIndicator color={colors.evergreen} size="small" /> : <Text style={styles.loadMoreText}>加载更多结果</Text>}
+        </Pressable>
+      ) : null}
+      {!query && activeFeed.meta.next_cursor ? (
+        <Pressable accessibilityRole="button" disabled={feedLoading} onPress={() => onLoadMoreFeed?.(mode)} style={[styles.loadMore, feedLoading && styles.loadMoreDisabled]}>
+          {feedLoading ? <ActivityIndicator color={colors.evergreen} size="small" /> : <Text style={styles.loadMoreText}>加载更多{mode === 'following' ? '关注内容' : '推荐内容'}</Text>}
+        </Pressable>
+      ) : null}
+      {((query && visibleSearchResults?.length === 0) || (!query && items.length === 0)) ? (
         <View style={styles.empty}><Text style={styles.emptyText}>{mode === 'following' && !query ? '关注创作者后，他们的行记会出现在这里' : '这一页还在生长'}</Text></View>
       ) : null}
     </ScrollView>
@@ -250,4 +359,8 @@ const styles = StyleSheet.create({
   resultRow: { paddingHorizontal: 20, paddingVertical: 15, backgroundColor: colors.surface, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
   resultTitle: { color: colors.ink, fontSize: 15, fontWeight: '700', letterSpacing: 0 },
   resultSnippet: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4, letterSpacing: 0 },
+  degraded: { marginHorizontal: 20, marginTop: 12, color: colors.muted, fontSize: 12, lineHeight: 18, letterSpacing: 0 },
+  loadMore: { minHeight: 42, marginHorizontal: 16, marginTop: 14, alignItems: 'center', justifyContent: 'center', borderRadius: 6, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
+  loadMoreDisabled: { opacity: 0.65 },
+  loadMoreText: { color: colors.evergreen, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
 });

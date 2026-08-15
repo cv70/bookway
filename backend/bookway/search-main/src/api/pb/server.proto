@@ -2,7 +2,12 @@ syntax = "proto3";
 package bookway.search.main;
 
 message SearchRequest { string request_json = 1; }
-message SuggestionsRequest { string query = 1; }
+message SuggestionsRequest {
+  // Kept for read compatibility with callers deployed before viewer visibility.
+  string query = 1;
+  // JSON-encoded SuggestionQueryRequest from a trusted internal caller.
+  string request_json = 2;
+}
 message JsonResponse { string response_json = 1; }
 
 service SearchMain {

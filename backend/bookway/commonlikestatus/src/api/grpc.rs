@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)] // tonic::Status is fixed by the transport API.
+
 use super::pb::{self, common_like_status_server::CommonLikeStatus};
 use crate::domain::Domain;
 use bookway_api::{ReactionContextRequest, ReactionRequest};

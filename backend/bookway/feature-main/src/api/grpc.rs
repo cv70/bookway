@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)] // tonic::Status is fixed by the transport API.
+
 use super::pb::{self, feature_main_server::FeatureMain};
 use crate::{api::FeatureRequest, domain::Domain};
 use serde::Serialize;
@@ -26,7 +28,7 @@ impl FeatureMain for GrpcServer {
     }
 }
 
-pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
+pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
     let addr = domain.config.listen_addr;
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter

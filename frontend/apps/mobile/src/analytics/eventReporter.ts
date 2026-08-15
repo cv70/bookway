@@ -13,6 +13,7 @@ type EventType =
   | 'complete'
   | 'join_route'
   | 'follow'
+  | 'report'
   | 'search_submit';
 
 type PendingEvent = {

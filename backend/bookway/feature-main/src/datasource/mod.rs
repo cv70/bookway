@@ -1,5 +1,15 @@
 use std::collections::HashMap;
 
+use serde::Serialize;
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct CandidateFeatures {
+    pub(crate) domain_affinity: f64,
+    pub(crate) author_affinity: f64,
+    pub(crate) impression_fatigue: f64,
+    pub(crate) direct_negative_feedback: f64,
+}
+
 #[derive(Clone)]
 pub(crate) struct FeatureRepository {
     pool: Option<sqlx::PgPool>,
@@ -43,6 +53,7 @@ impl FeatureRepository {
                 ((positive - negative * 0.75) / total.max(1.0)).clamp(0.0, 1.0),
             ),
         ]);
+        derived.extend(self.load_domain_interests(user_id).await);
         let rows = sqlx::query_as::<_, (String, serde_json::Value)>(
             "SELECT feature_name,value FROM user_features WHERE user_id=$1",
         )
@@ -60,6 +71,181 @@ impl FeatureRepository {
             Err(error) => {
                 tracing::warn!(%error, user_id, "feature store degraded");
                 derived
+            }
+        }
+    }
+
+    async fn load_domain_interests(&self, user_id: &str) -> HashMap<String, f64> {
+        let Some(pool) = &self.pool else {
+            return HashMap::new();
+        };
+        // These are user-level features, used before candidate generation so
+        // a strong interest can expand recall instead of only reranking it.
+        let rows = sqlx::query_as::<_, (String, f64)>(
+            r#"
+            SELECT
+                content.domain,
+                SUM(
+                    CASE event.event_type
+                        WHEN 'join_route' THEN 5.0
+                        WHEN 'complete' THEN 5.0
+                        WHEN 'bookmark' THEN 3.0
+                        WHEN 'share' THEN 2.5
+                        WHEN 'like' THEN 2.0
+                        WHEN 'click' THEN 0.6
+                        WHEN 'view' THEN 0.4
+                        WHEN 'hide' THEN -5.0
+                        WHEN 'report' THEN -8.0
+                        ELSE 0.0
+                    END
+                )::double precision
+            FROM user_events AS event
+            INNER JOIN content_items AS content ON content.id = event.content_id
+            WHERE event.user_id = $1
+              AND event.occurred_at > now() - interval '90 days'
+            GROUP BY content.domain
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await;
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, user_id, "domain interest features degraded");
+                return HashMap::new();
+            }
+        };
+        let maximum = rows
+            .iter()
+            .map(|(_, score)| score.max(0.0))
+            .fold(1.0_f64, f64::max);
+        rows.into_iter()
+            .filter(|(domain, _)| {
+                matches!(
+                    domain.as_str(),
+                    "learning" | "movement" | "wellness" | "travel" | "leisure"
+                )
+            })
+            .filter_map(|(domain, score)| {
+                let score = (score.max(0.0) / maximum).clamp(0.0, 1.0);
+                (score > 0.0).then(|| (format!("domain_interest.{domain}"), score))
+            })
+            .collect()
+    }
+
+    pub(crate) async fn load_candidates(
+        &self,
+        user_id: &str,
+        content_ids: &[String],
+    ) -> HashMap<String, CandidateFeatures> {
+        let Some(pool) = &self.pool else {
+            return HashMap::new();
+        };
+        if content_ids.is_empty() {
+            return HashMap::new();
+        }
+
+        // Normalize high-intent history within each user's strongest domain
+        // and author so global popularity does not erase personal preference.
+        let rows = sqlx::query_as::<_, (String, f64, f64, f64, f64)>(
+            r#"
+            WITH history AS (
+                SELECT
+                    content.domain,
+                    content.author_id,
+                    CASE event.event_type
+                        WHEN 'join_route' THEN 5.0
+                        WHEN 'complete' THEN 5.0
+                        WHEN 'bookmark' THEN 3.0
+                        WHEN 'share' THEN 2.5
+                        WHEN 'like' THEN 2.0
+                        WHEN 'click' THEN 0.6
+                        WHEN 'view' THEN 0.4
+                        WHEN 'hide' THEN -5.0
+                        WHEN 'report' THEN -8.0
+                        ELSE 0.0
+                    END AS weight
+                FROM user_events AS event
+                INNER JOIN content_items AS content ON content.id = event.content_id
+                WHERE event.user_id = $1
+                  AND event.occurred_at > now() - interval '90 days'
+            ),
+            domain_scores AS (
+                SELECT domain, SUM(weight)::double precision AS score
+                FROM history
+                GROUP BY domain
+            ),
+            author_scores AS (
+                SELECT author_id, SUM(weight)::double precision AS score
+                FROM history
+                GROUP BY author_id
+            ),
+            normalizers AS (
+                SELECT
+                    GREATEST(COALESCE((SELECT MAX(score) FROM domain_scores), 0.0), 1.0) AS domain_max,
+                    GREATEST(COALESCE((SELECT MAX(score) FROM author_scores), 0.0), 1.0) AS author_max
+            ),
+            direct_feedback AS (
+                SELECT
+                    content_id,
+                    COUNT(*) FILTER (
+                        WHERE event_type = 'impression'
+                          AND occurred_at > now() - interval '30 days'
+                    )::double precision AS impression_count,
+                    COUNT(*) FILTER (
+                        WHERE event_type IN ('hide', 'report')
+                          AND occurred_at > now() - interval '90 days'
+                    )::double precision AS negative_count
+                FROM user_events
+                WHERE user_id = $1 AND content_id = ANY($2)
+                GROUP BY content_id
+            )
+            SELECT
+                candidate.id,
+                LEAST(GREATEST(COALESCE(domain.score, 0.0), 0.0) / normalizers.domain_max, 1.0)::double precision,
+                LEAST(GREATEST(COALESCE(author.score, 0.0), 0.0) / normalizers.author_max, 1.0)::double precision,
+                LEAST(COALESCE(feedback.impression_count, 0.0) / 4.0, 1.0)::double precision,
+                LEAST(COALESCE(feedback.negative_count, 0.0), 1.0)::double precision
+            FROM content_items AS candidate
+            CROSS JOIN normalizers
+            LEFT JOIN domain_scores AS domain ON domain.domain = candidate.domain
+            LEFT JOIN author_scores AS author ON author.author_id = candidate.author_id
+            LEFT JOIN direct_feedback AS feedback ON feedback.content_id = candidate.id
+            WHERE candidate.id = ANY($2)
+            "#,
+        )
+        .bind(user_id)
+        .bind(content_ids)
+        .fetch_all(pool)
+        .await;
+
+        match rows {
+            Ok(rows) => rows
+                .into_iter()
+                .map(
+                    |(
+                        content_id,
+                        domain_affinity,
+                        author_affinity,
+                        impression_fatigue,
+                        direct_negative_feedback,
+                    )| {
+                        (
+                            content_id,
+                            CandidateFeatures {
+                                domain_affinity,
+                                author_affinity,
+                                impression_fatigue,
+                                direct_negative_feedback,
+                            },
+                        )
+                    },
+                )
+                .collect(),
+            Err(error) => {
+                tracing::warn!(%error, user_id, "candidate feature store degraded");
+                HashMap::new()
             }
         }
     }

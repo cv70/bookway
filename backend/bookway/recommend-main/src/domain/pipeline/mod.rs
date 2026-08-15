@@ -19,9 +19,12 @@ use crate::api::{
     PostSummaryDto,
 };
 
-pub(crate) use filter::{DuplicateFilter, SafetyFilter, SeenFilter, ServedHistoryFilter};
+pub(crate) use filter::{
+    DuplicateFilter, FollowingOnlyFilter, SafetyFilter, SeenFilter, ServedHistoryFilter,
+};
 pub(crate) use hydrator::{
-    ReactionContextHydrator, ServedHistoryHydrator, SocialContextHydrator, SocialProofHydrator,
+    ReactionContextHydrator, RouteContextHydrator, ServedHistoryHydrator, SocialContextHydrator,
+    SocialProofHydrator,
 };
 pub(crate) use query_hydrator::DefaultQueryHydrator;
 pub(crate) use ranker::RecommendRanker;
@@ -41,7 +44,7 @@ pub(crate) struct FeedQuery {
     pub(crate) seen: HashSet<String>,
     pub(crate) user_id: String,
     session_id: String,
-    surface: String,
+    pub(crate) surface: String,
     pub(crate) cursor: Option<String>,
     pub(crate) limit: usize,
 }
@@ -60,12 +63,21 @@ pub(crate) struct Candidate {
     pub(crate) muted_author: bool,
     pub(crate) liked: bool,
     pub(crate) bookmarked: bool,
+    pub(crate) hidden: bool,
     pub(crate) previously_served: bool,
 }
 
 pub(crate) struct SourceResult {
     pub(crate) candidates: Vec<Candidate>,
     pub(crate) next_cursor: Option<String>,
+    pub(crate) degraded: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RankOutcome {
+    pub(crate) model_version: Option<String>,
+    pub(crate) experiment_bucket: Option<String>,
+    pub(crate) degraded: bool,
 }
 
 #[derive(Debug, Error)]
@@ -112,7 +124,7 @@ pub(crate) trait CandidateRanker: Send + Sync {
         &self,
         query: &FeedQuery,
         candidates: &mut [Candidate],
-    ) -> Result<(), PipelineError>;
+    ) -> Result<RankOutcome, PipelineError>;
 }
 
 pub(crate) trait CandidateSelector: Send + Sync {
@@ -190,6 +202,7 @@ impl FeedPipeline {
         for result in source_results {
             match result {
                 Ok(result) => {
+                    degraded |= result.degraded;
                     candidates.extend(result.candidates);
                     if next_cursor.is_none() {
                         next_cursor = result.next_cursor;
@@ -217,11 +230,18 @@ impl FeedPipeline {
         for scorer in &self.scorers {
             scorer.score(&query, &mut candidates);
         }
-        if let Some(ranker) = &self.ranker
-            && let Err(error) = ranker.rank(&query, &mut candidates).await
-        {
-            degraded = true;
-            tracing::warn!(%error, "model ranking degraded; heuristic scores retained");
+        let mut rank_outcome = RankOutcome::default();
+        if let Some(ranker) = &self.ranker {
+            match ranker.rank(&query, &mut candidates).await {
+                Ok(outcome) => {
+                    degraded |= outcome.degraded;
+                    rank_outcome = outcome;
+                }
+                Err(error) => {
+                    degraded = true;
+                    tracing::warn!(%error, "model ranking degraded; heuristic scores retained");
+                }
+            }
         }
 
         let mut selected = self.selector.select(candidates, query.limit);
@@ -259,6 +279,7 @@ impl FeedPipeline {
         let items = selected
             .into_iter()
             .map(|candidate| FeedItemDto {
+                author_id: candidate.author_id,
                 post: candidate.post,
                 score: candidate.score,
                 source: candidate.source,
@@ -276,6 +297,8 @@ impl FeedPipeline {
                 next_cursor,
                 pipeline_id,
                 degraded,
+                model_version: rank_outcome.model_version,
+                experiment_bucket: rank_outcome.experiment_bucket,
             },
         }
     }

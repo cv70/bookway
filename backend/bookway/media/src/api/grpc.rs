@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)] // tonic::Status is fixed by the transport API.
+
 use super::pb::{self, media_server::Media};
 use crate::{api::UploadRequest, domain::Domain};
 use serde::Serialize;

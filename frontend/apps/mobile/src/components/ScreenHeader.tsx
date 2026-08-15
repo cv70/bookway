@@ -7,10 +7,11 @@ type Props = {
   eyebrow?: string;
   title: string;
   action?: 'bell' | 'plus';
+  badgeCount?: number;
   onAction?: () => void;
 };
 
-export function ScreenHeader({ eyebrow, title, action, onAction }: Props) {
+export function ScreenHeader({ eyebrow, title, action, badgeCount = 0, onAction }: Props) {
   const Icon = action === 'plus' ? Plus : Bell;
   return (
     <View style={styles.header}>
@@ -20,12 +21,13 @@ export function ScreenHeader({ eyebrow, title, action, onAction }: Props) {
       </View>
       {action ? (
         <Pressable
-          accessibilityLabel={action === 'plus' ? '创建路线' : '通知'}
+          accessibilityLabel={action === 'plus' ? '创建路线' : badgeCount ? `通知，${badgeCount} 条未读` : '通知'}
           hitSlop={10}
           onPress={onAction}
           style={({ pressed }) => [styles.action, pressed && styles.pressed]}
         >
           <Icon color={colors.ink} size={22} strokeWidth={2} />
+          {action === 'bell' && badgeCount ? <View style={styles.badge}><Text style={styles.badgeText}>{badgeCount > 99 ? '99+' : badgeCount}</Text></View> : null}
         </Pressable>
       ) : null}
     </View>
@@ -66,6 +68,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: colors.surface,
   },
+  badge: { position: 'absolute', top: -4, right: -4, minWidth: 16, height: 16, paddingHorizontal: 3, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.coral, borderWidth: 1.5, borderColor: colors.background },
+  badgeText: { color: colors.surface, fontSize: 8, fontWeight: '800', lineHeight: 11, letterSpacing: 0 },
   pressed: { opacity: 0.55 },
 });
-

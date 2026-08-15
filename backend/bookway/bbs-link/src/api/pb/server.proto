@@ -6,6 +6,8 @@ message IdRequest { string id = 1; }
 message CreateRequest { string user_id = 1; string request_json = 2; string idempotency_key = 3; }
 message UpdateRequest { string user_id = 1; string id = 2; string request_json = 3; }
 message PublishRequest { string user_id = 1; string id = 2; }
+message RestrictRequest { string content_id = 1; }
+message RestoreRequest { string content_id = 1; }
 message JsonResponse { string response_json = 1; }
 
 service BbsLink {
@@ -15,4 +17,6 @@ service BbsLink {
   rpc Create(CreateRequest) returns (JsonResponse);
   rpc Update(UpdateRequest) returns (JsonResponse);
   rpc Publish(PublishRequest) returns (JsonResponse);
+  rpc Restrict(RestrictRequest) returns (JsonResponse);
+  rpc Restore(RestoreRequest) returns (JsonResponse);
 }

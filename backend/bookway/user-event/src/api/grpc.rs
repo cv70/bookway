@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)] // tonic::Status is fixed by the transport API.
+
 use super::pb::{self, user_event_server::UserEvent};
 use crate::{api::UserEventBatchRequest, domain::Domain};
 use serde::Serialize;

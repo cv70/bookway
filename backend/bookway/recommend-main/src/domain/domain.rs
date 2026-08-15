@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tonic::transport::Channel;
 
 use bookway_recommend_rank::api::pb as rank;
 use bookway_recommend_recall::api::pb as recall;
@@ -14,24 +13,16 @@ use crate::{
     },
     domain::pipeline::{
         AuthorDiversityScorer, DefaultQueryHydrator, DiversitySelector, ExposureSideEffect,
-        FeedPipeline, FeedPipelineComponents, IntentScorer, QualityScorer, ReactionContextHydrator,
-        RecommendRanker, RecommendRecallSource, SafetyFilter, SeenFilter, ServedHistoryFilter,
-        ServedHistoryHydrator, SocialContextHydrator, SocialProofHydrator,
+        FeedPipeline, FeedPipelineComponents, FollowingOnlyFilter, IntentScorer, QualityScorer,
+        ReactionContextHydrator, RecommendRanker, RecommendRecallSource, RouteContextHydrator,
+        SafetyFilter, SeenFilter, ServedHistoryFilter, ServedHistoryHydrator,
+        SocialContextHydrator, SocialProofHydrator,
     },
 };
 
 #[derive(Clone)]
 pub struct Domain {
     pub(crate) config: Config,
-    pub(crate) bbs: SharedBbsContextDataSource,
-    pub(crate) like_status: SharedLikeStatusDataSource,
-    pub(crate) exposures: SharedExposureDataSource,
-    pub(crate) recall_client:
-        Arc<recall::recommend_recall_client::RecommendRecallClient<tonic::transport::Channel>>,
-    pub(crate) rank_client:
-        Arc<rank::recommend_rank_client::RecommendRankClient<tonic::transport::Channel>>,
-    pub(crate) feature_client:
-        bookway_feature_main::api::pb::feature_main_client::FeatureMainClient<Channel>,
     pub(crate) feed: FeedService,
 }
 
@@ -75,10 +66,14 @@ impl Domain {
             .map_err(|error| setting_error("FEATURE_MAIN_GRPC_URL", error))?;
         let pipeline = FeedPipeline::new(FeedPipelineComponents {
             query_hydrator: Arc::new(DefaultQueryHydrator),
-            sources: vec![Arc::new(RecommendRecallSource::new(recall_client.clone()))],
+            sources: vec![Arc::new(RecommendRecallSource::new(
+                recall_client.clone(),
+                feature_client.clone(),
+            ))],
             hydrators: vec![
                 Arc::new(ServedHistoryHydrator::new(exposures.clone())),
                 Arc::new(SocialContextHydrator::new(bbs.clone())),
+                Arc::new(RouteContextHydrator::new(bbs.clone())),
                 Arc::new(ReactionContextHydrator::new(like_status.clone())),
                 Arc::new(SocialProofHydrator),
             ],
@@ -86,6 +81,7 @@ impl Domain {
                 Arc::new(SeenFilter),
                 Arc::new(ServedHistoryFilter),
                 Arc::new(SafetyFilter),
+                Arc::new(FollowingOnlyFilter),
             ],
             scorers: vec![
                 Arc::new(QualityScorer),
@@ -102,12 +98,6 @@ impl Domain {
         });
         Ok(Self {
             config,
-            bbs,
-            like_status,
-            exposures,
-            recall_client,
-            rank_client,
-            feature_client,
             feed: super::FeedService::new(pipeline),
         })
     }

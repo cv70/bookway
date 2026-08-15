@@ -268,6 +268,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookway-appeal-notification-dispatcher"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bookway-api",
+ "bookway-bbs-link",
+ "bookway-data",
+ "bookway-growth",
+ "bookway-runtime",
+ "futures",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "bookway-bbs"
 version = "0.1.0"
 dependencies = [
@@ -281,6 +300,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tonic",
  "tonic-build",
@@ -345,11 +365,13 @@ dependencies = [
  "axum 0.8.9",
  "bookway-api",
  "bookway-bbs-link",
+ "bookway-data",
  "bookway-runtime",
  "prost",
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.20",
  "tokio",
  "tonic",
@@ -357,6 +379,7 @@ dependencies = [
  "tonic-health",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -366,6 +389,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "bookway-api",
+ "bookway-content-audit",
  "bookway-data",
  "bookway-runtime",
  "prost",
@@ -379,6 +403,7 @@ dependencies = [
  "tonic-build",
  "tonic-health",
  "tower-http",
+ "tracing",
  "uuid",
 ]
 
@@ -417,11 +442,29 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tonic",
  "tonic-build",
  "tonic-health",
  "tower 0.5.3",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "bookway-content-report-restriction-dispatcher"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bookway-bbs-link",
+ "bookway-data",
+ "bookway-runtime",
+ "futures",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
  "tracing",
 ]
 
@@ -490,6 +533,7 @@ dependencies = [
  "bookway-bbs-link",
  "bookway-comment",
  "bookway-commonlikestatus",
+ "bookway-content-audit",
  "bookway-growth",
  "bookway-media",
  "bookway-runtime",
@@ -502,6 +546,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tower-http",
+ "tracing",
 ]
 
 [[package]]
@@ -518,6 +563,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tonic",
  "tonic-build",
@@ -636,6 +682,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookway-reminder-dispatcher"
+version = "0.1.0"
+dependencies = [
+ "bookway-data",
+ "bookway-runtime",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bookway-route-participation-reconciler"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bookway-api",
+ "bookway-bbs",
+ "bookway-data",
+ "bookway-runtime",
+ "futures",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "bookway-runtime"
 version = "0.1.0"
 dependencies = [
@@ -646,6 +722,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -674,17 +751,21 @@ dependencies = [
  "axum 0.8.9",
  "bookway-api",
  "bookway-bbs-search",
+ "bookway-data",
  "bookway-runtime",
  "prost",
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.20",
  "tokio",
  "tonic",
  "tonic-build",
  "tonic-health",
  "tower-http",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -698,6 +779,7 @@ dependencies = [
  "bookway-runtime",
  "http-body-util",
  "prost",
+ "redis",
  "serde",
  "serde_json",
  "sqlx",
@@ -709,6 +791,7 @@ dependencies = [
  "tonic-health",
  "tower 0.5.3",
  "tower-http",
+ "tracing",
  "uuid",
 ]
 

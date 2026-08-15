@@ -1,3 +1,5 @@
+#![allow(clippy::module_inception)]
+
 mod domain;
 pub(crate) mod pipeline;
 

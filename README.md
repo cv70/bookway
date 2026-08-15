@@ -12,8 +12,8 @@
 | 英文名 | Bookway |
 | 产品形态 | iOS / Android 移动应用，后续扩展 Web、创作者与开放平台 |
 | 当前阶段 | 生产基础设施接入与容量验证版本 |
-| 文档版本 | v0.5 |
-| 更新日期 | 2026-08-11 |
+| 文档版本 | v0.6 |
+| 更新日期 | 2026-08-15 |
 
 ## 目录
 
@@ -387,6 +387,7 @@ flowchart LR
 - 完成后先给予即时状态反馈，再展开可选留痕字段。
 - 首页排序综合固定时间、优先级、所需精力和用户手动排序。
 - 精力较低时可切换“轻量一天”，展示预先设置的最小版本行动。
+- 今日页可展示服务端陪伴简报：它只基于进行中路线和真实行动状态建议一个可选的下一步，用户点击后才进入行动详情；不会自动修改原计划。
 
 ### 5.4 快速记录
 
@@ -712,7 +713,7 @@ sync_failed
 
 客户端确定采用 React Native 新架构与 Expo，后端确定采用 Rust + Axum。首版后端直接按业务服务拆分，使用模块化微服务边界；每个服务内部由 `Domain` 持有配置、Repository 和客户端依赖，外部接口使用 `api/http.rs`，内部接口使用 `api/grpc.rs`，客户端只访问 Gateway。
 
-当前仓库已完成本阶段的生产基础设施基线：十五个 Axum 服务，SQLx/PostgreSQL Repository，Redis 限流与特征缓存，Transactional Outbox + Kafka Relay，OpenSearch 索引与检索降级，S3/MinIO 预签名直传与 CDN，内容审核，在线特征与排序服务，Gateway JWT、下游服务令牌，以及 Prometheus 指标、readiness 和 SLO。默认内存模式仅用于无依赖开发。本地真实依赖联调已覆盖数据库迁移、事件投递、对象上传、搜索/推荐降级、审核状态机和服务间鉴权。该结论不等同于已经拥有抖音或小红书的实际容量；在完成持续压测、容量模型、备份恢复与多区域故障演练前，不得以“亿级生产可用”作为发布结论。
+当前仓库已完成本阶段的生产基础设施基线：独立 Axum 服务，SQLx/PostgreSQL Repository，Redis 限流与特征缓存，Transactional Outbox + Kafka Relay，OpenSearch 索引与检索降级，S3/MinIO 预签名直传与 CDN，内容审核，在线特征与排序服务，Gateway JWT、下游服务令牌，以及 Prometheus 指标、readiness 和 SLO。推荐链路已加入负反馈硬过滤、渐进式多样性重排、模型版本/实验桶诊断、真实作者标识、服务端关注流和显式降级；搜索具备动态联想、查询统计、查询绑定游标与作者标识；行动留痕、周回望、私人资源知识库、跨端阅读进度/书签和社区举报已贯通移动端、Gateway、gRPC 与 PostgreSQL。评论支持父子回复、失败草稿恢复、写入幂等和稳定游标分页；行动计时可直接完成并留痕，实际时长会自动带入记录；应用内提醒由今日行动、周回望和同行路线等真实状态生成。公共路线参与也已成为 BBS 持有的服务端事实，支持私人路线关联、跨端状态恢复、实时同行人数，以及推荐和搜索的批量人数补全；Gateway 的单一加入端点、Growth 来源路线唯一约束与版本化参与意图保证重试不重复创建 Journey，后台协调器会自动修复 Growth/BBS 的同步双写失败，BBS 版本门禁阻止延迟命令覆盖最新退出或重入。爆款路线不再持有路线级全局写锁，同行人数由 64 个事务分片精确维护，写响应和批量补全最多聚合固定数量的计数行。默认内存模式仅用于无依赖开发。本地真实依赖联调已覆盖数据库迁移、事件投递、对象上传、搜索/推荐降级、审核状态机和服务间鉴权。该结论不等同于已经拥有抖音或小红书的实际容量；在完成持续压测、容量模型、备份恢复与多区域故障演练前，不得以“亿级生产可用”作为发布结论。
 
 | 层级 | 推荐方案 | 说明 |
 | --- | --- | --- |
@@ -729,7 +730,7 @@ sync_failed
 | 服务端校验 | validator + 领域值对象 | 传输层校验格式，领域层校验业务不变量 |
 | 数据库 | PostgreSQL + SQLx | 显式 SQL、事务、编译期查询检查和迁移 |
 | 缓存 | Redis | 热点缓存、限流、短期状态和分布式协调 |
-| 异步任务 | PostgreSQL Transactional Outbox + Kafka/Redpanda + Rust Worker | 保证业务写入和事件投递一致，支持退避、死信和重放演进 |
+| 异步任务 | PostgreSQL Transactional Outbox + Kafka/Redpanda + Rust Worker；版本化期望状态协调器 | 事件支持退避、死信和重放；跨服务命令按最新用户意图持续收敛并抵御乱序 |
 | 对象存储 | S3 兼容存储 + CDN | 图片原图、缩略图和导出文件 |
 | 搜索 | OpenSearch + PostgreSQL 事实源 | CJK 多字段检索、删除传播、重建和事实源降级 |
 | 媒体处理 | Rust Worker + libvips，P1 引入 FFmpeg | 图片缩放、审核副本和视频转码 |
@@ -834,7 +835,7 @@ flowchart TB
 首版服务自治方式拆分：
 
 - `gateway`：8080，App 唯一入口，鉴权、聚合、限流、CORS 和对外版本化 REST。
-- `growth`：8081，私人成长核心，包括路线、行动、今日清单、完成记录和回望。
+- `growth`：8081，私人成长核心，包括路线、行动、今日清单、行动留痕和周回望。
 - `bbs`：8082，只持有关注、拉黑、静音和社交图谱。
 - `recommend-main`：8083，负责 Query Hydration、候选源、补全、过滤、意图评分、多样性选择和曝光副作用。
 - `bbs-link`：8084，内容 Link 服务，持有内容事实、版本和发布状态。万卷行没有旧版迁移包袱，因此不沿用历史性的 `v2` 目录名。
@@ -845,13 +846,13 @@ flowchart TB
 - `user-event`：8089，接收组件曝光、点击、播放、互动和搜索等批量事件。
 - `search-main`：8090，负责查询规范化、搜索流水线编排、实验和降级；`bbs-search` 保持检索能力层。
 - `media`：8091，S3/MinIO 上传控制面、媒体元数据和 CDN 地址。
-- `content-audit`：8092，文本规则审核、风险决策与审核证据。
+- `content-audit`：8092，文本规则审核、风险决策、用户举报与待处理队列。
 - `feature-main`：8093，Redis/PostgreSQL 特征读取与版本化默认特征。
 - `recommend-rank`：8096，模型排序、实验桶与启发式降级。
 
 每个服务都可独立构建、发布和扩容。服务间只依赖公开 DTO 和 gRPC 契约，不访问其他服务源码；服务内部的数据源可从内存替换为 SQLx、Redis 或对象存储，而不改变 API 适配器和 Domain。
 
-推荐流水线的组件顺序固定为 `query hydrator → sources → hydrators → filters → scorers → selector → side effects`。内容召回并行，BBS 关系和互动状态分别补全，副作用失败不能阻断主推荐结果；后续可按 `x-algorithm` 引入关注、相似、热门和探索召回。
+推荐流水线的组件顺序固定为 `query hydrator → sources → hydrators → filters → scorers → selector → side effects`。内容召回并行，BBS 关系和互动状态分别补全；用户“不感兴趣”反馈在互动服务持久化并作为在线硬过滤，Selector 以作者、领域和标签窗口逐级放宽多样性约束，避免窄候选池饿死。副作用失败不能阻断主推荐结果；后续可按 `x-algorithm` 引入关注、相似、热门和探索召回。
 
 ### 10.4 离线与同步
 
@@ -1023,11 +1024,13 @@ POST   /v1/journeys/:journeyId/stages
 POST   /v1/journeys/:journeyId/actions
 
 GET    /v1/today?date=YYYY-MM-DD&timezone=Asia/Shanghai
+GET    /v1/companion?date=YYYY-MM-DD&timezone=Asia/Shanghai
 PATCH  /v1/action-instances/:instanceId
 POST   /v1/action-instances/:instanceId/complete
 POST   /v1/action-instances/:instanceId/skip
 POST   /v1/action-instances/:instanceId/reschedule
 
+GET    /v1/entries
 POST   /v1/entries
 PATCH  /v1/entries/:entryId
 DELETE /v1/entries/:entryId
@@ -1045,7 +1048,7 @@ POST   /v1/reactions
 DELETE /v1/reactions/:reactionId
 POST   /v1/follows/:userId
 DELETE /v1/follows/:userId
-POST   /v1/reports
+POST   /v1/posts/:postId/report
 POST   /v1/blocks/:userId
 
 GET    /v1/public-journeys/:publicJourneyId
@@ -1053,7 +1056,7 @@ POST   /v1/public-journeys
 POST   /v1/public-journeys/:publicJourneyId/join
 POST   /v1/public-journeys/:publicJourneyId/versions
 
-GET    /v1/reviews/current
+GET    /v1/reviews/weekly
 POST   /v1/reviews
 GET    /v1/timeline
 
@@ -1070,6 +1073,8 @@ DELETE /v1/account
 - 一个行动实例只能产生一个主记录，重复请求返回同一结果。
 - 已完成实例再次编辑必须产生审计记录，但不重复计入统计。
 - 路线完成规则由服务端计算，客户端只负责展示。
+- 陪伴简报只读取用户自己的路线、行动和留痕，返回的行动与时长建议必须由用户主动采纳；查询不得隐式完成、跳过、改期或更改计划。
+- 行动的精确安排使用带 UTC 偏移量的 RFC 3339 时间戳和 IANA 时区；今日读取按用户本地日期过滤，旧的仅日期行动不得被伪造为精确时间或误判为逾期。
 - 重复计划变更默认“仅影响今天 / 影响今天及以后”，历史实例不被重写。
 - 用户删除路线时，关联媒体进入延迟清理队列；恢复期内可撤销。
 - 私人路线和公共路线是不同实体，发布、更新、删除和授权互不隐式传递。
