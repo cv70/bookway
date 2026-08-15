@@ -1,3 +1,4 @@
+use crate::api::{ApiResponse, ErrorResponse, HealthResponse};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -6,10 +7,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
-use bookway_api::{ApiResponse, ErrorResponse, HealthResponse};
 
 use crate::{
-    api::{MediaResponse, UploadRequest, UploadResponse},
+    api::pb,
     datasource::RepositoryError,
     domain::{Domain, MediaError},
 };
@@ -44,12 +44,10 @@ async fn health() -> Json<HealthResponse> {
 async fn create_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<UploadRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<UploadResponse>>), HttpError> {
-    let response = state
-        .domain
-        .create_upload(&user_id(&headers), request)
-        .await?;
+    Json(mut request): Json<pb::CreateUploadRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<pb::UploadResponse>>), HttpError> {
+    request.user_id = user_id(&headers);
+    let response = state.domain.create_upload(request).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::new(response))))
 }
 async fn proxy_upload(
@@ -57,7 +55,7 @@ async fn proxy_upload(
     headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
-) -> Result<Json<ApiResponse<MediaResponse>>, HttpError> {
+) -> Result<Json<ApiResponse<pb::MediaResource>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
@@ -69,11 +67,14 @@ async fn complete_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<MediaResponse>>, HttpError> {
+) -> Result<Json<ApiResponse<pb::MediaResource>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .complete_upload(&user_id(&headers), &id)
+            .complete_upload(pb::ResourceRequest {
+                user_id: user_id(&headers),
+                id,
+            })
             .await?,
     )))
 }
@@ -81,9 +82,15 @@ async fn get_media(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<MediaResponse>>, HttpError> {
+) -> Result<Json<ApiResponse<pb::MediaResource>>, HttpError> {
     Ok(Json(ApiResponse::new(
-        state.domain.get(&user_id(&headers), &id).await?,
+        state
+            .domain
+            .get(pb::ResourceRequest {
+                user_id: user_id(&headers),
+                id,
+            })
+            .await?,
     )))
 }
 fn user_id(headers: &HeaderMap) -> String {

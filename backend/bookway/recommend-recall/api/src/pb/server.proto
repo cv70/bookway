@@ -1,0 +1,31 @@
+syntax = "proto3";
+package bookway.recommend.recall;
+
+import "bbs-link/api/src/pb/server.proto";
+
+message Candidate {
+  string content_id = 1;
+  bookway.bbs.link.PostSummary post = 2;
+  string author_id = 3;
+  bookway.bbs.link.ContentStatus status = 4;
+  double quality_score = 5;
+  double freshness = 6;
+  double recall_score = 7;
+  double score = 8;
+  string source = 9;
+  repeated string reasons = 10;
+}
+message RecallRequest {
+  string user_id = 1;
+  repeated bookway.bbs.link.GrowthDomain interests = 2;
+  repeated string seen = 3;
+  string cursor = 4;
+  uint32 limit = 5;
+  // Derived only from the trusted social graph by Recommend Main.
+  repeated string following_author_ids = 6;
+  // An empty following_author_ids list means an intentionally empty feed,
+  // never a fallback to global recommendations.
+  bool following_only = 7;
+}
+message RecallResponse { repeated Candidate candidates = 1; string next_cursor = 2; repeated string sources = 3; bool degraded = 4; string blend_version = 5; }
+service RecommendRecall { rpc Recall(RecallRequest) returns (RecallResponse); }

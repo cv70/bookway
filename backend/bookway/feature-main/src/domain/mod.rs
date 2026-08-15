@@ -1,10 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
-use super::{
-    api::{FeatureRequest, FeatureResponse},
-    datasource::{CandidateFeatures, FeatureCache, FeatureRepository},
-};
 use crate::conf::Config;
+use crate::{
+    api::pb,
+    datasource::{FeatureCache, FeatureRepository},
+};
+
+#[cfg(test)]
+use crate::datasource::CandidateFeatures;
 
 #[derive(Clone)]
 pub struct Domain {
@@ -35,7 +38,7 @@ impl Domain {
         })
     }
 
-    pub(crate) async fn features(&self, request: FeatureRequest) -> FeatureResponse {
+    pub(crate) async fn features(&self, request: pb::FeaturesRequest) -> pb::FeaturesResponse {
         let mut values = HashMap::from([
             ("user_interest_strength".to_string(), 0.5),
             ("recent_positive_rate".to_string(), 0.2),
@@ -60,26 +63,37 @@ impl Domain {
             "candidate_count".to_string(),
             request.content_ids.len() as f64,
         );
-        FeatureResponse {
+        pb::FeaturesResponse {
             user_id: request.user_id,
             model_version: self.model_version.clone(),
-            features: feature_payload(values, candidate_features),
+            recent_positive_rate: value(&values, "recent_positive_rate"),
+            user_interest_strength: value(&values, "user_interest_strength"),
+            negative_feedback_rate: value(&values, "negative_feedback_rate"),
+            learning_interest: value(&values, "domain_interest.learning"),
+            movement_interest: value(&values, "domain_interest.movement"),
+            wellness_interest: value(&values, "domain_interest.wellness"),
+            travel_interest: value(&values, "domain_interest.travel"),
+            leisure_interest: value(&values, "domain_interest.leisure"),
+            candidates: candidate_features
+                .into_iter()
+                .map(|(content_id, features)| pb::CandidateFeatures {
+                    content_id,
+                    domain_affinity: features.domain_affinity,
+                    author_affinity: features.author_affinity,
+                    impression_fatigue: features.impression_fatigue,
+                    direct_negative_feedback: features.direct_negative_feedback,
+                })
+                .collect(),
         }
     }
 }
 
-fn feature_payload(
-    values: HashMap<String, f64>,
-    candidate_features: HashMap<String, CandidateFeatures>,
-) -> serde_json::Value {
-    let mut payload = serde_json::to_value(values).unwrap_or_default();
-    if let Some(payload) = payload.as_object_mut() {
-        payload.insert(
-            "candidates".to_string(),
-            serde_json::to_value(candidate_features).unwrap_or_default(),
-        );
-    }
-    payload
+fn value(values: &HashMap<String, f64>, name: &str) -> f64 {
+    values
+        .get(name)
+        .copied()
+        .filter(|value| value.is_finite())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -87,21 +101,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn feature_payload_keeps_user_and_candidate_signals() {
-        let payload = feature_payload(
-            HashMap::from([("recent_positive_rate".to_string(), 0.4)]),
-            HashMap::from([(
-                "content-1".to_string(),
-                CandidateFeatures {
-                    domain_affinity: 0.8,
-                    author_affinity: 0.3,
-                    impression_fatigue: 0.5,
-                    direct_negative_feedback: 0.0,
-                },
-            )]),
-        );
+    fn builds_typed_feature_response() {
+        let values = HashMap::from([("recent_positive_rate".to_string(), 0.4)]);
+        let response = pb::FeaturesResponse {
+            recent_positive_rate: value(&values, "recent_positive_rate"),
+            ..Default::default()
+        };
 
-        assert_eq!(payload["recent_positive_rate"], 0.4);
-        assert_eq!(payload["candidates"]["content-1"]["domain_affinity"], 0.8);
+        assert_eq!(response.recent_positive_rate, 0.4);
+    }
+
+    #[test]
+    fn candidate_features_map_to_the_protobuf_contract() {
+        let candidates = HashMap::from([(
+            "content-1".to_string(),
+            CandidateFeatures {
+                domain_affinity: 0.8,
+                author_affinity: 0.3,
+                impression_fatigue: 0.5,
+                direct_negative_feedback: 0.0,
+            },
+        )]);
+        let response = pb::FeaturesResponse {
+            candidates: candidates
+                .into_iter()
+                .map(|(content_id, features)| pb::CandidateFeatures {
+                    content_id,
+                    domain_affinity: features.domain_affinity,
+                    author_affinity: features.author_affinity,
+                    impression_fatigue: features.impression_fatigue,
+                    direct_negative_feedback: features.direct_negative_feedback,
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        assert_eq!(response.candidates[0].domain_affinity, 0.8);
+    }
+
+    #[test]
+    fn feature_values_remain_finite() {
+        let values = HashMap::from([("recent_positive_rate".to_string(), f64::NAN)]);
+        assert_eq!(value(&values, "recent_positive_rate"), 0.0);
+    }
+
+    #[test]
+    fn feature_defaults_are_zero() {
+        let values = HashMap::new();
+        assert_eq!(value(&values, "recent_positive_rate"), 0.0);
     }
 }

@@ -1,0 +1,7 @@
+name: bookway-bbs-message
+owner: community-message
+kind: dual-http-grpc-service
+port: 8106
+healthcheck: /health
+contracts:
+  - api/src/pb/server.proto

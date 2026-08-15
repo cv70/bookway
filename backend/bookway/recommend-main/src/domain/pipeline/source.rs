@@ -1,13 +1,13 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use bookway_feature_main::api::pb::{self as feature, feature_main_client::FeatureMainClient};
-use serde::Deserialize;
+use bookway_bbs_api::pb::{self as bbs_pb, bbs_client::BbsClient};
+use bookway_bbs_link_api::pb::GrowthDomain;
+use bookway_feature_main_api::pb::{self as feature, feature_main_client::FeatureMainClient};
 use tonic::transport::Channel;
 
 use super::{Candidate, CandidateSource, FeedQuery, PipelineError, SourceResult};
-use crate::datasource::RecallClientError;
-use bookway_recommend_recall::api::pb as recall;
+use bookway_recommend_recall_api::pb as recall;
 
 const PROFILE_FEATURE_TIMEOUT: Duration = Duration::from_millis(150);
 const PERSONALIZED_INTEREST_MINIMUM: f64 = 0.2;
@@ -15,25 +15,24 @@ const PERSONALIZED_INTEREST_MINIMUM: f64 = 0.2;
 pub(crate) struct RecommendRecallSource {
     client: Arc<recall::recommend_recall_client::RecommendRecallClient<Channel>>,
     feature_client: FeatureMainClient<Channel>,
+    bbs_client: BbsClient<Channel>,
 }
 
 impl RecommendRecallSource {
     pub(crate) fn new(
         client: Arc<recall::recommend_recall_client::RecommendRecallClient<Channel>>,
         feature_client: FeatureMainClient<Channel>,
+        bbs_client: BbsClient<Channel>,
     ) -> Self {
         Self {
             client,
             feature_client,
+            bbs_client,
         }
     }
 
-    async fn interests(&self, query: &FeedQuery) -> (Vec<String>, bool) {
-        let mut interests = query
-            .interests
-            .iter()
-            .map(|domain| domain_name(*domain).to_string())
-            .collect::<BTreeSet<_>>();
+    async fn interests(&self, query: &FeedQuery) -> (Vec<GrowthDomain>, bool) {
+        let mut interests = query.interests.iter().copied().collect::<BTreeSet<_>>();
         let mut client = self.feature_client.clone();
         let profile = tokio::time::timeout(
             PROFILE_FEATURE_TIMEOUT,
@@ -45,16 +44,8 @@ impl RecommendRecallSource {
         .await;
         let degraded = match profile {
             Ok(Ok(response)) => {
-                match serde_json::from_str::<FeaturePayload>(&response.into_inner().response_json) {
-                    Ok(response) => {
-                        interests.extend(personalized_interest_domains(&response.features));
-                        false
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, user_id = %query.user_id, "profile feature payload degraded");
-                        true
-                    }
-                }
+                interests.extend(personalized_interest_domains(&response.into_inner()));
+                false
             }
             Ok(Err(error)) => {
                 tracing::warn!(%error, user_id = %query.user_id, "profile feature lookup degraded");
@@ -67,75 +58,99 @@ impl RecommendRecallSource {
         };
         (interests.into_iter().collect(), degraded)
     }
+
+    async fn following_author_ids(&self, query: &FeedQuery) -> Result<Vec<String>, PipelineError> {
+        if query.surface != "following" {
+            return Ok(Vec::new());
+        }
+        let mut client = self.bbs_client.clone();
+        let context = client
+            .context(
+                bookway_runtime::grpc_service_request(bbs_pb::ContextRequest {
+                    user_id: query.user_id.clone(),
+                    post_ids: Vec::new(),
+                })
+                .map_err(|error| PipelineError::Bbs(error.to_string()))?,
+            )
+            .await
+            .map_err(|error| PipelineError::Bbs(error.to_string()))?
+            .into_inner();
+        Ok(context.followed_author_ids)
+    }
 }
 
 #[async_trait]
 impl CandidateSource for RecommendRecallSource {
     async fn get(&self, query: &FeedQuery) -> Result<SourceResult, PipelineError> {
-        let (interests, profile_degraded) = self.interests(query).await;
+        let (interests, profile_degraded) = if query.surface == "following" {
+            // A Following feed is a social, chronological product rather than
+            // an interest-expansion surface.
+            (Vec::new(), false)
+        } else {
+            self.interests(query).await
+        };
+        let following_author_ids = self.following_author_ids(query).await?;
         let mut client = (*self.client).clone();
         let response = client
             .recall(recall::RecallRequest {
                 user_id: query.user_id.clone(),
-                interests,
+                interests: interests.into_iter().map(|domain| domain as i32).collect(),
                 seen: query.seen.iter().cloned().collect(),
                 cursor: query.cursor.clone().unwrap_or_default(),
-                limit: (query.limit * 3) as u32,
+                limit: u32::try_from(if query.surface == "following" {
+                    query.limit
+                } else {
+                    query.limit.saturating_mul(3)
+                })
+                .unwrap_or(u32::MAX),
+                following_author_ids,
+                following_only: query.surface == "following",
             })
             .await
-            .map_err(|status| PipelineError::Recall(RecallClientError::Grpc(status.to_string())))?
+            .map_err(|status| PipelineError::Recall(status.to_string()))?
             .into_inner();
         let candidates = response
             .candidates
             .into_iter()
-            .filter_map(|candidate| candidate_to_domain(candidate).ok())
+            .filter_map(candidate_to_domain)
             .collect();
         Ok(SourceResult {
             candidates,
             next_cursor: (!response.next_cursor.is_empty()).then_some(response.next_cursor),
             degraded: response.degraded || profile_degraded,
+            pipeline_version: (!response.blend_version.is_empty())
+                .then_some(response.blend_version),
         })
     }
 }
 
-#[derive(Deserialize)]
-struct FeaturePayload {
-    features: serde_json::Value,
+fn personalized_interest_domains(features: &feature::FeaturesResponse) -> Vec<GrowthDomain> {
+    let mut domains = [
+        (GrowthDomain::Learning, features.learning_interest),
+        (GrowthDomain::Movement, features.movement_interest),
+        (GrowthDomain::Wellness, features.wellness_interest),
+        (GrowthDomain::Travel, features.travel_interest),
+        (GrowthDomain::Leisure, features.leisure_interest),
+    ]
+    .into_iter()
+    .filter_map(|(domain, score)| {
+        (score.is_finite() && score >= PERSONALIZED_INTEREST_MINIMUM).then_some((domain, score))
+    })
+    .collect::<Vec<_>>();
+    domains.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    domains.into_iter().map(|(domain, _)| domain).collect()
 }
 
-fn personalized_interest_domains(features: &serde_json::Value) -> Vec<String> {
-    let mut domains = ["learning", "movement", "wellness", "travel", "leisure"]
-        .into_iter()
-        .filter_map(|domain| {
-            features
-                .get(format!("domain_interest.{domain}"))
-                .and_then(serde_json::Value::as_f64)
-                .filter(|score| score.is_finite() && *score >= PERSONALIZED_INTEREST_MINIMUM)
-                .map(|score| (domain, score))
-        })
-        .collect::<Vec<_>>();
-    domains.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(right.0)));
-    domains
-        .into_iter()
-        .map(|(domain, _)| domain.to_string())
-        .collect()
-}
-
-fn domain_name(domain: crate::api::GrowthDomainDto) -> &'static str {
-    match domain {
-        crate::api::GrowthDomainDto::Learning => "learning",
-        crate::api::GrowthDomainDto::Movement => "movement",
-        crate::api::GrowthDomainDto::Wellness => "wellness",
-        crate::api::GrowthDomainDto::Travel => "travel",
-        crate::api::GrowthDomainDto::Leisure => "leisure",
-    }
-}
-
-fn candidate_to_domain(candidate: recall::Candidate) -> Result<Candidate, serde_json::Error> {
-    Ok(Candidate {
-        post: serde_json::from_str(&candidate.post_json)?,
+fn candidate_to_domain(candidate: recall::Candidate) -> Option<Candidate> {
+    Some(Candidate {
+        post: candidate.post?,
         author_id: candidate.author_id,
-        status: serde_json::from_str(&candidate.status)?,
+        status: candidate.status,
         quality_score: candidate.quality_score,
         score: candidate.recall_score,
         source: candidate.source,
@@ -152,16 +167,20 @@ fn candidate_to_domain(candidate: recall::Candidate) -> Result<Candidate, serde_
 
 #[cfg(test)]
 mod tests {
+    use bookway_bbs_link_api::pb::GrowthDomain;
+    use bookway_feature_main_api::pb::FeaturesResponse;
+
     use super::personalized_interest_domains;
 
     #[test]
     fn expands_recall_only_for_meaningful_profile_domains() {
-        let domains = personalized_interest_domains(&serde_json::json!({
-            "domain_interest.wellness": 0.9,
-            "domain_interest.leisure": 0.2,
-            "domain_interest.travel": 0.19,
-        }));
+        let domains = personalized_interest_domains(&FeaturesResponse {
+            wellness_interest: 0.9,
+            leisure_interest: 0.2,
+            travel_interest: 0.19,
+            ..Default::default()
+        });
 
-        assert_eq!(domains, ["wellness", "leisure"]);
+        assert_eq!(domains, [GrowthDomain::Wellness, GrowthDomain::Leisure]);
     }
 }

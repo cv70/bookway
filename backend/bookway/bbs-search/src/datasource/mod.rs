@@ -5,11 +5,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use bookway_api::{
-    ContentPageDto, ContentQueryRequest, SearchResultDto, SearchResultTypeDto, SearchTypeDto,
-    SuggestionDto,
-};
-use bookway_bbs_link::api::pb::{self, bbs_link_client::BbsLinkClient};
+use bookway_bbs_link_api::pb as bbs_link_pb;
+use bookway_bbs_search_api::pb;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -20,10 +17,12 @@ pub(crate) enum SearchSourceError {
     Request(String),
     #[error("search snapshot expired")]
     CursorExpired,
+    #[error("primary search source is unavailable")]
+    Fallback,
 }
 
 pub(crate) struct SearchSourceResult {
-    pub(crate) page: ContentPageDto,
+    pub(crate) page: bbs_link_pb::ContentPage,
     pub(crate) degraded: bool,
     /// OpenSearch has already applied a stable relevance ordering for this page.
     pub(crate) source_ranked: bool,
@@ -37,7 +36,7 @@ pub(crate) struct SearchSession {
     pub(crate) query_fingerprint: u64,
     pub(crate) source_cursor: Option<String>,
     pub(crate) source_exhausted: bool,
-    pub(crate) pending: Vec<SearchResultDto>,
+    pub(crate) pending: Vec<pb::SearchResult>,
     pub(crate) seen_result_ids: HashSet<String>,
     pub(crate) delivered_count: usize,
     pub(crate) source_total_estimate: usize,
@@ -167,12 +166,12 @@ impl SearchSessionStore for PostgresSearchSessionStore {
 pub(crate) trait SearchSource: Send + Sync {
     async fn contents(
         &self,
-        query: ContentQueryRequest,
+        query: bbs_link_pb::ListRequest,
     ) -> Result<SearchSourceResult, SearchSourceError>;
 
     async fn search_contents(
         &self,
-        query: ContentQueryRequest,
+        query: bbs_link_pb::ListRequest,
         _text: &str,
         _excluded_author_ids: &[String],
     ) -> Result<SearchSourceResult, SearchSourceError> {
@@ -183,80 +182,38 @@ pub(crate) trait SearchSource: Send + Sync {
     async fn release_search_cursor(&self, _cursor: &str) {}
 }
 
-pub(crate) struct GrpcContentSearchSource {
-    client: BbsLinkClient<tonic::transport::Channel>,
-}
-
-impl GrpcContentSearchSource {
-    pub(crate) async fn connect(base_url: String) -> Result<Self, tonic::transport::Error> {
-        Ok(Self {
-            client: BbsLinkClient::connect(base_url).await?,
-        })
-    }
-}
-
-#[async_trait]
-impl SearchSource for GrpcContentSearchSource {
-    async fn contents(
-        &self,
-        query: ContentQueryRequest,
-    ) -> Result<SearchSourceResult, SearchSourceError> {
-        let mut client = self.client.clone();
-        let response = client
-            .list(
-                bookway_runtime::grpc_service_request(pb::ListRequest {
-                    request_json: serde_json::to_string(&query)
-                        .map_err(|error| SearchSourceError::Request(error.to_string()))?,
-                })
-                .map_err(|error| SearchSourceError::Request(error.to_string()))?,
-            )
-            .await
-            .map_err(|error| SearchSourceError::Request(error.to_string()))?
-            .into_inner();
-        let page: ContentPageDto = serde_json::from_str(&response.response_json)
-            .map_err(|error| SearchSourceError::Request(error.to_string()))?;
-        Ok(SearchSourceResult {
-            page,
-            degraded: false,
-            source_ranked: false,
-        })
-    }
-}
-
 pub(crate) struct OpenSearchSource {
     client: reqwest::Client,
     base_url: String,
-    index: String,
-    fallback: GrpcContentSearchSource,
+    read_alias: String,
 }
 
 impl OpenSearchSource {
-    pub(crate) fn new(base_url: String, index: String, fallback: GrpcContentSearchSource) -> Self {
+    pub(crate) fn new(base_url: String, read_alias: String) -> Self {
         Self {
             client: bookway_runtime::http_client(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            index,
-            fallback,
+            read_alias,
         }
     }
 }
 
 #[async_trait]
 pub(crate) trait SearchAnalytics: Send + Sync {
-    async fn record(&self, query: &str, search_type: SearchTypeDto, zero_results: bool);
-    async fn suggestions(&self, prefix: &str, limit: usize) -> Vec<SuggestionDto>;
+    async fn record(&self, query: &str, search_type: pb::SearchType, zero_results: bool);
+    async fn suggestions(&self, prefix: &str, limit: usize) -> Vec<pb::Suggestion>;
 }
 
 pub(crate) type SharedSearchAnalytics = Arc<dyn SearchAnalytics>;
 
 #[derive(Default)]
 pub(crate) struct MemorySearchAnalytics {
-    stats: RwLock<HashMap<(String, SearchTypeDto), (u64, u64)>>,
+    stats: RwLock<HashMap<(String, pb::SearchType), (u64, u64)>>,
 }
 
 #[async_trait]
 impl SearchAnalytics for MemorySearchAnalytics {
-    async fn record(&self, query: &str, search_type: SearchTypeDto, zero_results: bool) {
+    async fn record(&self, query: &str, search_type: pb::SearchType, zero_results: bool) {
         let mut stats = self.stats.write().await;
         let value = stats
             .entry((query.to_string(), search_type))
@@ -265,7 +222,7 @@ impl SearchAnalytics for MemorySearchAnalytics {
         value.1 = value.1.saturating_add(u64::from(zero_results));
     }
 
-    async fn suggestions(&self, prefix: &str, limit: usize) -> Vec<SuggestionDto> {
+    async fn suggestions(&self, prefix: &str, limit: usize) -> Vec<pb::Suggestion> {
         let prefix = prefix.to_lowercase();
         let mut items = self
             .stats
@@ -274,9 +231,9 @@ impl SearchAnalytics for MemorySearchAnalytics {
             .iter()
             .filter(|((query, _), _)| query.to_lowercase().contains(&prefix))
             .map(
-                |((query, search_type), (requests, zero_results))| SuggestionDto {
+                |((query, search_type), (requests, zero_results))| pb::Suggestion {
                     text: query.clone(),
-                    result_type: result_type(*search_type),
+                    result_type: result_type(*search_type) as i32,
                     score: suggestion_score(*requests, *zero_results),
                 },
             )
@@ -299,7 +256,7 @@ impl PostgresSearchAnalytics {
 
 #[async_trait]
 impl SearchAnalytics for PostgresSearchAnalytics {
-    async fn record(&self, query: &str, search_type: SearchTypeDto, zero_results: bool) {
+    async fn record(&self, query: &str, search_type: pb::SearchType, zero_results: bool) {
         let search_type = search_type_name(search_type);
         let hash = format!("{:016x}", stable_hash(&format!("{search_type}\0{query}")));
         if let Err(error) = sqlx::query(
@@ -316,7 +273,7 @@ impl SearchAnalytics for PostgresSearchAnalytics {
         }
     }
 
-    async fn suggestions(&self, prefix: &str, limit: usize) -> Vec<SuggestionDto> {
+    async fn suggestions(&self, prefix: &str, limit: usize) -> Vec<pb::Suggestion> {
         let pattern = format!("%{}%", escape_like(prefix));
         let rows = sqlx::query_as::<_, (String, String, i64, i64)>(
             "SELECT query_text,search_type,request_count,zero_result_count FROM search_query_stats WHERE query_text ILIKE $1 ESCAPE '\\' AND last_seen_at > now() - interval '90 days' ORDER BY (request_count-zero_result_count) DESC,last_seen_at DESC LIMIT $2",
@@ -329,9 +286,9 @@ impl SearchAnalytics for PostgresSearchAnalytics {
             Ok(rows) => rows
                 .into_iter()
                 .map(
-                    |(text, search_type, requests, zero_results)| SuggestionDto {
+                    |(text, search_type, requests, zero_results)| pb::Suggestion {
                         text,
-                        result_type: result_type_from_name(&search_type),
+                        result_type: result_type_from_name(&search_type) as i32,
                         score: suggestion_score(requests.max(0) as u64, zero_results.max(0) as u64),
                     },
                 )
@@ -348,31 +305,31 @@ fn suggestion_score(requests: u64, zero_results: u64) -> f64 {
     ((requests.saturating_sub(zero_results)) as f64 + 1.0).ln_1p()
 }
 
-fn result_type(search_type: SearchTypeDto) -> SearchResultTypeDto {
+fn result_type(search_type: pb::SearchType) -> pb::SearchResultType {
     match search_type {
-        SearchTypeDto::Journeys => SearchResultTypeDto::Journey,
-        SearchTypeDto::Users => SearchResultTypeDto::User,
-        SearchTypeDto::Topics => SearchResultTypeDto::Topic,
-        SearchTypeDto::All | SearchTypeDto::Posts => SearchResultTypeDto::Post,
+        pb::SearchType::Journeys => pb::SearchResultType::Journey,
+        pb::SearchType::Users => pb::SearchResultType::User,
+        pb::SearchType::Topics => pb::SearchResultType::Topic,
+        pb::SearchType::All | pb::SearchType::Posts => pb::SearchResultType::Post,
     }
 }
 
-fn result_type_from_name(value: &str) -> SearchResultTypeDto {
+fn result_type_from_name(value: &str) -> pb::SearchResultType {
     match value {
-        "journeys" => SearchResultTypeDto::Journey,
-        "users" => SearchResultTypeDto::User,
-        "topics" => SearchResultTypeDto::Topic,
-        _ => SearchResultTypeDto::Post,
+        "journeys" => pb::SearchResultType::Journey,
+        "users" => pb::SearchResultType::User,
+        "topics" => pb::SearchResultType::Topic,
+        _ => pb::SearchResultType::Post,
     }
 }
 
-pub(crate) fn search_type_name(value: SearchTypeDto) -> &'static str {
+pub(crate) fn search_type_name(value: pb::SearchType) -> &'static str {
     match value {
-        SearchTypeDto::All => "all",
-        SearchTypeDto::Posts => "posts",
-        SearchTypeDto::Journeys => "journeys",
-        SearchTypeDto::Users => "users",
-        SearchTypeDto::Topics => "topics",
+        pb::SearchType::All => "all",
+        pb::SearchType::Posts => "posts",
+        pb::SearchType::Journeys => "journeys",
+        pb::SearchType::Users => "users",
+        pb::SearchType::Topics => "topics",
     }
 }
 
@@ -393,26 +350,23 @@ fn escape_like(value: &str) -> String {
 impl SearchSource for OpenSearchSource {
     async fn contents(
         &self,
-        query: ContentQueryRequest,
+        _query: bbs_link_pb::ListRequest,
     ) -> Result<SearchSourceResult, SearchSourceError> {
-        self.fallback_contents(query).await
+        Err(SearchSourceError::Fallback)
     }
 
     async fn search_contents(
         &self,
-        query: ContentQueryRequest,
+        query: bbs_link_pb::ListRequest,
         text: &str,
         excluded_author_ids: &[String],
     ) -> Result<SearchSourceResult, SearchSourceError> {
-        if let Some(cursor) = query
+        if query
             .cursor
             .as_deref()
-            .and_then(|cursor| cursor.strip_prefix("fallback:"))
-            .map(str::to_string)
+            .is_some_and(|cursor| cursor.starts_with("fallback:"))
         {
-            return self
-                .fallback_search_contents(query, &cursor, text, excluded_author_ids)
-                .await;
+            return Err(SearchSourceError::Fallback);
         }
         let pit_cursor = match query.cursor.as_deref() {
             Some(cursor) => decode_pit_cursor(cursor)?,
@@ -422,11 +376,7 @@ impl SearchSource for OpenSearchSource {
                     search_after: None,
                     seen_hits: 0,
                 },
-                Err(_) => {
-                    return self
-                        .fallback_search_contents(query, "", text, excluded_author_ids)
-                        .await;
-                }
+                Err(_) => return Err(SearchSourceError::Fallback),
             },
         };
         let mut filters = vec![serde_json::json!({ "term": { "status": "published" } })];
@@ -472,9 +422,7 @@ impl SearchSource for OpenSearchSource {
             }
             Ok(response) if pit_expired(response.status()) => {
                 self.close_pit(&pit_cursor.id).await;
-                return self
-                    .fallback_search_contents(query, "", text, excluded_author_ids)
-                    .await;
+                return Err(SearchSourceError::Fallback);
             }
             Ok(response) => {
                 // A new query can safely fall back. A continuation must retain its snapshot
@@ -486,27 +434,21 @@ impl SearchSource for OpenSearchSource {
                     )));
                 }
                 self.close_pit(&pit_cursor.id).await;
-                return self
-                    .fallback_search_contents(query, "", text, excluded_author_ids)
-                    .await;
+                return Err(SearchSourceError::Fallback);
             }
             Err(error) if query.cursor.is_some() => {
                 return Err(SearchSourceError::Request(error.to_string()));
             }
             Err(_) => {
                 self.close_pit(&pit_cursor.id).await;
-                return self
-                    .fallback_search_contents(query, "", text, excluded_author_ids)
-                    .await;
+                return Err(SearchSourceError::Fallback);
             }
         };
         let payload: serde_json::Value = match response.json().await {
             Ok(payload) => payload,
             Err(_) if query.cursor.is_none() => {
                 self.close_pit(&pit_cursor.id).await;
-                return self
-                    .fallback_search_contents(query, "", text, excluded_author_ids)
-                    .await;
+                return Err(SearchSourceError::Fallback);
             }
             Err(error) => return Err(SearchSourceError::Request(error.to_string())),
         };
@@ -567,9 +509,9 @@ impl SearchSource for OpenSearchSource {
             self.close_pit(&active_pit_id).await;
         }
         Ok(SearchSourceResult {
-            page: ContentPageDto {
+            page: bbs_link_pb::ContentPage {
                 next_cursor,
-                total_estimate: total,
+                total_estimate: total as u64,
                 items,
             },
             degraded: false,
@@ -614,33 +556,37 @@ fn pit_expired(status: reqwest::StatusCode) -> bool {
     )
 }
 
-fn content_type_name(value: bookway_api::ContentTypeDto) -> &'static str {
-    match value {
-        bookway_api::ContentTypeDto::Note => "note",
-        bookway_api::ContentTypeDto::Article => "article",
-        bookway_api::ContentTypeDto::Video => "video",
-        bookway_api::ContentTypeDto::Route => "route",
+fn content_type_name(value: i32) -> &'static str {
+    match bbs_link_pb::ContentType::try_from(value) {
+        Ok(bbs_link_pb::ContentType::Note) => "note",
+        Ok(bbs_link_pb::ContentType::Article) => "article",
+        Ok(bbs_link_pb::ContentType::Video) => "video",
+        Ok(bbs_link_pb::ContentType::Route) | Err(_) => "route",
     }
 }
 
-fn domain_name(value: bookway_api::GrowthDomainDto) -> &'static str {
-    match value {
-        bookway_api::GrowthDomainDto::Learning => "learning",
-        bookway_api::GrowthDomainDto::Movement => "movement",
-        bookway_api::GrowthDomainDto::Wellness => "wellness",
-        bookway_api::GrowthDomainDto::Travel => "travel",
-        bookway_api::GrowthDomainDto::Leisure => "leisure",
+fn domain_name(value: i32) -> &'static str {
+    match bbs_link_pb::GrowthDomain::try_from(value) {
+        Ok(bbs_link_pb::GrowthDomain::Learning) => "learning",
+        Ok(bbs_link_pb::GrowthDomain::Movement) => "movement",
+        Ok(bbs_link_pb::GrowthDomain::Wellness) => "wellness",
+        Ok(bbs_link_pb::GrowthDomain::Travel) => "travel",
+        Ok(bbs_link_pb::GrowthDomain::Leisure) | Err(_) => "leisure",
     }
 }
 
 impl OpenSearchSource {
     async fn open_pit(&self) -> Result<String, SearchSourceError> {
+        let mut pit_url = resource_url(
+            &self.base_url,
+            &[&self.read_alias, "_search", "point_in_time"],
+        )?;
+        pit_url
+            .query_pairs_mut()
+            .append_pair("keep_alive", PIT_KEEP_ALIVE);
         let response = self
             .client
-            .post(format!(
-                "{}/{}/_search/point_in_time?keep_alive={PIT_KEEP_ALIVE}",
-                self.base_url, self.index
-            ))
+            .post(pit_url)
             .send()
             .await
             .map_err(|error| SearchSourceError::Request(error.to_string()))?;
@@ -678,34 +624,18 @@ impl OpenSearchSource {
             tracing::debug!(%error, "OpenSearch PIT close degraded");
         }
     }
+}
 
-    async fn fallback_search_contents(
-        &self,
-        mut query: ContentQueryRequest,
-        cursor: &str,
-        text: &str,
-        excluded_author_ids: &[String],
-    ) -> Result<SearchSourceResult, SearchSourceError> {
-        query.cursor = (!cursor.is_empty()).then(|| cursor.to_string());
-        let mut result = self
-            .fallback
-            .search_contents(query, text, excluded_author_ids)
-            .await?;
-        result.page.next_cursor = result
-            .page
-            .next_cursor
-            .map(|next_cursor| format!("fallback:{next_cursor}"));
-        result.degraded = true;
-        result.source_ranked = false;
-        Ok(result)
+fn resource_url(base_url: &str, path: &[&str]) -> Result<reqwest::Url, SearchSourceError> {
+    let mut url = reqwest::Url::parse(base_url)
+        .map_err(|error| SearchSourceError::Request(error.to_string()))?;
+    let mut segments = url.path_segments_mut().map_err(|_| {
+        SearchSourceError::Request("OPENSEARCH_URL cannot be used as a base URL".to_string())
+    })?;
+    segments.pop_if_empty();
+    for segment in path {
+        segments.push(segment);
     }
-
-    async fn fallback_contents(
-        &self,
-        query: ContentQueryRequest,
-    ) -> Result<SearchSourceResult, SearchSourceError> {
-        let mut result = self.fallback.contents(query).await?;
-        result.degraded = true;
-        Ok(result)
-    }
+    drop(segments);
+    Ok(url)
 }

@@ -6,16 +6,18 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bookway-recommend-main-api.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 bookway-api.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
-bookway-recommend-recall.workspace = true
-bookway-recommend-rank.workspace = true
-bookway-bbs.workspace = true
-bookway-commonlikestatus.workspace = true
-bookway-feature-main.workspace = true
+bookway-recommend-recall-api.workspace = true
+bookway-recommend-rank-api.workspace = true
+bookway-bbs-api.workspace = true
+bookway-bbs-link-api.workspace = true
+bookway-commonlikestatus-api.workspace = true
+bookway-feature-main-api.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -32,6 +34,3 @@ prost.workspace = true
 
 [lints]
 workspace = true
-
-[build-dependencies]
-tonic-build.workspace = true

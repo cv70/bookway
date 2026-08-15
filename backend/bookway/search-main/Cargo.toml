@@ -6,10 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bookway-search-main-api.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 bookway-api.workspace = true
-bookway-bbs-search.workspace = true
+bookway-bbs-link-api.workspace = true
+bookway-bbs-search-api.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
 reqwest.workspace = true
@@ -27,6 +29,3 @@ uuid.workspace = true
 
 [lints]
 workspace = true
-
-[build-dependencies]
-tonic-build.workspace = true

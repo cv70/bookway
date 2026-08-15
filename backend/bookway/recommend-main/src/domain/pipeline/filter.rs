@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
+use bookway_bbs_link_api::pb::ContentStatus;
+
 use super::{Candidate, CandidateFilter, FeedQuery};
-use crate::api::ContentStatusDto;
 
 pub(crate) struct SeenFilter;
 
@@ -11,19 +12,11 @@ impl CandidateFilter for SeenFilter {
     }
 }
 
-pub(crate) struct ServedHistoryFilter;
-
-impl CandidateFilter for ServedHistoryFilter {
-    fn retain(&self, _query: &FeedQuery, candidate: &Candidate) -> bool {
-        !candidate.previously_served
-    }
-}
-
 pub(crate) struct SafetyFilter;
 
 impl CandidateFilter for SafetyFilter {
     fn retain(&self, _query: &FeedQuery, candidate: &Candidate) -> bool {
-        candidate.status == ContentStatusDto::Published
+        candidate.status == ContentStatus::Published as i32
             && !candidate.blocked_author
             && !candidate.muted_author
             && !candidate.hidden
@@ -57,11 +50,10 @@ impl CandidateFilter for DuplicateFilter {
 mod tests {
     use std::collections::HashSet;
 
+    use bookway_bbs_link_api::pb::{ContentStatus, GrowthDomain, PostSummary};
+
     use super::{CandidateFilter, FollowingOnlyFilter};
-    use crate::{
-        api::{ContentStatusDto, GrowthDomainDto, PostSummaryDto},
-        domain::pipeline::{Candidate, FeedQuery},
-    };
+    use crate::domain::pipeline::{Candidate, FeedQuery};
 
     fn query(surface: &str) -> FeedQuery {
         FeedQuery {
@@ -77,13 +69,13 @@ mod tests {
 
     fn candidate(followed_author: bool) -> Candidate {
         Candidate {
-            post: PostSummaryDto {
+            post: PostSummary {
                 id: "post-1".to_string(),
                 author_name: "作者".to_string(),
                 author_avatar_url: String::new(),
                 title: String::new(),
                 summary: String::new(),
-                domain: GrowthDomainDto::Learning,
+                domain: GrowthDomain::Learning as i32,
                 cover_url: String::new(),
                 route_title: String::new(),
                 route_duration: String::new(),
@@ -91,9 +83,10 @@ mod tests {
                 like_count: 0,
                 freshness: 0.0,
                 tags: Vec::new(),
+                is_route: false,
             },
             author_id: "author-1".to_string(),
-            status: ContentStatusDto::Published,
+            status: ContentStatus::Published as i32,
             quality_score: 1.0,
             score: 1.0,
             source: "test".to_string(),

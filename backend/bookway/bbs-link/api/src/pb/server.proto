@@ -1,0 +1,188 @@
+syntax = "proto3";
+package bookway.bbs.link;
+
+enum GrowthDomain {
+  GROWTH_DOMAIN_LEARNING = 0;
+  GROWTH_DOMAIN_MOVEMENT = 1;
+  GROWTH_DOMAIN_WELLNESS = 2;
+  GROWTH_DOMAIN_TRAVEL = 3;
+  GROWTH_DOMAIN_LEISURE = 4;
+}
+
+enum ContentType {
+  CONTENT_TYPE_NOTE = 0;
+  CONTENT_TYPE_ARTICLE = 1;
+  CONTENT_TYPE_VIDEO = 2;
+  CONTENT_TYPE_ROUTE = 3;
+}
+
+enum ContentStatus {
+  CONTENT_STATUS_DRAFT = 0;
+  CONTENT_STATUS_REVIEWING = 1;
+  CONTENT_STATUS_PUBLISHED = 2;
+  CONTENT_STATUS_RESTRICTED = 3;
+  CONTENT_STATUS_DELETED = 4;
+}
+
+enum RouteTemplateKind {
+  ROUTE_TEMPLATE_KIND_PROJECT = 0;
+  ROUTE_TEMPLATE_KIND_HABIT = 1;
+  ROUTE_TEMPLATE_KIND_QUANTITY = 2;
+  ROUTE_TEMPLATE_KIND_TRAVEL = 3;
+  ROUTE_TEMPLATE_KIND_CHALLENGE = 4;
+}
+
+message ContentMedia {
+  string id = 1;
+  string url = 2;
+  string kind = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  optional uint64 duration_ms = 6;
+}
+
+message PostSummary {
+  string id = 1;
+  string author_name = 2;
+  string author_avatar_url = 3;
+  string title = 4;
+  string summary = 5;
+  GrowthDomain domain = 6;
+  string cover_url = 7;
+  string route_title = 8;
+  string route_duration = 9;
+  uint32 join_count = 10;
+  uint32 like_count = 11;
+  double freshness = 12;
+  repeated string tags = 13;
+  // This is derived from Content.content_type, not from optional display text.
+  // Clients must use it to decide whether an item can be adopted as a route.
+  bool is_route = 14;
+}
+
+// A route template is authored as community content but copied into a user's
+// private plan when they join. It never references the author's private data.
+message RouteTemplateStage {
+  string title = 1;
+  string detail = 2;
+  string completion_criteria = 3;
+}
+
+message RouteTemplateAction {
+  string title = 1;
+  string detail = 2;
+  uint32 estimated_minutes = 3;
+  string scheduled_label = 4;
+  optional uint32 stage_index = 5;
+}
+
+message RouteTemplate {
+  string intent = 1;
+  string completion_criteria = 2;
+  repeated RouteTemplateStage stages = 3;
+  repeated RouteTemplateAction actions = 4;
+  RouteTemplateKind journey_type = 5;
+}
+
+message Content {
+  string id = 1;
+  PostSummary post = 2;
+  string author_id = 3;
+  ContentType content_type = 4;
+  ContentStatus status = 5;
+  string body = 6;
+  repeated ContentMedia media = 7;
+  repeated string topics = 8;
+  string created_at = 9;
+  optional string published_at = 10;
+  uint32 version = 11;
+  double quality_score = 12;
+  optional RouteTemplate route_template = 13;
+}
+
+message ContentPage {
+  repeated Content items = 1;
+  optional string next_cursor = 2;
+  uint64 total_estimate = 3;
+}
+
+// A small, authoritative public projection for search and recommendation
+// read-through checks. It deliberately excludes body and media payloads.
+message PublicContentSummary {
+  string id = 1;
+  PostSummary post = 2;
+  string author_id = 3;
+  ContentType content_type = 4;
+  repeated string topics = 5;
+  double quality_score = 6;
+}
+message PublicContentSummariesRequest { repeated string ids = 1; }
+message PublicContentSummaries { repeated PublicContentSummary items = 1; }
+
+message ListRequest {
+  optional string cursor = 1;
+  optional uint32 limit = 2;
+  optional ContentStatus status = 3;
+  optional string strategy = 4;
+  optional string ids = 5;
+  optional string author_id = 6;
+  optional ContentType content_type = 7;
+  optional GrowthDomain domain = 8;
+  // Trusted internal batch author filter. It is used by the chronological
+  // following timeline; clients must never be allowed to provide it directly.
+  repeated string author_ids = 9;
+}
+message IdRequest { string id = 1; }
+message CreateRequest {
+  string user_id = 1;
+  optional string idempotency_key = 2;
+  string title = 3;
+  string summary = 4;
+  string body = 5;
+  GrowthDomain domain = 6;
+  ContentType content_type = 7;
+  // Deprecated. Arbitrary URLs are never accepted as public content media;
+  // clients must upload through Media and send its asset IDs instead.
+  optional string cover_url = 8;
+  repeated string tags = 9;
+  repeated string topics = 10;
+  optional string route_title = 11;
+  optional string route_duration = 12;
+  repeated string media_asset_ids = 13;
+  optional RouteTemplate route_template = 14;
+}
+message UpdateRequest {
+  string user_id = 1;
+  string id = 2;
+  optional string title = 3;
+  optional string summary = 4;
+  optional string body = 5;
+  optional StringList tags = 6;
+  optional StringList topics = 7;
+  // Deprecated. See CreateRequest.media_asset_ids.
+  optional string cover_url = 8;
+  optional StringList media_asset_ids = 9;
+  optional RouteTemplate route_template = 10;
+}
+message StringList { repeated string values = 1; }
+message PublishRequest {
+  string user_id = 1;
+  string id = 2;
+  // Once a publish transition has committed, repeating this key returns its
+  // original response without sending the content through moderation again.
+  optional string idempotency_key = 3;
+}
+message RestrictRequest { string content_id = 1; }
+message RestoreRequest { string content_id = 1; }
+
+service BbsLink {
+  rpc List(ListRequest) returns (ContentPage);
+  rpc GetPublicSummaries(PublicContentSummariesRequest) returns (PublicContentSummaries);
+  rpc Get(IdRequest) returns (Content);
+  rpc GetPublic(IdRequest) returns (Content);
+  rpc Create(CreateRequest) returns (Content);
+  rpc Update(UpdateRequest) returns (Content);
+  rpc Publish(PublishRequest) returns (Content);
+  rpc Restrict(RestrictRequest) returns (Content);
+  rpc Restore(RestoreRequest) returns (Content);
+}

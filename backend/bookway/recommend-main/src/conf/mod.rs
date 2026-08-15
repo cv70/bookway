@@ -25,10 +25,6 @@ impl Config {
                 .unwrap_or_else(|_| "http://127.0.0.1:8095".to_string()),
         })
     }
-
-    pub fn listen_addr(&self) -> SocketAddr {
-        self.listen_addr
-    }
 }
 
 fn grpc_url(key: &str, default: &str) -> String {

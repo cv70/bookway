@@ -1,9 +1,0 @@
-syntax = "proto3";
-package bookway.feature.main;
-
-message FeaturesRequest { string user_id = 1; repeated string content_ids = 2; }
-message JsonResponse { string response_json = 1; }
-
-service FeatureMain {
-  rpc Features(FeaturesRequest) returns (JsonResponse);
-}

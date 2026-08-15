@@ -1,7 +1,6 @@
 pub(crate) mod grpc;
-#[path = "pb/bookway.bbs.search.rs"]
-pub mod pb;
-pub(crate) use bookway_api::{
-    SearchQueryRequest, SearchResponseDto, SuggestionQueryRequest, SuggestionResponseDto,
-};
+pub use bookway_bbs_search_api::pb;
 pub(crate) use grpc::serve;
+
+#[allow(unused_imports)]
+pub(crate) use bookway_bbs_search_api::*;

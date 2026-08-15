@@ -6,23 +6,17 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-async-trait.workspace = true
+bookway-bbs-feed-api.workspace = true
 axum.workspace = true
 bookway-api.workspace = true
-bookway-recommend-main.workspace = true
-serde_json.workspace = true
-serde.workspace = true
+bookway-recommend-main-api.workspace = true
 bookway-runtime.workspace = true
 prost.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 tower.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 
 [lints]
 workspace = true
-
-[build-dependencies]
-tonic-build.workspace = true

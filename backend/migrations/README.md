@@ -33,5 +33,31 @@
 | `0027_content_report_restriction_jobs.sql` | trust-safety | 接受举报后的可恢复内容下架任务 |
 | `0028_search_main_sessions.sql` | search-main | 多路搜索召回的短期会话与稳定公开游标 |
 | `0029_comment_reply_depth.sql` | comment | 评论树层级回填与受限回复深度 |
+| `0030_account.sql` | account | 账户公开资料 |
+| `0031_commercialization.sql` | advertising / commerce | 广告投放、商品目录、库存预占、订单支付状态 |
+| `0032_commercialization_reliability.sql` | commerce | 支付渠道流水号的跨订单唯一约束 |
+| `0033_feedback.sql` | feedback | 用户产品反馈、状态、处理说明与幂等键 |
+| `0034_content_index_outbox.sql` | bbs-link / bbs-search | 内容搜索投影的事务性 Outbox、租约与存量回填 |
+| `0035_entry_publication_jobs.sql` | growth / bbs-link | 私人记录到公开行记的可恢复发布任务与旧数据状态回填 |
+| `0036_media_processing_and_content_asset_refs.sql` | media / bbs-link | 媒体处理租约队列、公开内容的受信资产引用与顺序约束 |
+| `0037_search_exposure_attribution.sql` | search-main | 搜索结果页曝光与可验证归因 |
+| `0038_user_event_negative_feedback.sql` | user-event / recommendation | 结构化隐藏反馈原因与特征语义 |
+| `0039_recommendation_evaluation.sql` | recommend-main / user-event | 版本化曝光身份、可信归因读取索引与离线评估快照 |
+| `0040_search_query_rewrite_versions.sql` | search-main | 版本化查询改写词典、原子活动指针与曝光审计标签 |
+| `0041_search_evaluation.sql` | search-main / user-event | 搜索改写版本的匿名离线评估快照 |
+| `0042_search_index_recovery.sql` | bbs-link / bbs-search | 搜索投影死信报告与受控重排审计 |
+| `0043_search_index_reconciliation.sql` | bbs-search | 搜索投影版本/可见性对账的持久运行、检查点和最终结论 |
+| `0044_push_delivery_dispatch.sql` | growth | 提醒 Provider 投递租约、退避重试、失败状态与领取索引 |
+| `0045_community_notification_jobs.sql` | gateway / growth | 跨服务互动已解析收件人的可靠社区收件箱投递任务 |
+| `0046_knowledge_content_sources.sql` | growth / gateway | 社区内容到私有知识库的稳定来源去重索引 |
+| `0047_following_timeline.sql` | bbs-link / recommendation | 关注作者批量时间流的公开内容读取索引 |
+| `0048_action_idempotency.sql` | growth | 用户创建行动的幂等键与弱网重试去重 |
+| `0049_user_event_knowledge_signal.sql` | user-event / recommendation | 私有知识收集的高意图信号约束 |
+| `0050_entry_idempotency.sql` | growth | 复盘/行记创建的幂等键与发布任务去重 |
+| `0051_journey_idempotency.sql` | growth | 私人路线与首项行动的幂等创建快照 |
+| `0052_content_publish_idempotency.sql` | bbs-link | 内容发布审核结果的幂等响应快照 |
+| `0053_comment_moderation_queue.sql` | comment | 待审评论分页索引与人工审核决定审计 |
 
-`STORAGE_MODE=postgres` 时服务使用 SQLx PostgreSQL Repository；`STORAGE_MODE=memory` 仅用于无依赖本地演示。生产部署必须先运行 `cargo run -p bookway-db-migrate`，再启动业务服务并确认连接池、Outbox/Worker 和迁移版本健康。`0016` 在持有参与事实表 DDL 锁的同一事务中安装计数触发器并回填，因此旧 BBS 实例的后续写入也会维护分片，可先迁移再滚动升级服务。`0019` 不为旧行动编造精确时间；旧数据保留原有本地日期行为，只有新建或显式改期的行动会写入精确安排瞬间和时区。`0020` 为精确安排引入版本号；改期或完成会取消旧的排队投递，而提醒调度器以 `(action_id, schedule_revision, channel, device_id)` 去重创建通知命令。`0021` 使用 `(kind, source_id)` 将生产端重试折叠为唯一收件箱项，并提供按用户的稳定游标和未读索引。`0026` 让终态申诉、恢复公开命令和作者收件箱任务原子落库；`0027` 将接受举报和下架任务原子落库。两个调度器都由租约负责重试，`dead` 状态必须纳入运营告警与人工补偿。
+`STORAGE_MODE=postgres` 时服务使用 SQLx PostgreSQL Repository；`STORAGE_MODE=memory` 仅用于无依赖本地演示。生产部署必须先运行 `cargo run -p bookway-db-migrate`，再启动业务服务并确认连接池、Outbox/Worker 和迁移版本健康。`0016` 在持有参与事实表 DDL 锁的同一事务中安装计数触发器并回填，因此旧 BBS 实例的后续写入也会维护分片，可先迁移再滚动升级服务。`0019` 不为旧行动编造精确时间；旧数据保留原有本地日期行为，只有新建或显式改期的行动会写入精确安排瞬间和时区。`0020` 为精确安排引入版本号；改期或完成会取消旧的排队投递，而提醒调度器以 `(action_id, schedule_revision, channel, device_id)` 去重创建通知命令。`0021` 使用 `(kind, source_id)` 将生产端重试折叠为唯一收件箱项，并提供按用户的稳定游标和未读索引。`0026` 让终态申诉、恢复公开命令和作者收件箱任务原子落库；`0027` 将接受举报后的下架任务与决议同事务提交，两个调度器都由租约负责重试，`dead` 状态必须纳入运营告警与人工补偿。`0032` 在启用支付回调前要求确认历史数据不存在重复的 provider 流水号；迁移后同一流水号只能结算一个订单。`0034` 会把既有内容回填为待投影任务；上线后应启动 `bookway-search-indexer`，并由 `bookway-search-index-outbox-recovery` 报告死信；只有明确操作者和原因的 `requeue_dead` 运行才能将死信安全重排。`0035` 保持旧客户端的已发布标记而不重复创建未知原帖；新记录的 `entry_publication_jobs.status = 'dead'` 也必须进入告警，并由用户显式重试或运营补偿处理。`0036` 将 `complete_upload` 后的资产放入处理队列，只有 `bookway-media-processor` 验证完成的 `ready` 资产能进入 BBS Link；必须对 `media_processing_jobs.status = 'dead'` 告警。`0039` 会将每次已持久化曝光对应的模型版本与实验桶保留下来，并建立只含请求归因事件的读取索引；`bookway-recommendation-evaluator` 必须使用已完成标签窗口的固定时间范围，它的快照是观察性评估记录，不得用作未经验证的训练或自动发布依据。`0040` 为 Search Main 增加受限、版本化的查询改写词典和原子活动指针；词典切换前必须完成离线检查，调用 `activate_search_query_rewrite` 后各实例会热刷新，旧分页会话保持创建时的改写版本。`0041` 为 `bookway-search-evaluator` 保存按改写版本和结果类型聚合的观察性指标；每次运行都必须使用完整标签窗口，样本不足的快照不能作为词典升级依据。`0043` 持久化搜索索引对账的受限检查点、聚合差异、Outbox 未投递数量和最终健康结论；同一未完成运行由租约串行恢复，只有完成、全量且 Outbox 已清空的运行才可能标记为健康。检查点包含内部内容 ID，必须仅向受控运维数据库访问者开放。`0044` 将提醒 Provider 投递从收件箱创建中分离为可租约领取的 Worker：发送前必须复核行动版本和设备，Provider 以 delivery ID 幂等，超时退避、失效设备撤销、终态失败均可审计。`0045` 让 Gateway 在互动后将已解析接收者和固定来源键写入可靠的社区通知任务，Worker 以租约投递 Growth；它不能跨服务消除互动已提交但 Gateway 尚未入队的窗口，且 `dead` 与入队失败日志必须由运营监控处理。`0046` 为知识资源增加可选社区内容来源标识和用户级唯一索引；它不回填正文或媒体，收集公开内容只保存受控元数据与原内容引用，内容可见性始终由 BBS Link 决定。`0047` 为关注时间流提供 `(author_id, created_at DESC, id DESC)` 的已公开内容读取索引；推荐召回只能使用 BBS 派生的关注作者集合，空关注集合必须返回空流而非回退到全局推荐。`0048` 为显式创建行动增加用户级幂等键；同一键配合相同动作返回已有行动，键与动作内容不匹配则返回冲突，重复计划自动物化的后继行动不使用该键。`0049` 使 PostgreSQL 的 `user_events` 枚举约束接受 Gateway 产生的 `save_knowledge` 事件；应用、特征和离线评估的高意图语义由此在生产存储中保持一致。`0050` 以用户级幂等键折叠复盘/行记创建的弱网重试；公开行记只会产生一条持久发布任务，而已发布后的同键重试仍会返回原始记录。
+
+`0051` 为显式创建私人 Journey 保存规范化的首次创建快照。它与运行中 Journey 及行动的可变 payload 分开存储，所以用户随后改名、改期、完成首项行动后，丢失响应的同键重试仍只会返回原 Journey；同键不同的初始阶段或首项行动会被拒绝。`0052` 为内容发布操作保存审核完成时的内容快照；弱网重试会返回该原始结果，绝不会再次审核、递增版本或因之后的编辑而误返回当前状态。`0053` 为评论人工审核提供只扫描待审行的稳定索引和首个终态决定的审计记录；审核服务必须先部署兼容代码再将人工工作台流量切入该端点。

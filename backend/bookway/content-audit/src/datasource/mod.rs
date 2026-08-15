@@ -1,14 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
-use super::api::{
-    AuditDecisionDto, ContentAppealDto, ContentAppealQueryRequest, ContentAuditRequest,
-    ContentAuditResponse, ContentReportActionDto, ContentReportDto, ContentReportQueryRequest,
-    ReviewContentAppealRequest, ReviewContentReportRequest,
-};
-use bookway_api::{ContentAppealStatusDto, ContentReportStatusDto};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::RwLock;
+
+use crate::api::pb;
 
 #[derive(Debug, Error)]
 pub(crate) enum RepositoryError {
@@ -26,6 +22,8 @@ pub(crate) enum RepositoryError {
     InvalidAppealReview(String),
     #[error("database operation failed: {0}")]
     Database(#[source] sqlx::Error),
+    #[error("stored moderation record is invalid: {0}")]
+    InvalidValue(String),
     #[error("stored report is invalid: {0}")]
     Serialization(#[source] serde_json::Error),
 }
@@ -55,11 +53,11 @@ impl ReportCursor {
         })
     }
 
-    pub(crate) fn from_report(report: &ContentReportDto) -> Option<Self> {
+    pub(crate) fn from_report(report: &pb::ContentReport) -> Option<Self> {
         Self::from_values(&report.created_at, &report.id)
     }
 
-    pub(crate) fn from_appeal(appeal: &ContentAppealDto) -> Option<Self> {
+    pub(crate) fn from_appeal(appeal: &pb::ContentAppeal) -> Option<Self> {
         Self::from_values(&appeal.created_at, &appeal.id)
     }
 
@@ -84,15 +82,16 @@ pub(crate) struct AuditRepository {
 
 #[derive(Default)]
 struct MemoryReports {
-    by_id: HashMap<String, ContentReportDto>,
+    by_id: HashMap<String, pb::ContentReport>,
     idempotency: HashMap<(String, String), String>,
 }
 
 #[derive(Default)]
 struct MemoryAppeals {
-    by_id: HashMap<String, ContentAppealDto>,
+    by_id: HashMap<String, pb::ContentAppeal>,
     idempotency: HashMap<(String, String), String>,
 }
+
 impl AuditRepository {
     pub(crate) fn new(pool: Option<sqlx::PgPool>) -> Self {
         Self {
@@ -101,29 +100,33 @@ impl AuditRepository {
             appeals: Arc::new(RwLock::new(MemoryAppeals::default())),
         }
     }
+
     pub(crate) async fn store(
         &self,
-        request: &ContentAuditRequest,
-        response: &ContentAuditResponse,
+        request: &pb::AuditRequest,
+        response: &pb::AuditResponse,
     ) -> Result<(), RepositoryError> {
         let Some(pool) = &self.pool else {
             return Ok(());
         };
-        let decision = match response.decision {
-            AuditDecisionDto::Approved => "approved",
-            AuditDecisionDto::Reviewing => "reviewing",
-            AuditDecisionDto::Restricted => "restricted",
-        };
         sqlx::query("INSERT INTO content_audits (content_id,version,decision,risk_score,reasons,provider) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (content_id,version) DO UPDATE SET decision=excluded.decision,risk_score=excluded.risk_score,reasons=excluded.reasons,provider=excluded.provider")
-            .bind(&request.content_id).bind(i32::try_from(request.version).unwrap_or(i32::MAX)).bind(decision).bind(response.risk_score).bind(serde_json::json!(response.reasons)).bind(&response.provider).execute(pool).await.map_err(RepositoryError::Database)?;
+            .bind(&request.content_id)
+            .bind(i32::try_from(request.version).unwrap_or(i32::MAX))
+            .bind(audit_decision_name(response.decision)?)
+            .bind(response.risk_score)
+            .bind(serde_json::json!(response.reasons))
+            .bind(&response.provider)
+            .execute(pool)
+            .await
+            .map_err(RepositoryError::Database)?;
         Ok(())
     }
 
     pub(crate) async fn store_report(
         &self,
-        report: ContentReportDto,
+        report: pb::ContentReport,
         idempotency_key: Option<String>,
-    ) -> Result<ContentReportDto, RepositoryError> {
+    ) -> Result<pb::ContentReport, RepositoryError> {
         let Some(pool) = &self.pool else {
             let Some(idempotency_key) = idempotency_key else {
                 self.reports
@@ -151,7 +154,7 @@ impl AuditRepository {
         .bind(&report.id)
         .bind(&report.reporter_id)
         .bind(&report.content_id)
-        .bind(report_reason(report.reason))
+        .bind(report_reason_name(report.reason)?)
         .bind(&report.details)
         .bind(idempotency_key)
         .bind(payload)
@@ -164,11 +167,11 @@ impl AuditRepository {
 
     pub(crate) async fn list_reports(
         &self,
-        query: &ContentReportQueryRequest,
+        query: &pb::ListReportsRequest,
         cursor: Option<&ReportCursor>,
         limit: usize,
-    ) -> Result<Vec<ContentReportDto>, RepositoryError> {
-        let status = query.status.unwrap_or_default();
+    ) -> Result<Vec<pb::ContentReport>, RepositoryError> {
+        let status = query.status.unwrap_or(pb::ReportStatus::Pending as i32);
         let Some(pool) = &self.pool else {
             let mut reports = self
                 .reports
@@ -191,7 +194,7 @@ impl AuditRepository {
         let rows = sqlx::query_as::<_, ModerationRow>(
             "SELECT payload,status,assignee_id,resolution,created_at,updated_at FROM community_reports WHERE status = $1 AND ($2::TIMESTAMPTZ IS NULL OR (created_at,id) > ($2::TIMESTAMPTZ,$3)) ORDER BY created_at ASC,id ASC LIMIT $4",
         )
-        .bind(report_status_name(status))
+        .bind(report_status_name(status)?)
         .bind(cursor.map(|value| format_timestamp(value.created_at)))
         .bind(cursor.map(|value| value.id.as_str()))
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
@@ -207,8 +210,8 @@ impl AuditRepository {
         &self,
         report_id: &str,
         reviewer_id: &str,
-        request: ReviewContentReportRequest,
-    ) -> Result<ContentReportDto, RepositoryError> {
+        request: pb::ReviewReportRequest,
+    ) -> Result<pb::ContentReport, RepositoryError> {
         let Some(pool) = &self.pool else {
             let mut reports = self.reports.write().await;
             let report = reports
@@ -239,7 +242,7 @@ impl AuditRepository {
             "UPDATE community_reports SET status = $2,assignee_id = $3,resolution = $4,payload = $5,updated_at = now() WHERE id = $1 RETURNING updated_at",
         )
         .bind(report_id)
-        .bind(report_status_name(reviewed.status))
+        .bind(report_status_name(reviewed.status)?)
         .bind(&reviewed.assignee_id)
         .bind(&reviewed.resolution)
         .bind(payload)
@@ -254,9 +257,9 @@ impl AuditRepository {
 
     pub(crate) async fn store_appeal(
         &self,
-        appeal: ContentAppealDto,
+        appeal: pb::ContentAppeal,
         idempotency_key: Option<String>,
-    ) -> Result<ContentAppealDto, RepositoryError> {
+    ) -> Result<pb::ContentAppeal, RepositoryError> {
         let Some(pool) = &self.pool else {
             let Some(idempotency_key) = idempotency_key else {
                 self.appeals
@@ -296,10 +299,10 @@ impl AuditRepository {
 
     pub(crate) async fn list_appeals(
         &self,
-        query: &ContentAppealQueryRequest,
+        query: &pb::ListAppealsRequest,
         cursor: Option<&ReportCursor>,
         limit: usize,
-    ) -> Result<Vec<ContentAppealDto>, RepositoryError> {
+    ) -> Result<Vec<pb::ContentAppeal>, RepositoryError> {
         let Some(pool) = &self.pool else {
             let mut appeals = self
                 .appeals
@@ -334,7 +337,7 @@ impl AuditRepository {
         let rows = sqlx::query_as::<_, ModerationRow>(
             "SELECT payload,status,assignee_id,resolution,created_at,updated_at FROM content_appeals WHERE ($1::text IS NULL OR status = $1) AND ($2::text IS NULL OR appellant_id = $2) AND ($3::text IS NULL OR content_id = $3) AND ($4::TIMESTAMPTZ IS NULL OR (created_at,id) > ($4::TIMESTAMPTZ,$5)) ORDER BY created_at ASC,id ASC LIMIT $6",
         )
-        .bind(query.status.map(appeal_status_name))
+        .bind(query.status.map(appeal_status_name).transpose()?)
         .bind(query.appellant_id.as_deref())
         .bind(query.content_id.as_deref())
         .bind(cursor.map(|value| format_timestamp(value.created_at)))
@@ -352,8 +355,8 @@ impl AuditRepository {
         &self,
         appeal_id: &str,
         reviewer_id: &str,
-        request: ReviewContentAppealRequest,
-    ) -> Result<ContentAppealDto, RepositoryError> {
+        request: pb::ReviewAppealRequest,
+    ) -> Result<pb::ContentAppeal, RepositoryError> {
         let Some(pool) = &self.pool else {
             let mut appeals = self.appeals.write().await;
             let appeal = appeals
@@ -384,7 +387,7 @@ impl AuditRepository {
             "UPDATE content_appeals SET status = $2,assignee_id = $3,resolution = $4,payload = $5,updated_at = now() WHERE id = $1 RETURNING updated_at",
         )
         .bind(appeal_id)
-        .bind(appeal_status_name(reviewed.status))
+        .bind(appeal_status_name(reviewed.status)?)
         .bind(&reviewed.assignee_id)
         .bind(&reviewed.resolution)
         .bind(payload)
@@ -400,10 +403,10 @@ impl AuditRepository {
 
 async fn ensure_report_restriction_job(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    report: &ContentReportDto,
+    report: &pb::ContentReport,
 ) -> Result<(), RepositoryError> {
-    if report.status != ContentReportStatusDto::Resolved
-        || report.action != ContentReportActionDto::RestrictContent
+    if report.status != pb::ReportStatus::Resolved as i32
+        || report.action != pb::ContentAction::Restrict as i32
     {
         return Ok(());
     }
@@ -420,7 +423,7 @@ async fn ensure_report_restriction_job(
 
 async fn ensure_appeal_notification_job(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    appeal: &ContentAppealDto,
+    appeal: &pb::ContentAppeal,
 ) -> Result<(), RepositoryError> {
     if !is_appeal_terminal(appeal.status) {
         return Ok(());
@@ -431,8 +434,8 @@ async fn ensure_appeal_notification_job(
     .bind(&appeal.id)
     .bind(&appeal.appellant_id)
     .bind(&appeal.content_id)
-    .bind(appeal_status_name(appeal.status))
-    .bind(appeal_action_name(appeal.action))
+    .bind(appeal_status_name(appeal.status)?)
+    .bind(content_action_name(appeal.action)?)
     .bind(appeal.resolution.as_deref().unwrap_or_default())
     .execute(&mut **transaction)
     .await
@@ -446,23 +449,59 @@ fn format_timestamp(timestamp: OffsetDateTime) -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
-fn report_status_name(status: ContentReportStatusDto) -> &'static str {
-    match status {
-        ContentReportStatusDto::Pending => "pending",
-        ContentReportStatusDto::Reviewing => "reviewing",
-        ContentReportStatusDto::Resolved => "resolved",
-        ContentReportStatusDto::Rejected => "rejected",
+fn audit_decision_name(value: i32) -> Result<&'static str, RepositoryError> {
+    match pb::AuditDecision::try_from(value) {
+        Ok(pb::AuditDecision::Approved) => Ok("approved"),
+        Ok(pb::AuditDecision::Reviewing) => Ok("reviewing"),
+        Ok(pb::AuditDecision::Restricted) => Ok("restricted"),
+        Err(_) => Err(RepositoryError::InvalidValue(
+            "unknown audit decision".to_string(),
+        )),
     }
 }
 
-fn parse_report_status(status: String) -> Result<ContentReportStatusDto, RepositoryError> {
-    serde_json::from_value(serde_json::Value::String(status))
-        .map_err(RepositoryError::Serialization)
+fn report_reason_name(value: i32) -> Result<&'static str, RepositoryError> {
+    match pb::ReportReason::try_from(value) {
+        Ok(pb::ReportReason::Spam) => Ok("spam"),
+        Ok(pb::ReportReason::Harassment) => Ok("harassment"),
+        Ok(pb::ReportReason::Unsafe) => Ok("unsafe"),
+        Ok(pb::ReportReason::Misinformation) => Ok("misinformation"),
+        Ok(pb::ReportReason::Copyright) => Ok("copyright"),
+        Ok(pb::ReportReason::Privacy) => Ok("privacy"),
+        Ok(pb::ReportReason::Other) => Ok("other"),
+        Err(_) => Err(RepositoryError::InvalidValue(
+            "unknown report reason".to_string(),
+        )),
+    }
 }
 
-fn hydrate_report(row: ModerationRow) -> Result<ContentReportDto, RepositoryError> {
+fn report_status_name(value: i32) -> Result<&'static str, RepositoryError> {
+    match pb::ReportStatus::try_from(value) {
+        Ok(pb::ReportStatus::Pending) => Ok("pending"),
+        Ok(pb::ReportStatus::Reviewing) => Ok("reviewing"),
+        Ok(pb::ReportStatus::Resolved) => Ok("resolved"),
+        Ok(pb::ReportStatus::Rejected) => Ok("rejected"),
+        Err(_) => Err(RepositoryError::InvalidValue(
+            "unknown report status".to_string(),
+        )),
+    }
+}
+
+fn parse_report_status(value: String) -> Result<i32, RepositoryError> {
+    match value.as_str() {
+        "pending" => Ok(pb::ReportStatus::Pending as i32),
+        "reviewing" => Ok(pb::ReportStatus::Reviewing as i32),
+        "resolved" => Ok(pb::ReportStatus::Resolved as i32),
+        "rejected" => Ok(pb::ReportStatus::Rejected as i32),
+        _ => Err(RepositoryError::InvalidValue(
+            "unknown report status".to_string(),
+        )),
+    }
+}
+
+fn hydrate_report(row: ModerationRow) -> Result<pb::ContentReport, RepositoryError> {
     let (payload, status, assignee_id, resolution, created_at, updated_at) = row;
-    let mut report = serde_json::from_value::<ContentReportDto>(payload)
+    let mut report = serde_json::from_value::<pb::ContentReport>(payload)
         .map_err(RepositoryError::Serialization)?;
     report.status = parse_report_status(status)?;
     report.assignee_id = assignee_id;
@@ -472,31 +511,44 @@ fn hydrate_report(row: ModerationRow) -> Result<ContentReportDto, RepositoryErro
     Ok(report)
 }
 
-fn appeal_status_name(status: ContentAppealStatusDto) -> &'static str {
-    match status {
-        ContentAppealStatusDto::Pending => "pending",
-        ContentAppealStatusDto::Reviewing => "reviewing",
-        ContentAppealStatusDto::Resolved => "resolved",
-        ContentAppealStatusDto::Rejected => "rejected",
+fn appeal_status_name(value: i32) -> Result<&'static str, RepositoryError> {
+    match pb::AppealStatus::try_from(value) {
+        Ok(pb::AppealStatus::Pending) => Ok("pending"),
+        Ok(pb::AppealStatus::Reviewing) => Ok("reviewing"),
+        Ok(pb::AppealStatus::Resolved) => Ok("resolved"),
+        Ok(pb::AppealStatus::Rejected) => Ok("rejected"),
+        Err(_) => Err(RepositoryError::InvalidValue(
+            "unknown appeal status".to_string(),
+        )),
     }
 }
 
-fn appeal_action_name(action: ContentReportActionDto) -> &'static str {
-    match action {
-        ContentReportActionDto::NoAction => "no_action",
-        ContentReportActionDto::RestrictContent => "restrict_content",
-        ContentReportActionDto::RestoreContent => "restore_content",
+fn parse_appeal_status(value: String) -> Result<i32, RepositoryError> {
+    match value.as_str() {
+        "pending" => Ok(pb::AppealStatus::Pending as i32),
+        "reviewing" => Ok(pb::AppealStatus::Reviewing as i32),
+        "resolved" => Ok(pb::AppealStatus::Resolved as i32),
+        "rejected" => Ok(pb::AppealStatus::Rejected as i32),
+        _ => Err(RepositoryError::InvalidValue(
+            "unknown appeal status".to_string(),
+        )),
     }
 }
 
-fn parse_appeal_status(status: String) -> Result<ContentAppealStatusDto, RepositoryError> {
-    serde_json::from_value(serde_json::Value::String(status))
-        .map_err(RepositoryError::Serialization)
+fn content_action_name(value: i32) -> Result<&'static str, RepositoryError> {
+    match pb::ContentAction::try_from(value) {
+        Ok(pb::ContentAction::NoAction) => Ok("no_action"),
+        Ok(pb::ContentAction::Restrict) => Ok("restrict_content"),
+        Ok(pb::ContentAction::Restore) => Ok("restore_content"),
+        Err(_) => Err(RepositoryError::InvalidValue(
+            "unknown content action".to_string(),
+        )),
+    }
 }
 
-fn hydrate_appeal(row: ModerationRow) -> Result<ContentAppealDto, RepositoryError> {
+fn hydrate_appeal(row: ModerationRow) -> Result<pb::ContentAppeal, RepositoryError> {
     let (payload, status, assignee_id, resolution, created_at, updated_at) = row;
-    let mut appeal = serde_json::from_value::<ContentAppealDto>(payload)
+    let mut appeal = serde_json::from_value::<pb::ContentAppeal>(payload)
         .map_err(RepositoryError::Serialization)?;
     appeal.status = parse_appeal_status(status)?;
     appeal.assignee_id = assignee_id;
@@ -506,38 +558,40 @@ fn hydrate_appeal(row: ModerationRow) -> Result<ContentAppealDto, RepositoryErro
     Ok(appeal)
 }
 
-fn is_terminal(status: ContentReportStatusDto) -> bool {
+fn is_terminal(status: i32) -> bool {
     matches!(
-        status,
-        ContentReportStatusDto::Resolved | ContentReportStatusDto::Rejected
+        pb::ReportStatus::try_from(status),
+        Ok(pb::ReportStatus::Resolved | pb::ReportStatus::Rejected)
     )
 }
 
-fn is_appeal_terminal(status: ContentAppealStatusDto) -> bool {
+fn is_appeal_terminal(status: i32) -> bool {
     matches!(
-        status,
-        ContentAppealStatusDto::Resolved | ContentAppealStatusDto::Rejected
+        pb::AppealStatus::try_from(status),
+        Ok(pb::AppealStatus::Resolved | pb::AppealStatus::Rejected)
     )
 }
 
 fn apply_review(
-    report: &mut ContentReportDto,
+    report: &mut pb::ContentReport,
     reviewer_id: &str,
-    request: &ReviewContentReportRequest,
-) -> Result<ContentReportDto, RepositoryError> {
-    if matches!(request.status, ContentReportStatusDto::Pending) {
+    request: &pb::ReviewReportRequest,
+) -> Result<pb::ContentReport, RepositoryError> {
+    let status = pb::ReportStatus::try_from(request.status)
+        .map_err(|_| RepositoryError::InvalidReview("unknown report status".to_string()))?;
+    let action = pb::ContentAction::try_from(request.action)
+        .map_err(|_| RepositoryError::InvalidReview("unknown content action".to_string()))?;
+    if status == pb::ReportStatus::Pending {
         return Err(RepositoryError::InvalidReview(
             "pending is not a human review decision".to_string(),
         ));
     }
-    if request.status == ContentReportStatusDto::Reviewing && !request.resolution.is_empty() {
+    if status == pb::ReportStatus::Reviewing && !request.resolution.is_empty() {
         return Err(RepositoryError::InvalidReview(
             "reviewing reports cannot have a resolution".to_string(),
         ));
     }
-    if request.status == ContentReportStatusDto::Reviewing
-        && request.action != ContentReportActionDto::NoAction
-    {
+    if status == pb::ReportStatus::Reviewing && action != pb::ContentAction::NoAction {
         return Err(RepositoryError::InvalidReview(
             "reviewing reports cannot change content state".to_string(),
         ));
@@ -547,14 +601,12 @@ fn apply_review(
             "terminal report decisions require a resolution".to_string(),
         ));
     }
-    if request.status == ContentReportStatusDto::Rejected
-        && request.action != ContentReportActionDto::NoAction
-    {
+    if status == pb::ReportStatus::Rejected && action != pb::ContentAction::NoAction {
         return Err(RepositoryError::InvalidReview(
             "rejected reports cannot change content state".to_string(),
         ));
     }
-    if request.action == ContentReportActionDto::RestoreContent {
+    if action == pb::ContentAction::Restore {
         return Err(RepositoryError::InvalidReview(
             "reports cannot restore content".to_string(),
         ));
@@ -566,7 +618,6 @@ fn apply_review(
             .then(|| report.clone())
             .ok_or(RepositoryError::ReportConflict);
     }
-
     report.status = request.status;
     report.assignee_id = Some(reviewer_id.to_string());
     report.resolution = is_terminal(request.status).then(|| request.resolution.clone());
@@ -576,17 +627,21 @@ fn apply_review(
 }
 
 fn apply_appeal_review(
-    appeal: &mut ContentAppealDto,
+    appeal: &mut pb::ContentAppeal,
     reviewer_id: &str,
-    request: &ReviewContentAppealRequest,
-) -> Result<ContentAppealDto, RepositoryError> {
-    if matches!(request.status, ContentAppealStatusDto::Pending) {
+    request: &pb::ReviewAppealRequest,
+) -> Result<pb::ContentAppeal, RepositoryError> {
+    let status = pb::AppealStatus::try_from(request.status)
+        .map_err(|_| RepositoryError::InvalidAppealReview("unknown appeal status".to_string()))?;
+    let action = pb::ContentAction::try_from(request.action)
+        .map_err(|_| RepositoryError::InvalidAppealReview("unknown content action".to_string()))?;
+    if status == pb::AppealStatus::Pending {
         return Err(RepositoryError::InvalidAppealReview(
             "pending is not a human appeal decision".to_string(),
         ));
     }
-    if request.status == ContentAppealStatusDto::Reviewing
-        && (!request.resolution.is_empty() || request.action != ContentReportActionDto::NoAction)
+    if status == pb::AppealStatus::Reviewing
+        && (!request.resolution.is_empty() || action != pb::ContentAction::NoAction)
     {
         return Err(RepositoryError::InvalidAppealReview(
             "reviewing appeals cannot have a resolution or content action".to_string(),
@@ -597,14 +652,12 @@ fn apply_appeal_review(
             "terminal appeal decisions require a resolution".to_string(),
         ));
     }
-    if request.status == ContentAppealStatusDto::Rejected
-        && request.action != ContentReportActionDto::NoAction
-    {
+    if status == pb::AppealStatus::Rejected && action != pb::ContentAction::NoAction {
         return Err(RepositoryError::InvalidAppealReview(
             "rejected appeals cannot change content state".to_string(),
         ));
     }
-    if request.action == ContentReportActionDto::RestrictContent {
+    if action == pb::ContentAction::Restrict {
         return Err(RepositoryError::InvalidAppealReview(
             "appeals cannot restrict content".to_string(),
         ));
@@ -622,16 +675,4 @@ fn apply_appeal_review(
     appeal.action = request.action;
     appeal.updated_at = format_timestamp(OffsetDateTime::now_utc());
     Ok(appeal.clone())
-}
-
-fn report_reason(reason: bookway_api::ReportReasonDto) -> &'static str {
-    match reason {
-        bookway_api::ReportReasonDto::Spam => "spam",
-        bookway_api::ReportReasonDto::Harassment => "harassment",
-        bookway_api::ReportReasonDto::Unsafe => "unsafe",
-        bookway_api::ReportReasonDto::Misinformation => "misinformation",
-        bookway_api::ReportReasonDto::Copyright => "copyright",
-        bookway_api::ReportReasonDto::Privacy => "privacy",
-        bookway_api::ReportReasonDto::Other => "other",
-    }
 }

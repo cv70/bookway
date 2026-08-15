@@ -1,6 +1,5 @@
 use super::pb::{self, recommend_main_server::RecommendMain};
-use crate::{api::FeedQueryRequest, domain::Domain};
-use serde::Serialize;
+use crate::domain::Domain;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
@@ -13,14 +12,29 @@ impl RecommendMain for GrpcServer {
     async fn feed(
         &self,
         request: Request<pb::FeedRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let query: FeedQueryRequest = serde_json::from_str(&request.into_inner().request_json)
-            .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        let response = self.domain.recommend(query).await;
-        Ok(Response::new(pb::JsonResponse {
-            response_json: serde_json::to_string(&response)
-                .map_err(|error| Status::internal(error.to_string()))?,
-        }))
+    ) -> Result<Response<pb::FeedResponse>, Status> {
+        Ok(Response::new(
+            self.domain.recommend(request.into_inner()).await,
+        ))
+    }
+
+    async fn validate_attributions(
+        &self,
+        request: Request<pb::ValidateAttributionsRequest>,
+    ) -> Result<Response<pb::ValidateAttributionsResponse>, Status> {
+        let response = self
+            .domain
+            .validate_attributions(request.into_inner())
+            .await
+            .map_err(|error| match error {
+                crate::datasource::ExposureError::PositionOutOfRange => {
+                    Status::invalid_argument(error.to_string())
+                }
+                crate::datasource::ExposureError::Database(_) => {
+                    Status::unavailable(error.to_string())
+                }
+            })?;
+        Ok(Response::new(response))
     }
 }
 
@@ -31,13 +45,14 @@ pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
         .await;
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(pb::recommend_main_server::RecommendMainServer::new(
-            GrpcServer {
-                domain: domain.clone(),
-            },
-        ))
+        .add_service(
+            pb::recommend_main_server::RecommendMainServer::with_interceptor(
+                GrpcServer {
+                    domain: domain.clone(),
+                },
+                bookway_runtime::grpc_service_auth_interceptor,
+            ),
+        )
         .serve(domain.config.listen_addr)
         .await
 }
-
-fn _serialize_marker<T: Serialize>(_: &T) {}

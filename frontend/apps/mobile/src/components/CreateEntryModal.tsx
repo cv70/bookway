@@ -1,6 +1,7 @@
-import { MapPin, Timer, X } from 'lucide-react-native';
+import { ImagePlus, MapPin, Timer, X } from 'lucide-react-native';
 import { useEffect, useState } from 'react';
 import {
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -12,7 +13,9 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 
+import { uploadImageAsset } from '../api/client';
 import { colors } from '../theme';
 import { CreateEntryInput, EntryMood, Journey } from '../types';
 
@@ -40,7 +43,11 @@ export function CreateEntryModal({ visible, actionId, initialDurationMinutes, jo
   const [minutes, setMinutes] = useState('');
   const [quantity, setQuantity] = useState('');
   const [location, setLocation] = useState('');
-  const [photoUrl, setPhotoUrl] = useState('');
+  const [photoMediaId, setPhotoMediaId] = useState<string>();
+  const [photoPreviewUri, setPhotoPreviewUri] = useState<string>();
+  const [photoStatus, setPhotoStatus] = useState<string>();
+  const [photoError, setPhotoError] = useState<string>();
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [publish, setPublish] = useState(false);
 
   useEffect(() => {
@@ -50,12 +57,51 @@ export function CreateEntryModal({ visible, actionId, initialDurationMinutes, jo
     setMinutes(initialDurationMinutes ? String(initialDurationMinutes) : '');
     setQuantity('');
     setLocation('');
-    setPhotoUrl('');
+    setPhotoMediaId(undefined);
+    setPhotoPreviewUri(undefined);
+    setPhotoStatus(undefined);
+    setPhotoError(undefined);
+    setUploadingPhoto(false);
     setPublish(false);
   }, [actionId, initialDurationMinutes, journeyId, visible]);
 
   const resolvedJourneyId = journeyId ?? journeys[0]?.id;
-  const ready = body.trim().length > 0;
+  const ready = body.trim().length > 0 && !uploadingPhoto;
+  const pickPhoto = async () => {
+    setPhotoError(undefined);
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      setPhotoError('需要照片访问权限才能添加图片');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 0.9,
+    });
+    if (result.canceled) return;
+    const asset = result.assets[0];
+    if (!asset?.uri) {
+      setPhotoError('没有读取到所选图片');
+      return;
+    }
+    setUploadingPhoto(true);
+    setPhotoPreviewUri(asset.uri);
+    setPhotoMediaId(undefined);
+    setPhotoStatus('正在上传图片');
+    try {
+      const media = await uploadImageAsset(asset.uri, asset.mimeType);
+      setPhotoMediaId(media.id);
+      setPhotoStatus(media.status === 'ready' ? '图片已就绪' : '图片正在安全处理，行记会在处理完成后继续发布');
+    } catch (error) {
+      setPhotoPreviewUri(undefined);
+      setPhotoStatus(undefined);
+      setPhotoError(error instanceof Error ? error.message : '图片上传失败，请重试');
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
   const submit = () => {
     if (!ready) return;
     onSubmit({
@@ -66,7 +112,7 @@ export function CreateEntryModal({ visible, actionId, initialDurationMinutes, jo
       duration_minutes: minutes ? Number(minutes) : undefined,
       quantity: quantity.trim() || undefined,
       location: location.trim() || undefined,
-      photo_url: photoUrl.trim() || undefined,
+      photo_media_id: photoMediaId,
       published: publish,
     });
   };
@@ -127,15 +173,22 @@ export function CreateEntryModal({ visible, actionId, initialDurationMinutes, jo
               <View style={styles.inputWithIcon}><MapPin color={colors.faint} size={16} /><TextInput onChangeText={setLocation} placeholder="可选" placeholderTextColor={colors.faint} style={styles.compactInput} value={location} /></View>
             </View>
             <View style={styles.field}>
-              <Text style={styles.label}>照片链接</Text>
-              <TextInput autoCapitalize="none" keyboardType="url" onChangeText={setPhotoUrl} placeholder="可选" placeholderTextColor={colors.faint} style={styles.compactTextInput} value={photoUrl} />
+              <Text style={styles.label}>记录照片</Text>
+              <Pressable accessibilityLabel="选择记录照片" disabled={uploadingPhoto} onPress={pickPhoto} style={({ pressed }) => [styles.photoPicker, pressed && !uploadingPhoto && styles.pressed, uploadingPhoto && styles.disabled]}>
+                {photoPreviewUri ? <Image source={{ uri: photoPreviewUri }} style={styles.photoPreview} /> : <ImagePlus color={colors.evergreen} size={20} />}
+                <View style={styles.photoPickerCopy}>
+                  <Text style={styles.photoPickerTitle}>{uploadingPhoto ? '正在上传图片' : photoMediaId ? '更换照片' : '选择照片'}</Text>
+                  <Text style={styles.photoPickerText}>{photoStatus ?? '上传后将进行安全处理'}</Text>
+                </View>
+              </Pressable>
+              {photoError ? <Text style={styles.photoError}>{photoError}</Text> : null}
             </View>
             <View style={styles.publishRow}>
               <View style={styles.publishCopy}><Text style={styles.publishTitle}>发布为行记</Text><Text style={styles.publishText}>仅公开你填写的这条记录</Text></View>
               <Switch accessibilityLabel="发布为行记" onValueChange={setPublish} thumbColor={colors.surface} trackColor={{ false: colors.line, true: colors.evergreen }} value={publish} />
             </View>
           </ScrollView>
-          <Pressable disabled={!ready} onPress={submit} style={({ pressed }) => [styles.submit, !ready && styles.disabled, pressed && ready && styles.pressed]}><Text style={styles.submitText}>{publish ? '发布行记' : '保存记录'}</Text></Pressable>
+          <Pressable disabled={!ready} onPress={submit} style={({ pressed }) => [styles.submit, !ready && styles.disabled, pressed && ready && styles.pressed]}><Text style={styles.submitText}>{uploadingPhoto ? '图片上传中' : publish ? '发布行记' : '保存记录'}</Text></Pressable>
         </View>
       </KeyboardAvoidingView>
     </Modal>
@@ -164,6 +217,12 @@ const styles = StyleSheet.create({
   inputWithIcon: { height: 44, paddingHorizontal: 11, flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 6, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.background },
   compactInput: { flex: 1, minWidth: 0, paddingVertical: 0, color: colors.ink, fontSize: 13, letterSpacing: 0 },
   compactTextInput: { height: 44, paddingHorizontal: 11, borderRadius: 6, borderWidth: 1, borderColor: colors.line, color: colors.ink, backgroundColor: colors.background, fontSize: 13, letterSpacing: 0 },
+  photoPicker: { minHeight: 62, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 11, borderRadius: 7, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.evergreen, backgroundColor: colors.evergreenSoft },
+  photoPreview: { width: 42, height: 42, borderRadius: 4, backgroundColor: colors.line },
+  photoPickerCopy: { flex: 1, minWidth: 0 },
+  photoPickerTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  photoPickerText: { marginTop: 2, color: colors.muted, fontSize: 11, lineHeight: 16, letterSpacing: 0 },
+  photoError: { color: colors.coral, fontSize: 11, lineHeight: 16, letterSpacing: 0 },
   publishRow: { minHeight: 64, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 7, backgroundColor: colors.evergreenSoft },
   publishCopy: { flex: 1, minWidth: 0 },
   publishTitle: { color: colors.ink, fontSize: 14, fontWeight: '700', letterSpacing: 0 },

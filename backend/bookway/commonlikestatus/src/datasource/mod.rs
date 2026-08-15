@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use super::api::{ReactionContextDto, ReactionDto, ReactionTypeDto};
+use super::api::pb;
 
 #[async_trait]
 pub(crate) trait LikeStatusRepository: Send + Sync {
@@ -12,14 +12,14 @@ pub(crate) trait LikeStatusRepository: Send + Sync {
         &self,
         user_id: &str,
         post_ids: &[String],
-    ) -> Result<ReactionContextDto, RepositoryError>;
+    ) -> Result<pb::ReactionContext, RepositoryError>;
     async fn set_reaction(
         &self,
         user_id: &str,
         post_id: &str,
-        reaction: ReactionTypeDto,
+        reaction: i32,
         active: bool,
-    ) -> Result<ReactionDto, RepositoryError>;
+    ) -> Result<pb::Reaction, RepositoryError>;
 }
 
 #[derive(Debug, Error)]
@@ -29,7 +29,7 @@ pub(crate) enum RepositoryError {
 }
 
 pub(crate) struct MemoryLikeStatusRepository {
-    reactions: RwLock<HashSet<(String, String, ReactionTypeDto)>>,
+    reactions: RwLock<HashSet<(String, String, i32)>>,
 }
 
 impl MemoryLikeStatusRepository {
@@ -38,7 +38,7 @@ impl MemoryLikeStatusRepository {
             reactions: RwLock::new(HashSet::from([(
                 "demo-user".to_string(),
                 "post-reading".to_string(),
-                ReactionTypeDto::Like,
+                pb::ReactionType::Like as i32,
             )])),
         }
     }
@@ -50,21 +50,26 @@ impl LikeStatusRepository for MemoryLikeStatusRepository {
         &self,
         user_id: &str,
         post_ids: &[String],
-    ) -> Result<ReactionContextDto, RepositoryError> {
+    ) -> Result<pb::ReactionContext, RepositoryError> {
         let reactions = self.reactions.read().await;
-        Ok(ReactionContextDto {
-            liked_post_ids: matching_post_ids(&reactions, user_id, post_ids, ReactionTypeDto::Like),
+        Ok(pb::ReactionContext {
+            liked_post_ids: matching_post_ids(
+                &reactions,
+                user_id,
+                post_ids,
+                pb::ReactionType::Like as i32,
+            ),
             bookmarked_post_ids: matching_post_ids(
                 &reactions,
                 user_id,
                 post_ids,
-                ReactionTypeDto::Bookmark,
+                pb::ReactionType::Bookmark as i32,
             ),
             hidden_post_ids: matching_post_ids(
                 &reactions,
                 user_id,
                 post_ids,
-                ReactionTypeDto::Hide,
+                pb::ReactionType::Hide as i32,
             ),
         })
     }
@@ -73,9 +78,9 @@ impl LikeStatusRepository for MemoryLikeStatusRepository {
         &self,
         user_id: &str,
         post_id: &str,
-        reaction: ReactionTypeDto,
+        reaction: i32,
         active: bool,
-    ) -> Result<ReactionDto, RepositoryError> {
+    ) -> Result<pb::Reaction, RepositoryError> {
         let mut reactions = self.reactions.write().await;
         let key = (user_id.to_string(), post_id.to_string(), reaction);
         if active {
@@ -87,7 +92,7 @@ impl LikeStatusRepository for MemoryLikeStatusRepository {
             .iter()
             .filter(|(_, target, kind)| target == post_id && *kind == reaction)
             .count() as u64;
-        Ok(ReactionDto {
+        Ok(pb::Reaction {
             target_id: post_id.to_string(),
             target_type: "post".to_string(),
             reaction,
@@ -113,9 +118,9 @@ impl LikeStatusRepository for PostgresLikeStatusRepository {
         &self,
         user_id: &str,
         post_ids: &[String],
-    ) -> Result<ReactionContextDto, RepositoryError> {
+    ) -> Result<pb::ReactionContext, RepositoryError> {
         if post_ids.is_empty() {
-            return Ok(ReactionContextDto {
+            return Ok(pb::ReactionContext {
                 liked_post_ids: Vec::new(),
                 bookmarked_post_ids: Vec::new(),
                 hidden_post_ids: Vec::new(),
@@ -124,7 +129,7 @@ impl LikeStatusRepository for PostgresLikeStatusRepository {
         let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT target_id, reaction_type FROM reactions WHERE user_id = $1 AND target_type = 'post' AND target_id = ANY($2) AND deleted_at IS NULL",
         ).bind(user_id).bind(post_ids).fetch_all(&self.pool).await.map_err(RepositoryError::Database)?;
-        let mut result = ReactionContextDto {
+        let mut result = pb::ReactionContext {
             liked_post_ids: Vec::new(),
             bookmarked_post_ids: Vec::new(),
             hidden_post_ids: Vec::new(),
@@ -144,13 +149,14 @@ impl LikeStatusRepository for PostgresLikeStatusRepository {
         &self,
         user_id: &str,
         post_id: &str,
-        reaction: ReactionTypeDto,
+        reaction: i32,
         active: bool,
-    ) -> Result<ReactionDto, RepositoryError> {
-        let kind = match reaction {
-            ReactionTypeDto::Like => "like",
-            ReactionTypeDto::Bookmark => "bookmark",
-            ReactionTypeDto::Hide => "hide",
+    ) -> Result<pb::Reaction, RepositoryError> {
+        let kind = match pb::ReactionType::try_from(reaction).ok() {
+            Some(pb::ReactionType::Like) => "like",
+            Some(pb::ReactionType::Bookmark) => "bookmark",
+            Some(pb::ReactionType::Hide) => "hide",
+            None => return Ok(pb::Reaction::default()),
         };
         if active {
             sqlx::query("INSERT INTO reactions (user_id,target_type,target_id,reaction_type,deleted_at) VALUES ($1,'post',$2,$3,NULL) ON CONFLICT (user_id,target_type,target_id,reaction_type) DO UPDATE SET deleted_at = NULL")
@@ -161,7 +167,7 @@ impl LikeStatusRepository for PostgresLikeStatusRepository {
         }
         let count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reactions WHERE target_type='post' AND target_id=$1 AND reaction_type=$2 AND deleted_at IS NULL")
             .bind(post_id).bind(kind).fetch_one(&self.pool).await.map_err(RepositoryError::Database)?;
-        Ok(ReactionDto {
+        Ok(pb::Reaction {
             target_id: post_id.to_string(),
             target_type: "post".to_string(),
             reaction,
@@ -172,10 +178,10 @@ impl LikeStatusRepository for PostgresLikeStatusRepository {
 }
 
 fn matching_post_ids(
-    reactions: &HashSet<(String, String, ReactionTypeDto)>,
+    reactions: &HashSet<(String, String, i32)>,
     user_id: &str,
     post_ids: &[String],
-    reaction: ReactionTypeDto,
+    reaction: i32,
 ) -> Vec<String> {
     post_ids
         .iter()

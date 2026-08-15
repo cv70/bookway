@@ -1,0 +1,28 @@
+syntax = "proto3";
+package bookway.feature.main;
+
+message FeaturesRequest { string user_id = 1; repeated string content_ids = 2; }
+message CandidateFeatures {
+  string content_id = 1;
+  double domain_affinity = 2;
+  double author_affinity = 3;
+  double impression_fatigue = 4;
+  double direct_negative_feedback = 5;
+}
+message FeaturesResponse {
+  string user_id = 1;
+  string model_version = 2;
+  double recent_positive_rate = 3;
+  double user_interest_strength = 4;
+  double negative_feedback_rate = 5;
+  double learning_interest = 6;
+  double movement_interest = 7;
+  double wellness_interest = 8;
+  double travel_interest = 9;
+  double leisure_interest = 10;
+  repeated CandidateFeatures candidates = 11;
+}
+
+service FeatureMain {
+  rpc Features(FeaturesRequest) returns (FeaturesResponse);
+}

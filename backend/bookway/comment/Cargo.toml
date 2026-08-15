@@ -6,10 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bookway-comment-api.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 bookway-api.workspace = true
-bookway-content-audit.workspace = true
+bookway-content-audit-api.workspace = true
+bookway-bbs-link-api.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
 serde_json.workspace = true
@@ -27,6 +29,3 @@ prost.workspace = true
 
 [lints]
 workspace = true
-
-[build-dependencies]
-tonic-build.workspace = true

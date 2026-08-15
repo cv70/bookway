@@ -1,13 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use tonic::transport::Channel;
 
 use super::{Candidate, CandidateRanker, FeedQuery, PipelineError, RankOutcome};
-use crate::datasource::ModelClientError;
-use bookway_feature_main::api::pb::{self as feature, feature_main_client::FeatureMainClient};
-use bookway_recommend_rank::api::pb as rank;
+use bookway_feature_main_api::pb::{self as feature, feature_main_client::FeatureMainClient};
+use bookway_recommend_rank_api::pb as rank;
+use bookway_recommend_recall_api::pb as recall;
 
 pub(crate) struct RecommendRanker {
     ranker: Arc<rank::recommend_rank_client::RecommendRankClient<Channel>>,
@@ -28,7 +27,7 @@ impl RecommendRanker {
         &self,
         user_id: &str,
         candidates: &[Candidate],
-    ) -> Result<rank::RankResponse, ModelClientError> {
+    ) -> Result<rank::RankResponse, PipelineError> {
         let ids: Vec<String> = candidates
             .iter()
             .map(|candidate| candidate.post.id.clone())
@@ -40,20 +39,17 @@ impl RecommendRanker {
                 content_ids: ids,
             })
             .await
-            .map_err(|error| ModelClientError::Grpc(error.to_string()))?
+            .map_err(|error| PipelineError::Model(error.to_string()))?
             .into_inner();
-        let features: FeatureResponse = serde_json::from_str(&response.response_json)
-            .map_err(|error| ModelClientError::Grpc(error.to_string()))?;
-        let features = features.features;
         let mut client = (*self.ranker).clone();
         let response = client
             .rank(rank::RankRequest {
                 user_id: user_id.to_string(),
-                features_json: features.to_string(),
+                features: Some(rank_features(response)),
                 candidates: candidates.iter().map(candidate_to_proto).collect(),
             })
             .await
-            .map_err(|status| ModelClientError::Grpc(status.to_string()))?
+            .map_err(|status| PipelineError::Model(status.to_string()))?
             .into_inner();
         Ok(response)
     }
@@ -90,17 +86,31 @@ impl CandidateRanker for RecommendRanker {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct FeatureResponse {
-    features: serde_json::Value,
+fn rank_features(features: feature::FeaturesResponse) -> rank::RankFeatures {
+    rank::RankFeatures {
+        recent_positive_rate: features.recent_positive_rate,
+        user_interest_strength: features.user_interest_strength,
+        negative_feedback_rate: features.negative_feedback_rate,
+        candidates: features
+            .candidates
+            .into_iter()
+            .map(|candidate| rank::CandidateFeatures {
+                content_id: candidate.content_id,
+                domain_affinity: candidate.domain_affinity,
+                author_affinity: candidate.author_affinity,
+                impression_fatigue: candidate.impression_fatigue,
+                direct_negative_feedback: candidate.direct_negative_feedback,
+            })
+            .collect(),
+    }
 }
 
-fn candidate_to_proto(candidate: &Candidate) -> rank::Candidate {
-    rank::Candidate {
+fn candidate_to_proto(candidate: &Candidate) -> recall::Candidate {
+    recall::Candidate {
         content_id: candidate.post.id.clone(),
-        post_json: serde_json::to_string(&candidate.post).unwrap_or_default(),
+        post: Some(candidate.post.clone()),
         author_id: candidate.author_id.clone(),
-        status: serde_json::to_string(&candidate.status).unwrap_or_default(),
+        status: candidate.status,
         quality_score: candidate.quality_score,
         freshness: candidate.post.freshness,
         recall_score: candidate.score,

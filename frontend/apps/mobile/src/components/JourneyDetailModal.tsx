@@ -32,7 +32,7 @@ type Props = {
   onOpenAction: (action: Action) => void;
   onUpdateJourney: (journeyId: string, updates: Partial<Journey>) => void;
   onAddAction: (journeyId: string, input: CreateActionInput) => void;
-  onPublish: (journey: Journey) => void;
+  onPublish: (journey: Journey, actions: Action[]) => void;
 };
 
 export function JourneyDetailModal({
@@ -151,7 +151,7 @@ export function JourneyDetailModal({
               </Pressable>
               <Pressable
                 accessibilityLabel="发布路线"
-                onPress={() => onPublish(journey)}
+                onPress={() => onPublish(journey, actions)}
                 style={({ pressed }) => [styles.smallAction, pressed && styles.pressed]}
               >
                 <Share2 color={colors.blue} size={17} />

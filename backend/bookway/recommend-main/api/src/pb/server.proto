@@ -1,0 +1,52 @@
+syntax = "proto3";
+package bookway.recommend.main;
+
+import "bbs-link/api/src/pb/server.proto";
+
+message FeedRequest {
+  string user_id = 1;
+  repeated bookway.bbs.link.GrowthDomain interests = 2;
+  repeated string seen = 3;
+  optional uint32 limit = 4;
+  string session_id = 5;
+  string surface = 6;
+  optional string cursor = 7;
+}
+message FeedItem {
+  string author_id = 1;
+  bookway.bbs.link.PostSummary post = 2;
+  double score = 3;
+  string source = 4;
+  repeated string reasons = 5;
+}
+message FeedMeta {
+  uint32 sourced = 1;
+  uint32 filtered = 2;
+  uint32 selected = 3;
+  optional string next_cursor = 4;
+  string pipeline_id = 5;
+  bool degraded = 6;
+  optional string model_version = 7;
+  optional string experiment_bucket = 8;
+}
+message FeedResponse { string request_id = 1; repeated FeedItem items = 2; FeedMeta meta = 3; }
+
+// User Event asks Recommendation Main to prove that a client-reported action
+// belongs to the exact ranked item it was served. The response order matches
+// the input order so callers can validate an ingestion batch in one RPC.
+message ExposureAttribution {
+  string request_id = 1;
+  string session_id = 2;
+  string content_id = 3;
+  uint32 position = 4;
+}
+message ValidateAttributionsRequest {
+  string user_id = 1;
+  repeated ExposureAttribution attributions = 2;
+}
+message ValidateAttributionsResponse { repeated bool valid = 1; }
+
+service RecommendMain {
+  rpc Feed(FeedRequest) returns (FeedResponse);
+  rpc ValidateAttributions(ValidateAttributionsRequest) returns (ValidateAttributionsResponse);
+}

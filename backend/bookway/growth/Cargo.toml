@@ -6,9 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bookway-growth-api.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 bookway-api.workspace = true
+bookway-bbs-api.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
 serde.workspace = true
@@ -20,6 +22,7 @@ time.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+url.workspace = true
 prost.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
@@ -27,6 +30,3 @@ tower.workspace = true
 
 [lints]
 workspace = true
-
-[build-dependencies]
-tonic-build.workspace = true

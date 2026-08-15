@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 
 import {
+  AccountProfile,
   CreateJourneyInput,
   Action,
   ActionUpdate,
@@ -12,6 +13,7 @@ import {
   ContentDetail,
   ContentAppealStatus,
   ContentStatus,
+  CreateFeedbackInput,
   CreateActionInput,
   CreateEntryInput,
   CreateKnowledgeResourceInput,
@@ -22,28 +24,55 @@ import {
   JourneyDetail,
   JourneyUpdate,
   KnowledgeResource,
+  KnowledgeJourney,
   KnowledgeResourceKind,
   KnowledgeResourceStatus,
   NotificationPage,
   OwnedContentPage,
+  PublicContentPage,
   ReportReason,
   RouteParticipation,
   RouteJoinResult,
   RouteParticipationState,
   ReminderPreferences,
   ReminderPreferencesInput,
+  RecommendationEventContext,
   SearchResponse,
   SuggestionResponse,
   SocialContext,
   Today,
+  UserFeedback,
   UserNotification,
   WeeklyReview,
   UpdateKnowledgeResourceInput,
+  UpdateAccountProfileInput,
+  NegativeFeedbackReason,
 } from '../types';
 import { localScheduleContext } from '../utils/scheduling';
+import { analyticsSessionId } from '../analytics/session';
 
 type ApiResponse<T> = { data: T };
 type ApiErrorResponse = { error?: { code?: string; message?: string } };
+
+export type MediaResource = {
+  id: string;
+  object_key: string;
+  mime_type: string;
+  size_bytes: number;
+  status: 'pending' | 'processing' | 'ready' | 'blocked' | 'deleted';
+  cdn_url: string;
+  width: number;
+  height: number;
+  duration_ms?: number | null;
+};
+
+type UploadResponse = {
+  id: string;
+  object_key: string;
+  upload_url: string;
+  cdn_url: string;
+  expires_in_seconds: number;
+};
 
 export class ApiRequestError extends Error {
   readonly status: number;
@@ -67,22 +96,45 @@ const AUTH_TOKEN = process.env.EXPO_PUBLIC_AUTH_TOKEN;
 const reportIdempotencyKeys = new Map<string, string>();
 const appealIdempotencyKeys = new Map<string, string>();
 const knowledgeIdempotencyKeys = new Map<string, string>();
+const journeyIdempotencyKeys = new Map<string, string>();
+const actionIdempotencyKeys = new Map<string, string>();
+const entryIdempotencyKeys = new Map<string, string>();
 const commentIdempotencyKeys = new Map<string, string>();
+const feedbackIdempotencyKeys = new Map<string, string>();
+const contentSubmissionStates = new Map<string, { idempotencyKey: string; postId?: string }>();
+
+type ViewerClaims = { sub?: unknown; roles?: unknown };
 
 // This only controls client-side affordances; Gateway derives identity from
 // the verified request and never trusts this decoded JWT claim.
-export function viewerUserId(): string | undefined {
-  if (!AUTH_TOKEN) return 'demo-user';
+function viewerClaims(): ViewerClaims | undefined {
+  if (!AUTH_TOKEN) return undefined;
   const payload = AUTH_TOKEN.split('.')[1];
   if (!payload || typeof atob !== 'function') return undefined;
   try {
     const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
     const padded = `${base64}${'='.repeat((4 - (base64.length % 4)) % 4)}`;
-    const claims = JSON.parse(atob(padded)) as { sub?: unknown };
-    return typeof claims.sub === 'string' && claims.sub.trim() ? claims.sub : undefined;
+    return JSON.parse(atob(padded)) as ViewerClaims;
   } catch {
     return undefined;
   }
+}
+
+export function viewerUserId(): string | undefined {
+  if (!AUTH_TOKEN) return 'demo-user';
+  const claims = viewerClaims();
+  return typeof claims?.sub === 'string' && claims.sub.trim() ? claims.sub : undefined;
+}
+
+// This merely decides whether to render the workbench. Gateway reconstructs
+// roles from the verified JWT and still rejects any unauthorized request.
+export function viewerCanModerate(): boolean {
+  const claims = viewerClaims();
+  if (!claims || !Array.isArray(claims.roles)) return false;
+  return claims.roles.some((role) => (
+    typeof role === 'string'
+    && ['moderator', 'admin', 'trust_safety'].includes(role.trim().toLowerCase())
+  ));
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -106,6 +158,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function sendEvents(events: unknown[]): Promise<{ accepted: number; duplicate: number; rejected: number }> {
   return request('/v1/events', { method: 'POST', body: JSON.stringify({ events }) });
+}
+
+export function getAccountProfile(): Promise<AccountProfile> {
+  return request('/v1/me/profile');
+}
+
+export function updateAccountProfile(input: UpdateAccountProfileInput): Promise<AccountProfile> {
+  return request('/v1/me/profile', {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
 }
 
 export function getToday(): Promise<Today> {
@@ -142,7 +205,7 @@ export function getJourneys(): Promise<Journey[]> {
 }
 
 export function getFeed(interests = 'learning,movement,travel', cursor?: string, surface: 'home' | 'following' = 'home'): Promise<Feed> {
-  const query = new URLSearchParams({ interests, limit: '10', surface });
+  const query = new URLSearchParams({ interests, limit: '10', session_id: analyticsSessionId(), surface });
   if (cursor) query.set('cursor', cursor);
   return request(
     `/v1/feed?${query.toString()}`,
@@ -151,6 +214,12 @@ export function getFeed(interests = 'learning,movement,travel', cursor?: string,
 
 export function getPost(postId: string): Promise<ContentDetail> {
   return request(`/v1/posts/${encodeURIComponent(postId)}`);
+}
+
+export function getAuthorPosts(authorId: string, cursor?: string): Promise<PublicContentPage> {
+  const query = new URLSearchParams({ limit: '20' });
+  if (cursor) query.set('cursor', cursor);
+  return request(`/v1/users/${encodeURIComponent(authorId)}/posts?${query.toString()}`);
 }
 
 export function getMyPosts(cursor?: string, status?: ContentStatus): Promise<OwnedContentPage> {
@@ -167,8 +236,35 @@ export function getMyAppeals(cursor?: string, status?: ContentAppealStatus): Pro
   return request(`/v1/me/appeals?${query.toString()}`);
 }
 
+export function getMyFeedback(): Promise<UserFeedback[]> {
+  return request('/v1/me/feedback?limit=50');
+}
+
+export function submitFeedback(input: CreateFeedbackInput): Promise<UserFeedback> {
+  const content = input.content.trim();
+  const contact = input.contact?.trim() ?? '';
+  const fingerprint = JSON.stringify([input.category, content, contact]);
+  const idempotencyKey = feedbackIdempotencyKeys.get(fingerprint)
+    ?? `feedback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  feedbackIdempotencyKeys.set(fingerprint, idempotencyKey);
+  return request<UserFeedback>('/v1/feedback', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify({
+      category: input.category,
+      content,
+      contact,
+      platform: Platform.OS,
+      app_version: 'mobile',
+    }),
+  }).then((feedback) => {
+    feedbackIdempotencyKeys.delete(fingerprint);
+    return feedback;
+  });
+}
+
 export function search(query: string, cursor?: string): Promise<SearchResponse> {
-  const params = new URLSearchParams({ q: query, search_type: 'all', limit: '20' });
+  const params = new URLSearchParams({ q: query, search_type: 'all', limit: '20', session_id: analyticsSessionId() });
   if (cursor) params.set('cursor', cursor);
   return request(`/v1/search?${params.toString()}`);
 }
@@ -181,10 +277,17 @@ export function setPostReaction(
   postId: string,
   reaction: 'like' | 'bookmark' | 'hide',
   active: boolean,
+  negativeFeedbackReason?: NegativeFeedbackReason,
+  context?: RecommendationEventContext,
 ): Promise<unknown> {
   return request(`/v1/posts/${encodeURIComponent(postId)}/reactions`, {
     method: 'PUT',
-    body: JSON.stringify({ reaction, active }),
+    body: JSON.stringify({
+      reaction,
+      active,
+      negative_feedback_reason: negativeFeedbackReason,
+      attribution: contentAttribution(context),
+    }),
   });
 }
 
@@ -193,10 +296,67 @@ export function getEntries(): Promise<GrowthEntry[]> {
 }
 
 export function createEntry(input: CreateEntryInput): Promise<GrowthEntry> {
-  return request('/v1/entries', {
+  const fingerprint = JSON.stringify(input);
+  const idempotencyKey = entryIdempotencyKeys.get(fingerprint)
+    ?? `entry-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  entryIdempotencyKeys.set(fingerprint, idempotencyKey);
+  return request<GrowthEntry>('/v1/entries', {
     method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify(input),
+  }).then((entry) => {
+    entryIdempotencyKeys.delete(fingerprint);
+    return entry;
   });
+}
+
+export function retryEntryPublication(entryId: string): Promise<GrowthEntry> {
+  return request(`/v1/entries/${encodeURIComponent(entryId)}/publication/retry`, {
+    method: 'POST',
+  });
+}
+
+async function uploadMediaAsset(
+  uri: string,
+  declaredMimeType: string | null | undefined,
+  acceptedMimeTypes: readonly string[],
+  fallbackMimeType: string,
+  label: string,
+): Promise<MediaResource> {
+  // Read exactly once so the declared upload size matches the PUT body on all
+  // Expo platforms, including web's blob-backed picker URI.
+  const source = await fetch(uri);
+  if (!source.ok) throw new Error(`无法读取所选${label}`);
+  const body = await source.blob();
+  const mimeType = declaredMimeType?.trim().toLowerCase() || body.type.toLowerCase() || fallbackMimeType;
+  if (!acceptedMimeTypes.includes(mimeType) || body.size <= 0 || body.size > 512 * 1024 * 1024) {
+    throw new Error(`请选择不超过 512MB 的 ${acceptedMimeTypes.join('、')} ${label}`);
+  }
+  const upload = await request<UploadResponse>('/v1/media/upload-url', {
+    method: 'POST',
+    body: JSON.stringify({ mime_type: mimeType, size_bytes: body.size }),
+  });
+  const response = await fetch(upload.upload_url, {
+    method: 'PUT',
+    headers: { 'Content-Type': mimeType },
+    body,
+  });
+  if (!response.ok) throw new Error(`${label}上传失败，请重试`);
+  return request<MediaResource>(`/v1/media/${encodeURIComponent(upload.id)}/complete`, {
+    method: 'POST',
+  });
+}
+
+export function uploadImageAsset(uri: string, declaredMimeType?: string | null): Promise<MediaResource> {
+  return uploadMediaAsset(uri, declaredMimeType, ['image/jpeg', 'image/png', 'image/webp'], 'image/jpeg', '图片');
+}
+
+export function uploadVideoAsset(uri: string, declaredMimeType?: string | null): Promise<MediaResource> {
+  return uploadMediaAsset(uri, declaredMimeType, ['video/mp4'], 'video/mp4', '视频');
+}
+
+export function getMediaAsset(mediaId: string): Promise<MediaResource> {
+  return request(`/v1/media/${encodeURIComponent(mediaId)}`);
 }
 
 export function getWeeklyReview(): Promise<WeeklyReview> {
@@ -227,9 +387,10 @@ export function setRouteParticipation(
   });
 }
 
-export function joinRoute(routeId: string): Promise<RouteJoinResult> {
+export function joinRoute(routeId: string, context?: RecommendationEventContext): Promise<RouteJoinResult> {
   return request(`/v1/routes/${encodeURIComponent(routeId)}/join`, {
     method: 'POST',
+    body: JSON.stringify({ attribution: contentAttribution(context) }),
   });
 }
 
@@ -264,6 +425,32 @@ export function updateKnowledge(resourceId: string, input: UpdateKnowledgeResour
   });
 }
 
+export function capturePostAsKnowledge(postId: string, context?: RecommendationEventContext): Promise<KnowledgeResource> {
+  return request(`/v1/posts/${encodeURIComponent(postId)}/knowledge`, {
+    method: 'POST',
+    body: JSON.stringify({ attribution: contentAttribution(context) }),
+  });
+}
+
+function contentAttribution(context?: RecommendationEventContext) {
+  const requestId = context?.request_id?.trim();
+  if (!context || !requestId) return undefined;
+  const { position, surface } = context;
+  return {
+    session_id: analyticsSessionId(),
+    request_id: requestId,
+    position,
+    attribution_source: surface === 'search' ? 'search' : 'recommendation',
+  } as const;
+}
+
+export function startKnowledgeJourney(resourceId: string, input: CreateJourneyInput): Promise<KnowledgeJourney> {
+  return request(`/v1/knowledge/${encodeURIComponent(resourceId)}/journey`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
 export function completeAction(actionId: string): Promise<Action> {
   return request(`/v1/actions/${encodeURIComponent(actionId)}/complete`, { method: 'POST' });
 }
@@ -280,9 +467,17 @@ export function updateJourney(journeyId: string, input: JourneyUpdate): Promise<
 }
 
 export function createAction(journeyId: string, input: CreateActionInput): Promise<Action> {
-  return request(`/v1/journeys/${encodeURIComponent(journeyId)}/actions`, {
+  const fingerprint = JSON.stringify([journeyId, input]);
+  const idempotencyKey = actionIdempotencyKeys.get(fingerprint)
+    ?? `action-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  actionIdempotencyKeys.set(fingerprint, idempotencyKey);
+  return request<Action>(`/v1/journeys/${encodeURIComponent(journeyId)}/actions`, {
     method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify(input),
+  }).then((action) => {
+    actionIdempotencyKeys.delete(fingerprint);
+    return action;
   });
 }
 
@@ -294,9 +489,17 @@ export function updateAction(actionId: string, input: ActionUpdate): Promise<Act
 }
 
 export function createJourney(input: CreateJourneyInput): Promise<Journey> {
-  return request('/v1/journeys', {
+  const fingerprint = JSON.stringify(input);
+  const idempotencyKey = journeyIdempotencyKeys.get(fingerprint)
+    ?? `journey-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  journeyIdempotencyKeys.set(fingerprint, idempotencyKey);
+  return request<Journey>('/v1/journeys', {
     method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify(input),
+  }).then((journey) => {
+    journeyIdempotencyKeys.delete(fingerprint);
+    return journey;
   });
 }
 
@@ -327,6 +530,22 @@ export function deleteComment(postId: string, commentId: string): Promise<void> 
     `/v1/posts/${encodeURIComponent(postId)}/comments/${encodeURIComponent(commentId)}`,
     { method: 'DELETE' },
   ).then(() => undefined);
+}
+
+export function getModerationComments(cursor?: string): Promise<CommentPage> {
+  const query = new URLSearchParams({ limit: '30' });
+  if (cursor) query.set('cursor', cursor);
+  return request(`/v1/moderation/comments?${query.toString()}`);
+}
+
+export function reviewModerationComment(
+  commentId: string,
+  decision: 'approve' | 'restrict',
+): Promise<Comment> {
+  return request(`/v1/moderation/comments/${encodeURIComponent(commentId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ decision }),
+  });
 }
 
 export function reportPost(postId: string, reason: ReportReason, details = ''): Promise<unknown> {
@@ -364,13 +583,44 @@ export function setFollow(userId: string, active: boolean): Promise<SocialContex
   });
 }
 
-export function createPost(input: CreatePostInput): Promise<{ id: string }> {
-  return request('/v1/posts', {
-    method: 'POST',
-    body: JSON.stringify(input),
+export function setCreatorRelationship(
+  userId: string,
+  edge: 'mute' | 'block',
+  active: boolean,
+): Promise<SocialContext> {
+  return request(`/v1/users/${encodeURIComponent(userId)}/relationship`, {
+    method: 'PUT',
+    body: JSON.stringify({ edge, active }),
   });
 }
 
-export function publishPost(postId: string): Promise<{ id: string }> {
-  return request(`/v1/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST' });
+export function publishPost(postId: string, idempotencyKey?: string): Promise<{ id: string }> {
+  return request(`/v1/posts/${encodeURIComponent(postId)}/publish`, {
+    method: 'POST',
+    ...(idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : {}),
+  });
+}
+
+export async function submitPostForReview(input: CreatePostInput): Promise<{ id: string }> {
+  const fingerprint = JSON.stringify(input);
+  const state = contentSubmissionStates.get(fingerprint)
+    ?? { idempotencyKey: `content-submit-${Date.now()}-${Math.random().toString(36).slice(2)}` };
+  contentSubmissionStates.set(fingerprint, state);
+  if (!state.postId) {
+    const draft = await request<{ id: string }>('/v1/posts', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': state.idempotencyKey },
+      body: JSON.stringify(input),
+    });
+    state.postId = draft.id;
+  }
+  try {
+    const published = await publishPost(state.postId, state.idempotencyKey);
+    contentSubmissionStates.delete(fingerprint);
+    return published;
+  } catch (error) {
+    // Keep the draft ID and the original key so a retry publishes this draft
+    // instead of creating a second copy after a transient failure.
+    throw error;
+  }
 }

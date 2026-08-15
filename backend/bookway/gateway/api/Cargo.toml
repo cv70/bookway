@@ -1,0 +1,29 @@
+[package]
+name = "bookway-gateway-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bookway-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bookway-account-api.workspace = true
+bookway-ad-main-api.workspace = true
+bookway-bbs-api.workspace = true
+bookway-bbs-feed-api.workspace = true
+bookway-bbs-link-api.workspace = true
+bookway-comment-api.workspace = true
+bookway-commonlikestatus-api.workspace = true
+bookway-content-audit-api.workspace = true
+bookway-feedback-api.workspace = true
+bookway-growth-api.workspace = true
+bookway-mall-api.workspace = true
+bookway-mall-order-api.workspace = true
+bookway-media-api.workspace = true
+bookway-search-main-api.workspace = true
+bookway-user-event-api.workspace = true
+
+[lints]
+workspace = true

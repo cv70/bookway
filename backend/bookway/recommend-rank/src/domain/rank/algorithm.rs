@@ -1,4 +1,5 @@
 use crate::api::pb;
+use bookway_recommend_recall_api::pb::Candidate;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RankingSignals {
@@ -8,11 +9,20 @@ pub(crate) struct RankingSignals {
 }
 
 impl RankingSignals {
-    pub(crate) fn from_features(features: &serde_json::Value) -> Self {
+    pub(crate) fn from_features(features: Option<&pb::RankFeatures>) -> Self {
         Self {
-            recent_positive_rate: feature(features, "recent_positive_rate"),
-            user_interest_strength: feature(features, "user_interest_strength"),
-            negative_feedback_rate: feature(features, "negative_feedback_rate"),
+            recent_positive_rate: features
+                .map(|features| finite(features.recent_positive_rate))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
+            user_interest_strength: features
+                .map(|features| finite(features.user_interest_strength))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
+            negative_feedback_rate: features
+                .map(|features| finite(features.negative_feedback_rate))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
         }
     }
 }
@@ -26,15 +36,30 @@ struct CandidateRankingSignals {
 }
 
 impl CandidateRankingSignals {
-    fn from_features(features: &serde_json::Value, content_id: &str) -> Self {
-        let candidate = features
-            .get("candidates")
-            .and_then(|items| items.get(content_id));
+    fn from_features(features: Option<&pb::RankFeatures>, content_id: &str) -> Self {
+        let candidate = features.and_then(|features| {
+            features
+                .candidates
+                .iter()
+                .find(|candidate| candidate.content_id == content_id)
+        });
         Self {
-            domain_affinity: nested_feature(candidate, "domain_affinity"),
-            author_affinity: nested_feature(candidate, "author_affinity"),
-            impression_fatigue: nested_feature(candidate, "impression_fatigue"),
-            direct_negative_feedback: nested_feature(candidate, "direct_negative_feedback"),
+            domain_affinity: candidate
+                .map(|candidate| finite(candidate.domain_affinity))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
+            author_affinity: candidate
+                .map(|candidate| finite(candidate.author_affinity))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
+            impression_fatigue: candidate
+                .map(|candidate| finite(candidate.impression_fatigue))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
+            direct_negative_feedback: candidate
+                .map(|candidate| finite(candidate.direct_negative_feedback))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
         }
     }
 }
@@ -46,10 +71,10 @@ pub(crate) fn stable_bucket(value: &str) -> u8 {
         % 10
 }
 pub(crate) fn rank(
-    mut candidates: Vec<pb::Candidate>,
-    features: &serde_json::Value,
+    mut candidates: Vec<Candidate>,
+    features: Option<&pb::RankFeatures>,
     bucket: u8,
-) -> Vec<pb::Candidate> {
+) -> Vec<Candidate> {
     let signals = RankingSignals::from_features(features);
     for candidate in &mut candidates {
         let candidate_signals =
@@ -85,24 +110,6 @@ pub(crate) fn rank(
     candidates
 }
 
-fn feature(features: &serde_json::Value, name: &str) -> f64 {
-    features
-        .get(name)
-        .and_then(serde_json::Value::as_f64)
-        .map(finite)
-        .unwrap_or_default()
-        .clamp(0.0, 1.0)
-}
-
-fn nested_feature(features: Option<&serde_json::Value>, name: &str) -> f64 {
-    features
-        .and_then(|features| features.get(name))
-        .and_then(serde_json::Value::as_f64)
-        .map(finite)
-        .unwrap_or_default()
-        .clamp(0.0, 1.0)
-}
-
 fn finite(value: f64) -> f64 {
     if value.is_finite() { value } else { 0.0 }
 }
@@ -111,10 +118,11 @@ fn finite(value: f64) -> f64 {
 mod tests {
     use super::rank;
     use crate::api::pb;
+    use bookway_recommend_recall_api::pb::Candidate;
 
     #[test]
     fn negative_feedback_penalizes_scores_and_non_finite_inputs_are_safe() {
-        let candidate = pb::Candidate {
+        let candidate = Candidate {
             content_id: "content-1".to_string(),
             quality_score: 1.0,
             freshness: 1.0,
@@ -124,17 +132,21 @@ mod tests {
         };
         let positive = rank(
             vec![candidate.clone()],
-            &serde_json::json!({
-                "recent_positive_rate": 1.0,
-                "user_interest_strength": 1.0,
-                "negative_feedback_rate": 0.0,
+            Some(&pb::RankFeatures {
+                recent_positive_rate: 1.0,
+                user_interest_strength: 1.0,
+                negative_feedback_rate: 0.0,
+                candidates: Vec::new(),
             }),
             0,
         );
         let negative = rank(
             vec![candidate],
-            &serde_json::json!({
-                "negative_feedback_rate": 1.0,
+            Some(&pb::RankFeatures {
+                recent_positive_rate: 0.0,
+                user_interest_strength: 0.0,
+                negative_feedback_rate: 1.0,
+                candidates: Vec::new(),
             }),
             0,
         );
@@ -145,18 +157,33 @@ mod tests {
 
     #[test]
     fn candidate_affinity_and_feedback_change_relative_order() {
-        let candidate = |content_id: &str| pb::Candidate {
+        let candidate = |content_id: &str| Candidate {
             content_id: content_id.to_string(),
             score: 1.0,
             ..Default::default()
         };
         let ranked = rank(
             vec![candidate("preferred"), candidate("reported")],
-            &serde_json::json!({
-                "candidates": {
-                    "preferred": { "domain_affinity": 1.0, "author_affinity": 0.5 },
-                    "reported": { "direct_negative_feedback": 1.0 }
-                }
+            Some(&pb::RankFeatures {
+                recent_positive_rate: 0.0,
+                user_interest_strength: 0.0,
+                negative_feedback_rate: 0.0,
+                candidates: vec![
+                    pb::CandidateFeatures {
+                        content_id: "preferred".to_string(),
+                        domain_affinity: 1.0,
+                        author_affinity: 0.5,
+                        impression_fatigue: 0.0,
+                        direct_negative_feedback: 0.0,
+                    },
+                    pb::CandidateFeatures {
+                        content_id: "reported".to_string(),
+                        domain_affinity: 0.0,
+                        author_affinity: 0.0,
+                        impression_fatigue: 0.0,
+                        direct_negative_feedback: 1.0,
+                    },
+                ],
             }),
             2,
         );

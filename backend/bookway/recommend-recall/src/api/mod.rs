@@ -1,5 +1,4 @@
 mod grpc;
-#[path = "pb/bookway.recommend.recall.rs"]
-pub mod pb;
+pub use bookway_recommend_recall_api::pb;
 
 pub use grpc::serve;

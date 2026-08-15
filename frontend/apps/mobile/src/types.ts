@@ -1,4 +1,16 @@
 export type GrowthDomain = 'learning' | 'movement' | 'wellness' | 'travel' | 'leisure';
+
+export type AccountProfile = {
+  user_id: string;
+  display_name: string;
+  avatar_url: string;
+  bio: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type UpdateAccountProfileInput = Partial<Pick<AccountProfile, 'display_name' | 'avatar_url' | 'bio'>>;
+
 export type ActionState = 'pending' | 'completed' | 'skipped';
 export type JourneyStatus = 'active' | 'paused' | 'completed';
 export type JourneyType = 'habit' | 'project' | 'quantity' | 'travel' | 'challenge';
@@ -107,6 +119,13 @@ export type JourneyDetail = {
   actions: Action[];
 };
 
+// A resource becomes active together with its first private action. Keeping
+// both results lets the app update the Inbox and Journey views atomically.
+export type KnowledgeJourney = {
+  resource: KnowledgeResource;
+  journey: JourneyDetail;
+};
+
 export type JourneyUpdate = Partial<Pick<Journey, 'title' | 'intent' | 'duration_label' | 'status'>>;
 
 export type CommunityPost = {
@@ -123,12 +142,43 @@ export type CommunityPost = {
   like_count: number;
   freshness: number;
   tags: string[];
+  // Older servers omit this. New responses use the canonical content type.
+  is_route?: boolean;
+};
+
+export type ContentMedia = {
+  id: string;
+  url: string;
+  kind: string;
+  width: number;
+  height: number;
+  duration_ms?: number | null;
 };
 
 export type ContentDetail = {
   id: string;
-  post: CommunityPost;
+  // The public detail endpoint is authoritative, but tolerate a partial item
+  // so an unavailable summary never crashes an already-open detail view.
+  post?: CommunityPost | null;
   author_id: string;
+  body: string;
+  media: ContentMedia[];
+  topics: string[];
+  created_at: string;
+  published_at?: string | null;
+  route_template?: RouteTemplate | null;
+};
+
+export type PublicContentPage = {
+  items: ContentDetail[];
+  next_cursor?: string | null;
+  total_estimate: number;
+};
+
+export type PublicAuthor = {
+  id: string;
+  name: string;
+  avatar_url?: string;
 };
 
 export type ContentStatus = 'draft' | 'reviewing' | 'published' | 'restricted' | 'deleted';
@@ -169,13 +219,48 @@ export type ContentAppealPage = {
   next_cursor?: string | null;
 };
 
+export type FeedbackCategory = 'bug' | 'feature' | 'experience' | 'content' | 'other';
+export type FeedbackStatus = 'pending' | 'processing' | 'resolved' | 'closed';
+
+export type CreateFeedbackInput = {
+  category: FeedbackCategory;
+  content: string;
+  contact?: string;
+};
+
+export type UserFeedback = {
+  id: string;
+  user_id: string;
+  category: FeedbackCategory;
+  content: string;
+  contact: string;
+  platform: string;
+  app_version: string;
+  status: FeedbackStatus;
+  resolution?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type FeedItem = {
   author_id: string;
   post: CommunityPost;
   score: number;
   source: string;
   reasons: string[];
+  // Client-only context from the recommendation response that served this item.
+  recommendation_context?: RecommendationEventContext;
 };
+
+export type RecommendationSurface = 'home' | 'following' | 'search';
+
+export type RecommendationEventContext = {
+  request_id?: string;
+  position: number;
+  surface: RecommendationSurface;
+};
+
+export type NegativeFeedbackReason = 'not_relevant' | 'already_seen' | 'low_quality';
 
 export type Feed = {
   request_id: string;
@@ -204,9 +289,12 @@ export type SearchResult = {
   score: number;
   highlights: string[];
   post?: CommunityPost;
+  // Client-only position and page request that produced this search result.
+  event_context?: RecommendationEventContext;
 };
 
 export type SearchResponse = {
+  request_id: string;
   query: string;
   items: SearchResult[];
   next_cursor?: string;
@@ -250,6 +338,7 @@ export type CreateActionInput = {
 };
 
 export type EntryMood = 'clear' | 'steady' | 'tired' | 'energized' | 'calm';
+export type EntryPublicationStatus = 'private' | 'pending' | 'reviewing' | 'published' | 'restricted' | 'failed';
 
 export type GrowthEntry = {
   id: string;
@@ -260,12 +349,15 @@ export type GrowthEntry = {
   duration_minutes?: number;
   quantity?: string;
   location?: string;
-  photo_url?: string;
+  photo_media_id?: string;
   created_at: string;
-  published?: boolean;
+  published: boolean;
+  publication_status?: EntryPublicationStatus;
+  public_content_id?: string;
+  publication_error?: string;
 };
 
-export type CreateEntryInput = Omit<GrowthEntry, 'id' | 'created_at'>;
+export type CreateEntryInput = Omit<GrowthEntry, 'id' | 'created_at' | 'publication_status' | 'public_content_id' | 'publication_error'>;
 
 export type WeeklyReview = {
   period_start: string;
@@ -321,6 +413,8 @@ export type KnowledgeResource = {
   created_at: string;
   updated_at: string;
   last_opened_at?: string;
+  // Present only for the private metadata reference created from a community post.
+  source_content_id?: string;
 };
 
 export type CreateKnowledgeResourceInput = Pick<KnowledgeResource, 'title' | 'creator' | 'summary' | 'kind' | 'status' | 'tags'> &
@@ -391,12 +485,6 @@ export type ReaderSettings = {
   theme: ReaderTheme;
 };
 
-export type CreateReadingBookInput = {
-  title: string;
-  author: string;
-  content?: string;
-};
-
 export type Comment = {
   id: string;
   post_id: string;
@@ -416,7 +504,21 @@ export type CommentPage = {
 
 export type ReportReason = 'spam' | 'harassment' | 'unsafe' | 'misinformation' | 'copyright' | 'privacy' | 'other';
 
-export type ContentType = 'note' | 'article' | 'route';
+export type ContentType = 'note' | 'article' | 'video' | 'route';
+
+export type RouteTemplateStage = Pick<JourneyStage, 'title' | 'detail' | 'completion_criteria'>;
+
+export type RouteTemplateAction = Pick<Action, 'title' | 'detail' | 'estimated_minutes' | 'scheduled_label'> & {
+  stage_index?: number;
+};
+
+export type RouteTemplate = {
+  intent: string;
+  completion_criteria: string;
+  stages: RouteTemplateStage[];
+  actions: RouteTemplateAction[];
+  journey_type: JourneyType;
+};
 
 export type CreatePostInput = {
   title: string;
@@ -424,11 +526,13 @@ export type CreatePostInput = {
   body: string;
   domain: GrowthDomain;
   content_type: ContentType;
+  media_asset_ids?: string[];
   cover_url?: string;
   tags: string[];
   topics: string[];
   route_title?: string;
   route_duration?: string;
+  route_template?: RouteTemplate;
 };
 
 export type TabKey = 'today' | 'discover' | 'journeys' | 'profile';

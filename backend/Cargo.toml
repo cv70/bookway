@@ -1,32 +1,83 @@
 [workspace]
 members = [
+  "bookway/account",
   "bookway/bbs",
+  "bookway/bbs-creator",
+  "bookway/bbs-message",
+  "bookway/bbs-message/bg/direct-message-notification-dispatcher",
   "bookway/bbs-link",
   "bookway/bbs-feed",
   "bookway/search-main",
+  "bookway/search-main/job/search-evaluator",
   "bookway/user-event",
   "bookway/bbs-search",
+  "bookway/bbs-search/job/search-index-alias-switch",
+  "bookway/bbs-search/job/search-index-rebuild",
+  "bookway/bbs-search/job/search-index-outbox-recovery",
+  "bookway/bbs-search/job/search-index-reconcile",
   "bookway/comment",
   "bookway/commonlikestatus",
   "bookway/gateway",
+  "bookway/gateway/bg/community-notification-dispatcher",
   "bookway/growth",
+  "bookway/growth/bg/entry-publication-dispatcher",
+  "bookway/growth/bg/push-delivery-dispatcher",
   "bookway/recommend-main",
+  "bookway/recommend-main/job/recommendation-evaluator",
   "bookway/media",
+  "bookway/media/bg/media-processor",
   "bookway/content-audit",
+  "bookway/feedback",
   "bookway/feature-main",
   "bookway/recommend-recall",
   "bookway/recommend-rank",
+  "bookway/ad-center",
+  "bookway/ad-recall",
+  "bookway/ad-rank",
+  "bookway/ad-main",
+  "bookway/mall",
+  "bookway/mall-inventory",
+  "bookway/mall-order",
   "cmd/db-migrate",
   "cmd/outbox-relay",
   "cmd/reminder-dispatcher",
   "cmd/appeal-notification-dispatcher",
   "cmd/content-report-restriction-dispatcher",
   "cmd/route-participation-reconciler",
+  "cmd/mall-order-expirer",
+  "cmd/mall-inventory-sweeper",
   "bookway/bbs-search/bg/bbs-indexer",
   "infra/data",
   "infra/event",
   "infra/runtime",
   "pkg/api",
+  "bookway/account/api",
+  "bookway/ad-center/api",
+  "bookway/ad-main/api",
+  "bookway/ad-rank/api",
+  "bookway/ad-recall/api",
+  "bookway/bbs/api",
+  "bookway/bbs-creator/api",
+  "bookway/bbs-message/api",
+  "bookway/bbs-feed/api",
+  "bookway/bbs-link/api",
+  "bookway/bbs-search/api",
+  "bookway/comment/api",
+  "bookway/commonlikestatus/api",
+  "bookway/content-audit/api",
+  "bookway/feature-main/api",
+  "bookway/feedback/api",
+  "bookway/gateway/api",
+  "bookway/growth/api",
+  "bookway/mall/api",
+  "bookway/mall-inventory/api",
+  "bookway/mall-order/api",
+  "bookway/media/api",
+  "bookway/recommend-main/api",
+  "bookway/recommend-rank/api",
+  "bookway/recommend-recall/api",
+  "bookway/search-main/api",
+  "bookway/user-event/api",
 ]
 resolver = "3"
 
@@ -48,10 +99,12 @@ rusty-s3 = "0.8"
 kafka = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "time", "uuid"] }
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 tonic-health = "0.12"
@@ -60,28 +113,40 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "request-id", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-uuid = { version = "1", features = ["serde", "v7"] }
+uuid = { version = "1", features = ["serde", "v5", "v7"] }
 url = "2"
 
 bookway-api = { path = "pkg/api" }
 bookway-data = { path = "infra/data" }
 bookway-event = { path = "infra/event" }
 bookway-runtime = { path = "infra/runtime" }
-bookway-recommend-recall = { path = "bookway/recommend-recall" }
-bookway-recommend-rank = { path = "bookway/recommend-rank" }
-bookway-recommend-main = { path = "bookway/recommend-main" }
-bookway-bbs = { path = "bookway/bbs" }
-bookway-bbs-link = { path = "bookway/bbs-link" }
-bookway-bbs-search = { path = "bookway/bbs-search" }
-bookway-bbs-feed = { path = "bookway/bbs-feed" }
-bookway-comment = { path = "bookway/comment" }
-bookway-commonlikestatus = { path = "bookway/commonlikestatus" }
-bookway-content-audit = { path = "bookway/content-audit" }
-bookway-feature-main = { path = "bookway/feature-main" }
-bookway-growth = { path = "bookway/growth" }
-bookway-media = { path = "bookway/media" }
-bookway-search-main = { path = "bookway/search-main" }
-bookway-user-event = { path = "bookway/user-event" }
+bookway-account-api = { path = "bookway/account/api" }
+bookway-ad-center-api = { path = "bookway/ad-center/api" }
+bookway-ad-main-api = { path = "bookway/ad-main/api" }
+bookway-ad-rank-api = { path = "bookway/ad-rank/api" }
+bookway-ad-recall-api = { path = "bookway/ad-recall/api" }
+bookway-bbs-api = { path = "bookway/bbs/api" }
+bookway-bbs-creator-api = { path = "bookway/bbs-creator/api" }
+bookway-bbs-message-api = { path = "bookway/bbs-message/api" }
+bookway-bbs-feed-api = { path = "bookway/bbs-feed/api" }
+bookway-bbs-link-api = { path = "bookway/bbs-link/api" }
+bookway-bbs-search-api = { path = "bookway/bbs-search/api" }
+bookway-comment-api = { path = "bookway/comment/api" }
+bookway-commonlikestatus-api = { path = "bookway/commonlikestatus/api" }
+bookway-content-audit-api = { path = "bookway/content-audit/api" }
+bookway-feature-main-api = { path = "bookway/feature-main/api" }
+bookway-feedback-api = { path = "bookway/feedback/api" }
+bookway-gateway-api = { path = "bookway/gateway/api" }
+bookway-growth-api = { path = "bookway/growth/api" }
+bookway-mall-api = { path = "bookway/mall/api" }
+bookway-mall-inventory-api = { path = "bookway/mall-inventory/api" }
+bookway-mall-order-api = { path = "bookway/mall-order/api" }
+bookway-media-api = { path = "bookway/media/api" }
+bookway-recommend-main-api = { path = "bookway/recommend-main/api" }
+bookway-recommend-rank-api = { path = "bookway/recommend-rank/api" }
+bookway-recommend-recall-api = { path = "bookway/recommend-recall/api" }
+bookway-search-main-api = { path = "bookway/search-main/api" }
+bookway-user-event-api = { path = "bookway/user-event/api" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

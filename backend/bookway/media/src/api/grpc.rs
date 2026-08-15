@@ -1,8 +1,7 @@
 #![allow(clippy::result_large_err)] // tonic::Status is fixed by the transport API.
 
 use super::pb::{self, media_server::Media};
-use crate::{api::UploadRequest, domain::Domain};
-use serde::Serialize;
+use crate::domain::Domain;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
@@ -15,44 +14,49 @@ impl Media for GrpcServer {
     async fn create_upload(
         &self,
         request: Request<pb::CreateUploadRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
-        let payload: UploadRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .create_upload(&request.user_id, payload)
+    ) -> Result<Response<pb::UploadResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .create_upload(request.into_inner())
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn complete_upload(
         &self,
         request: Request<pb::ResourceRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
-        json_response(
-            &self
-                .domain
-                .complete_upload(&request.user_id, &request.id)
+    ) -> Result<Response<pb::MediaResource>, Status> {
+        Ok(Response::new(
+            self.domain
+                .complete_upload(request.into_inner())
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn get(
         &self,
         request: Request<pb::ResourceRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
-        json_response(
-            &self
-                .domain
-                .get(&request.user_id, &request.id)
+    ) -> Result<Response<pb::MediaResource>, Status> {
+        Ok(Response::new(
+            self.domain
+                .get(request.into_inner())
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
+    }
+
+    async fn get_owned_ready_batch(
+        &self,
+        request: Request<pb::OwnedReadyMediaRequest>,
+    ) -> Result<Response<pb::OwnedReadyMediaResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .owned_ready_batch(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
     }
 }
 
@@ -63,24 +67,24 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .await;
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(pb::media_server::MediaServer::new(GrpcServer {
-            domain: domain.clone(),
-        }))
+        .add_service(pb::media_server::MediaServer::with_interceptor(
+            GrpcServer {
+                domain: domain.clone(),
+            },
+            bookway_runtime::grpc_service_auth_interceptor,
+        ))
         .serve(domain.config.grpc_addr)
         .await
 }
 
-fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, Status> {
-    serde_json::from_str(value).map_err(|error| Status::invalid_argument(error.to_string()))
-}
-
 fn internal_error(error: crate::domain::MediaError) -> Status {
-    Status::internal(error.to_string())
-}
-
-fn json_response<T: Serialize>(value: &T) -> Result<Response<pb::JsonResponse>, Status> {
-    Ok(Response::new(pb::JsonResponse {
-        response_json: serde_json::to_string(value)
-            .map_err(|error| Status::internal(error.to_string()))?,
-    }))
+    match error {
+        crate::domain::MediaError::Validation(message) => Status::invalid_argument(message),
+        crate::domain::MediaError::Forbidden => Status::permission_denied(error.to_string()),
+        crate::domain::MediaError::Repository(crate::datasource::RepositoryError::NotFound) => {
+            Status::not_found("media asset was not found or is not ready")
+        }
+        crate::domain::MediaError::Repository(crate::datasource::RepositoryError::Database(_))
+        | crate::domain::MediaError::Object(_) => Status::unavailable(error.to_string()),
+    }
 }

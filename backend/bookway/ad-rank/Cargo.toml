@@ -1,0 +1,20 @@
+[package]
+name = "bookway-ad-rank"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bookway-ad-rank-api.workspace = true
+bookway-api.workspace = true
+bookway-ad-center-api.workspace = true
+bookway-runtime.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+
+
+[lints]
+workspace = true

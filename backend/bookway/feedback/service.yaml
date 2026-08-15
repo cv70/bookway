@@ -1,0 +1,7 @@
+name: bookway-feedback
+owner: product-experience
+kind: grpc-service
+port: 8104
+healthcheck: grpc
+contracts:
+  - src/api/pb/server.proto

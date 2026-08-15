@@ -120,7 +120,7 @@ impl JobRepository for PostgresJobRepository {
 }
 
 struct GrpcRestrictionTarget {
-    bbs_link: bookway_bbs_link::api::pb::bbs_link_client::BbsLinkClient<tonic::transport::Channel>,
+    bbs_link: bookway_bbs_link_api::pb::bbs_link_client::BbsLinkClient<tonic::transport::Channel>,
     service_auth_token: Option<MetadataValue<Ascii>>,
 }
 
@@ -130,7 +130,7 @@ impl GrpcRestrictionTarget {
         service_auth_token: Option<MetadataValue<Ascii>>,
     ) -> Result<Self, tonic::transport::Error> {
         Ok(Self {
-            bbs_link: bookway_bbs_link::api::pb::bbs_link_client::BbsLinkClient::connect(
+            bbs_link: bookway_bbs_link_api::pb::bbs_link_client::BbsLinkClient::connect(
                 bbs_link_url,
             )
             .await?,
@@ -158,7 +158,7 @@ impl RestrictionTarget for GrpcRestrictionTarget {
         let mut bbs_link = self.bbs_link.clone();
         bbs_link
             .restrict(bbs_link_request(
-                bookway_bbs_link::api::pb::RestrictRequest {
+                bookway_bbs_link_api::pb::RestrictRequest {
                     content_id: job.content_id.clone(),
                 },
                 self.service_auth_token.as_ref(),
@@ -167,7 +167,7 @@ impl RestrictionTarget for GrpcRestrictionTarget {
             .map_err(TargetError::BbsLink)?;
         match bbs_link
             .get_public(bbs_link_request(
-                bookway_bbs_link::api::pb::IdRequest {
+                bookway_bbs_link_api::pb::IdRequest {
                     id: job.content_id.clone(),
                 },
                 self.service_auth_token.as_ref(),
@@ -455,7 +455,7 @@ mod tests {
     fn restriction_request_carries_the_worker_service_token() {
         let token: MetadataValue<Ascii> = "dispatcher-token".try_into().expect("valid token");
         let request = bbs_link_request(
-            bookway_bbs_link::api::pb::RestrictRequest {
+            bookway_bbs_link_api::pb::RestrictRequest {
                 content_id: "content-1".to_string(),
             },
             Some(&token),

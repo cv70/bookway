@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bookway-media-api.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 bookway-api.workspace = true
@@ -28,6 +29,3 @@ url.workspace = true
 
 [lints]
 workspace = true
-
-[build-dependencies]
-tonic-build.workspace = true

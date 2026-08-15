@@ -12,6 +12,8 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub(crate) enum LikeStatusError {
+    #[error("{0}")]
+    Validation(String),
     #[error(transparent)]
     Repository(#[from] RepositoryError),
 }

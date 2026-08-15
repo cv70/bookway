@@ -1,0 +1,60 @@
+syntax = "proto3";
+package bookway.mall.order;
+
+enum MallOrderStatus {
+  MALL_ORDER_STATUS_PENDING_PAYMENT = 0;
+  MALL_ORDER_STATUS_PAID = 1;
+  MALL_ORDER_STATUS_CANCELLED = 2;
+  MALL_ORDER_STATUS_EXPIRED = 3;
+}
+
+message OrderItemRequest {
+  string sku_id = 1;
+  uint32 quantity = 2;
+}
+
+message CreateRequest {
+  string user_id = 1;
+  string idempotency_key = 2;
+  repeated OrderItemRequest items = 3;
+}
+
+message OrderLine {
+  string sku_id = 1;
+  string product_id = 2;
+  string title = 3;
+  uint32 quantity = 4;
+  int64 unit_price_cents = 5;
+  string currency = 6;
+  int64 line_total_cents = 7;
+}
+
+message Order {
+  string id = 1;
+  string user_id = 2;
+  MallOrderStatus status = 3;
+  string currency = 4;
+  int64 total_cents = 5;
+  repeated OrderLine items = 6;
+  optional string payment_reference = 7;
+  string expires_at = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message OrderListResponse { repeated Order items = 1; }
+message ExpirePendingResponse { uint32 scanned = 1; uint32 expired = 2; uint32 failed = 3; }
+
+message UserRequest { string user_id = 1; }
+message OrderRequest { string user_id = 1; string order_id = 2; }
+message PayRequest { string user_id = 1; string order_id = 2; string payment_reference = 3; }
+message BatchRequest { uint32 limit = 1; }
+
+service MallOrder {
+  rpc Create(CreateRequest) returns (Order);
+  rpc List(UserRequest) returns (OrderListResponse);
+  rpc Get(OrderRequest) returns (Order);
+  rpc Pay(PayRequest) returns (Order);
+  rpc Cancel(OrderRequest) returns (Order);
+  rpc ExpirePending(BatchRequest) returns (ExpirePendingResponse);
+}

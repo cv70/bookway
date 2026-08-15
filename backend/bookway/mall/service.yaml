@@ -1,0 +1,7 @@
+name: bookway-mall
+owner: commercial-commerce
+kind: grpc-service
+port: 8101
+healthcheck: grpc
+contracts:
+  - src/api/pb/server.proto

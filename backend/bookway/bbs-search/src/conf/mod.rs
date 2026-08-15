@@ -7,7 +7,7 @@ pub(crate) struct Config {
     pub(crate) listen_addr: SocketAddr,
     pub(crate) bbs_link_url: String,
     pub(crate) opensearch_url: Option<String>,
-    pub(crate) opensearch_index: String,
+    pub(crate) opensearch_read_alias: String,
 }
 
 impl Config {
@@ -19,8 +19,18 @@ impl Config {
             opensearch_url: env::var("OPENSEARCH_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
-            opensearch_index: env::var("OPENSEARCH_INDEX")
-                .unwrap_or_else(|_| "bookway-content-v1".to_string()),
+            // Keep an existing physical-index deployment readable while it is
+            // migrated to an explicit read alias.
+            opensearch_read_alias: non_empty_env("OPENSEARCH_READ_ALIAS")
+                .or_else(|| non_empty_env("OPENSEARCH_INDEX"))
+                .unwrap_or_else(|| "bookway-content-v1".to_string()),
         })
     }
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }

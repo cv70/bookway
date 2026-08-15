@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
+use bookway_content_audit_api::pb::{self as audit_pb, content_audit_client::ContentAuditClient};
 use thiserror::Error;
 
 use crate::{
     conf::Config,
     datasource::{
-        CommentAuditor, CommentRepository, GrpcCommentAuditor, LocalCommentAuditor,
-        MemoryCommentRepository, PostgresCommentRepository, RepositoryError,
-        UnavailableCommentAuditor,
+        CommentRepository, MemoryCommentRepository, PostgresCommentRepository, RepositoryError,
     },
 };
 
@@ -23,7 +22,7 @@ pub(crate) enum CommentError {
 pub(crate) struct Domain {
     pub(crate) config: Config,
     pub(crate) repository: Arc<dyn CommentRepository>,
-    pub(crate) auditor: Arc<dyn CommentAuditor>,
+    pub(crate) content_audit: Option<ContentAuditClient<tonic::transport::Channel>>,
 }
 
 impl Domain {
@@ -35,32 +34,36 @@ impl Domain {
                 bookway_data::postgres_pool().await?,
             )),
         };
-        let auditor: Arc<dyn CommentAuditor> = match config.content_audit_grpc_url.clone() {
-            Some(url) => Arc::new(GrpcCommentAuditor::connect(url).await?),
-            None if storage_mode == bookway_data::StorageMode::Memory => {
-                Arc::new(LocalCommentAuditor)
-            }
-            None => Arc::new(UnavailableCommentAuditor),
+        let content_audit = match config.content_audit_grpc_url.clone() {
+            Some(url) => Some(ContentAuditClient::connect(url).await?),
+            None => None,
         };
         Ok(Self {
             config,
             repository,
-            auditor,
+            content_audit,
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_repository(config: Config, repository: Arc<dyn CommentRepository>) -> Self {
-        Self {
-            config,
-            repository,
-            auditor: Arc::new(LocalCommentAuditor),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_auditor(mut self, auditor: Arc<dyn CommentAuditor>) -> Self {
-        self.auditor = auditor;
-        self
+    pub(crate) async fn audit(
+        &self,
+        request: audit_pb::AuditRequest,
+    ) -> Result<audit_pb::AuditResponse, String> {
+        let Some(mut client) = self.content_audit.clone() else {
+            return Ok(audit_pb::AuditResponse {
+                decision: audit_pb::AuditDecision::Approved as i32,
+                risk_score: 0.0,
+                reasons: Vec::new(),
+                provider: "local-development".to_string(),
+            });
+        };
+        client
+            .audit(
+                bookway_runtime::grpc_service_request(request)
+                    .map_err(|error| error.to_string())?,
+            )
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|error| error.to_string())
     }
 }

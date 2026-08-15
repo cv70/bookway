@@ -1,0 +1,46 @@
+syntax = "proto3";
+package bookway.user.event;
+
+enum AttributionSource {
+  ATTRIBUTION_SOURCE_UNSPECIFIED = 0;
+  ATTRIBUTION_SOURCE_RECOMMENDATION = 1;
+  ATTRIBUTION_SOURCE_SEARCH = 2;
+}
+
+// Captures why a viewer removed a served item. This stays intentionally small:
+// each value has a distinct downstream ranking interpretation.
+enum NegativeFeedbackReason {
+  NEGATIVE_FEEDBACK_REASON_UNSPECIFIED = 0;
+  NEGATIVE_FEEDBACK_REASON_NOT_RELEVANT = 1;
+  NEGATIVE_FEEDBACK_REASON_ALREADY_SEEN = 2;
+  NEGATIVE_FEEDBACK_REASON_LOW_QUALITY = 3;
+}
+
+message Event {
+  string event_id = 1;
+  string event_type = 2;
+  string session_id = 3;
+  optional string request_id = 4;
+  string component_id = 5;
+  optional string content_id = 6;
+  optional uint32 position = 7;
+  string occurred_at = 8;
+  string source = 9;
+  AttributionSource attribution_source = 10;
+  optional NegativeFeedbackReason negative_feedback_reason = 11;
+}
+
+message IngestRequest {
+  string user_id = 1;
+  repeated Event events = 2;
+}
+
+message IngestResponse {
+  uint64 accepted = 1;
+  uint64 duplicate = 2;
+  uint64 rejected = 3;
+}
+
+service UserEvent {
+  rpc Ingest(IngestRequest) returns (IngestResponse);
+}

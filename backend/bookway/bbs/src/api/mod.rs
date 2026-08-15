@@ -1,13 +1,9 @@
 mod grpc;
 mod http;
-
-#[path = "pb/bookway.bbs.rs"]
-pub mod pb;
+pub use bookway_bbs_api::pb;
 
 pub(crate) use grpc::serve as serve_grpc;
 pub(crate) use http::serve as serve_http;
 
-pub(crate) use bookway_api::{
-    RouteParticipationContextDto, RouteParticipationDto, RouteParticipationStateDto,
-    SocialContextDto, SocialEdgeTypeDto, SocialVisibilityDto,
-};
+#[allow(unused_imports)]
+pub(crate) use bookway_bbs_api::*;

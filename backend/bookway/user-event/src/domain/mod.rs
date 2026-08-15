@@ -1,19 +1,21 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bookway_recommend_main_api::pb::{
+    self as recommend_pb, recommend_main_client::RecommendMainClient,
+};
+use bookway_search_main_api::pb::{self as search_pb, search_main_client::SearchMainClient};
 use redis::AsyncCommands;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
+use tonic::transport::Channel;
 use uuid::Uuid;
 
-use super::{
-    api::{UserEventBatchRequest, UserEventDto, UserEventIngestResponse},
-    datasource::{
-        AcceptedEvent, MemoryEventRepository, PostgresEventRepository, RepositoryError,
-        SharedEventRepository,
-    },
+use super::datasource::{
+    AcceptedEvent, MemoryEventRepository, PostgresEventRepository, RepositoryError,
+    SharedEventRepository,
 };
-use crate::conf::Config;
+use crate::{api::pb, conf::Config};
 
 const MAX_BATCH_SIZE: usize = 100;
 const MAX_IDENTIFIER_LENGTH: usize = 128;
@@ -66,6 +68,8 @@ impl FeatureCacheInvalidator for RedisFeatureCacheInvalidator {
 pub(crate) struct UserEventService {
     repository: SharedEventRepository,
     feature_cache: Option<SharedFeatureCacheInvalidator>,
+    recommend_main: Option<RecommendMainClient<Channel>>,
+    search_main: Option<SearchMainClient<Channel>>,
 }
 
 #[derive(Clone)]
@@ -75,7 +79,11 @@ pub(crate) struct Domain {
 }
 
 impl Domain {
-    pub(crate) async fn new(config: Config) -> Result<Self, bookway_data::DataError> {
+    pub(crate) async fn new(
+        config: Config,
+        recommend_main: RecommendMainClient<Channel>,
+        search_main: SearchMainClient<Channel>,
+    ) -> Result<Self, bookway_data::DataError> {
         let repository: SharedEventRepository = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => Arc::new(MemoryEventRepository::default()),
             bookway_data::StorageMode::Postgres => Arc::new(PostgresEventRepository::new(
@@ -95,27 +103,53 @@ impl Domain {
         };
         Ok(Self {
             config,
-            events: UserEventService::with_feature_cache(repository, feature_cache),
+            events: UserEventService::with_clients(
+                repository,
+                feature_cache,
+                Some(recommend_main),
+                Some(search_main),
+            ),
         })
     }
 }
 
 impl UserEventService {
+    #[cfg(test)]
     pub(crate) fn with_feature_cache(
         repository: SharedEventRepository,
         feature_cache: Option<SharedFeatureCacheInvalidator>,
     ) -> Self {
+        Self::with_feature_cache_and_recommend_main(repository, feature_cache, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_feature_cache_and_recommend_main(
+        repository: SharedEventRepository,
+        feature_cache: Option<SharedFeatureCacheInvalidator>,
+        recommend_main: Option<RecommendMainClient<Channel>>,
+    ) -> Self {
+        Self::with_clients(repository, feature_cache, recommend_main, None)
+    }
+
+    pub(crate) fn with_clients(
+        repository: SharedEventRepository,
+        feature_cache: Option<SharedFeatureCacheInvalidator>,
+        recommend_main: Option<RecommendMainClient<Channel>>,
+        search_main: Option<SearchMainClient<Channel>>,
+    ) -> Self {
         Self {
             repository,
             feature_cache,
+            recommend_main,
+            search_main,
         }
     }
 
     pub(crate) async fn ingest(
         &self,
-        user_id: &str,
-        request: UserEventBatchRequest,
-    ) -> Result<UserEventIngestResponse, IngestError> {
+        request: pb::IngestRequest,
+    ) -> Result<pb::IngestResponse, IngestError> {
+        let user_id = request.user_id;
         if user_id.trim().is_empty() {
             return Err(IngestError::MissingUser);
         }
@@ -131,7 +165,7 @@ impl UserEventService {
         for event in request.events {
             if is_valid(&event) {
                 accepted_events.push(AcceptedEvent {
-                    user_id: user_id.to_string(),
+                    user_id: user_id.clone(),
                     event,
                 });
             } else {
@@ -139,14 +173,17 @@ impl UserEventService {
             }
         }
 
+        self.validate_attribution(&user_id, &mut accepted_events, &mut rejected)
+            .await;
+
         let stored = self.repository.store(accepted_events).await?;
         if stored.accepted > 0 {
-            self.invalidate_user_features(user_id).await;
+            self.invalidate_user_features(&user_id).await;
         }
-        Ok(UserEventIngestResponse {
-            accepted: stored.accepted,
-            duplicate: stored.duplicate,
-            rejected,
+        Ok(pb::IngestResponse {
+            accepted: u64::try_from(stored.accepted).unwrap_or(u64::MAX),
+            duplicate: u64::try_from(stored.duplicate).unwrap_or(u64::MAX),
+            rejected: u64::try_from(rejected).unwrap_or(u64::MAX),
         })
     }
 
@@ -160,13 +197,146 @@ impl UserEventService {
             tracing::warn!(%error, user_id, "user feature cache invalidation degraded");
         }
     }
+
+    async fn validate_attribution(
+        &self,
+        user_id: &str,
+        events: &mut Vec<AcceptedEvent>,
+        rejected: &mut usize,
+    ) {
+        let recommendation_indices = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, accepted)| {
+                (accepted.event.request_id.is_some()
+                    && accepted.event.attribution_source != pb::AttributionSource::Search as i32)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        self.validate_recommendation_attribution(
+            user_id,
+            events,
+            &recommendation_indices,
+            rejected,
+        )
+        .await;
+        let search_indices = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, accepted)| {
+                (accepted.event.request_id.is_some()
+                    && accepted.event.attribution_source == pb::AttributionSource::Search as i32)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        self.validate_search_attribution(user_id, events, &search_indices, rejected)
+            .await;
+    }
+
+    async fn validate_recommendation_attribution(
+        &self,
+        user_id: &str,
+        events: &mut Vec<AcceptedEvent>,
+        indices: &[usize],
+        rejected: &mut usize,
+    ) {
+        if indices.is_empty() {
+            return;
+        }
+        let Some(mut client) = self.recommend_main.clone() else {
+            tracing::warn!(
+                count = indices.len(),
+                "recommendation attribution validation is not configured; storing events without attribution"
+            );
+            strip_attribution(events, indices);
+            return;
+        };
+        let request = recommend_pb::ValidateAttributionsRequest {
+            user_id: user_id.to_string(),
+            attributions: indices
+                .iter()
+                .map(|index| attribution_from_event(&events[*index].event))
+                .collect(),
+        };
+        let result = async {
+            let request = bookway_runtime::grpc_service_request(request)
+                .map_err(|error| error.to_string())?;
+            let response = client
+                .validate_attributions(request)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_inner();
+            (response.valid.len() == indices.len())
+                .then_some(response.valid)
+                .ok_or_else(|| {
+                    "Recommend Main returned a malformed attribution response".to_string()
+                })
+        }
+        .await;
+        match result {
+            Ok(valid) => retain_verified_attributions(events, indices, valid, rejected),
+            Err(error) => {
+                // Feedback remains useful for online features during a transient
+                // recommender outage, but cannot be trusted as training attribution.
+                tracing::warn!(%error, count = indices.len(), "recommendation attribution validation degraded; storing events without attribution");
+                strip_attribution(events, indices);
+            }
+        }
+    }
+
+    async fn validate_search_attribution(
+        &self,
+        user_id: &str,
+        events: &mut Vec<AcceptedEvent>,
+        indices: &[usize],
+        rejected: &mut usize,
+    ) {
+        if indices.is_empty() {
+            return;
+        }
+        let Some(mut client) = self.search_main.clone() else {
+            tracing::warn!(
+                count = indices.len(),
+                "search attribution validation is not configured; storing events without attribution"
+            );
+            strip_attribution(events, indices);
+            return;
+        };
+        let request = search_pb::ValidateSearchAttributionsRequest {
+            user_id: user_id.to_string(),
+            attributions: indices
+                .iter()
+                .map(|index| search_attribution_from_event(&events[*index].event))
+                .collect(),
+        };
+        let result = async {
+            let request = bookway_runtime::grpc_service_request(request)
+                .map_err(|error| error.to_string())?;
+            let response = client
+                .validate_attributions(request)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_inner();
+            (response.valid.len() == indices.len())
+                .then_some(response.valid)
+                .ok_or_else(|| "Search Main returned a malformed attribution response".to_string())
+        }
+        .await;
+        match result {
+            Ok(valid) => retain_verified_attributions(events, indices, valid, rejected),
+            Err(error) => {
+                tracing::warn!(%error, count = indices.len(), "search attribution validation degraded; storing events without attribution");
+                strip_attribution(events, indices);
+            }
+        }
+    }
 }
 
 fn feature_cache_key(user_id: &str) -> String {
     format!("bookway:features:{user_id}")
 }
 
-fn is_valid(event: &UserEventDto) -> bool {
+fn is_valid(event: &pb::Event) -> bool {
     valid_uuid(&event.event_id)
         && valid_event_type(&event.event_type)
         && valid_identifier(&event.session_id)
@@ -175,9 +345,80 @@ fn is_valid(event: &UserEventDto) -> bool {
         && !event.source.trim().is_empty()
         && event.source.len() <= MAX_SOURCE_LENGTH
         && event.request_id.as_deref().is_none_or(valid_uuid)
+        && event.position.is_none_or(|position| i32::try_from(position).is_ok())
+        && pb::AttributionSource::try_from(event.attribution_source).is_ok()
+        && valid_attribution_shape(event)
+        && valid_negative_feedback_reason(event)
         // Content IDs are opaque domain identifiers. They may be UUIDs in
         // PostgreSQL, but memory mode and imported content use slugs as well.
         && event.content_id.as_deref().is_none_or(valid_identifier)
+}
+
+fn valid_attribution_shape(event: &pb::Event) -> bool {
+    event.request_id.is_none()
+        || (event.content_id.as_deref().is_some_and(valid_identifier) && event.position.is_some())
+}
+
+fn valid_negative_feedback_reason(event: &pb::Event) -> bool {
+    let Some(reason) = event.negative_feedback_reason else {
+        return true;
+    };
+    event.event_type == "hide"
+        && matches!(
+            pb::NegativeFeedbackReason::try_from(reason).ok(),
+            Some(
+                pb::NegativeFeedbackReason::NotRelevant
+                    | pb::NegativeFeedbackReason::AlreadySeen
+                    | pb::NegativeFeedbackReason::LowQuality
+            )
+        )
+}
+
+fn attribution_from_event(event: &pb::Event) -> recommend_pb::ExposureAttribution {
+    recommend_pb::ExposureAttribution {
+        request_id: event.request_id.clone().unwrap_or_default(),
+        session_id: event.session_id.clone(),
+        content_id: event.content_id.clone().unwrap_or_default(),
+        position: event.position.unwrap_or_default(),
+    }
+}
+
+fn search_attribution_from_event(event: &pb::Event) -> search_pb::SearchAttribution {
+    search_pb::SearchAttribution {
+        request_id: event.request_id.clone().unwrap_or_default(),
+        session_id: event.session_id.clone(),
+        result_id: event.content_id.clone().unwrap_or_default(),
+        position: event.position.unwrap_or_default(),
+    }
+}
+
+fn strip_attribution(events: &mut [AcceptedEvent], indices: &[usize]) {
+    for index in indices {
+        events[*index].event.request_id = None;
+        events[*index].event.position = None;
+        events[*index].event.attribution_source = pb::AttributionSource::Unspecified as i32;
+    }
+}
+
+fn retain_verified_attributions(
+    events: &mut Vec<AcceptedEvent>,
+    indices: &[usize],
+    valid: Vec<bool>,
+    rejected: &mut usize,
+) {
+    let mut verified = vec![true; events.len()];
+    for (index, is_valid) in indices.iter().zip(valid) {
+        verified[*index] = is_valid;
+    }
+    let mut retained = Vec::with_capacity(events.len());
+    for (index, event) in events.drain(..).enumerate() {
+        if verified[index] {
+            retained.push(event);
+        } else {
+            *rejected += 1;
+        }
+    }
+    *events = retained;
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -210,6 +451,7 @@ fn valid_event_type(value: &str) -> bool {
             | "view"
             | "like"
             | "bookmark"
+            | "save_knowledge"
             | "share"
             | "hide"
             | "complete"
@@ -224,11 +466,14 @@ fn valid_event_type(value: &str) -> bool {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use crate::api::pb;
     use async_trait::async_trait;
-    use bookway_api::{UserEventBatchRequest, UserEventDto};
 
-    use super::{FeatureCacheInvalidator, IngestError, UserEventService};
-    use crate::datasource::MemoryEventRepository;
+    use super::{
+        FeatureCacheInvalidator, IngestError, UserEventService, is_valid,
+        retain_verified_attributions,
+    };
+    use crate::datasource::{AcceptedEvent, MemoryEventRepository};
 
     #[derive(Default)]
     struct RecordingFeatureCache {
@@ -250,8 +495,8 @@ mod tests {
         }
     }
 
-    fn event(id: &str, event_type: &str) -> UserEventDto {
-        UserEventDto {
+    fn event(id: &str, event_type: &str) -> pb::Event {
+        pb::Event {
             event_id: id.to_string(),
             event_type: event_type.to_string(),
             session_id: "session-1".to_string(),
@@ -263,6 +508,15 @@ mod tests {
                 .format(&time::format_description::well_known::Rfc3339)
                 .expect("current timestamp"),
             source: "ios".to_string(),
+            attribution_source: pb::AttributionSource::Unspecified as i32,
+            negative_feedback_reason: None,
+        }
+    }
+
+    fn request(events: Vec<pb::Event>) -> pb::IngestRequest {
+        pb::IngestRequest {
+            user_id: "user-1".to_string(),
+            events,
         }
     }
 
@@ -271,26 +525,19 @@ mod tests {
         let service =
             UserEventService::with_feature_cache(Arc::new(MemoryEventRepository::default()), None);
         let first = service
-            .ingest(
-                "user-1",
-                UserEventBatchRequest {
-                    events: vec![
-                        event("01980000-0000-7000-8000-000000000001", "impression"),
-                        event("01980000-0000-7000-8000-000000000002", "unknown"),
-                    ],
-                },
-            )
+            .ingest(request(vec![
+                event("01980000-0000-7000-8000-000000000001", "impression"),
+                event("01980000-0000-7000-8000-000000000002", "unknown"),
+            ]))
             .await
             .expect("first batch should succeed");
         assert_eq!((first.accepted, first.duplicate, first.rejected), (1, 0, 1));
 
         let second = service
-            .ingest(
-                "user-1",
-                UserEventBatchRequest {
-                    events: vec![event("01980000-0000-7000-8000-000000000001", "click")],
-                },
-            )
+            .ingest(request(vec![event(
+                "01980000-0000-7000-8000-000000000001",
+                "click",
+            )]))
             .await
             .expect("duplicate batch should succeed");
         assert_eq!(
@@ -304,7 +551,7 @@ mod tests {
         let service =
             UserEventService::with_feature_cache(Arc::new(MemoryEventRepository::default()), None);
         let error = service
-            .ingest("user-1", UserEventBatchRequest { events: Vec::new() })
+            .ingest(request(Vec::new()))
             .await
             .expect_err("empty batch should fail");
         assert!(matches!(error, IngestError::EmptyBatch));
@@ -317,12 +564,7 @@ mod tests {
         let mut impression = event("01980000-0000-7000-8000-000000000003", "impression");
         impression.content_id = Some("post-reading".to_string());
         let result = service
-            .ingest(
-                "user-1",
-                UserEventBatchRequest {
-                    events: vec![impression],
-                },
-            )
+            .ingest(request(vec![impression]))
             .await
             .expect("opaque content ids should be valid");
         assert_eq!(result.accepted, 1);
@@ -339,21 +581,11 @@ mod tests {
         let event = event("01980000-0000-7000-8000-000000000004", "like");
 
         service
-            .ingest(
-                "user-1",
-                UserEventBatchRequest {
-                    events: vec![event.clone()],
-                },
-            )
+            .ingest(request(vec![event.clone()]))
             .await
             .expect("new event should be stored");
         service
-            .ingest(
-                "user-1",
-                UserEventBatchRequest {
-                    events: vec![event],
-                },
-            )
+            .ingest(request(vec![event]))
             .await
             .expect("duplicate should be accepted without a new invalidation");
 
@@ -378,12 +610,10 @@ mod tests {
         );
 
         let response = service
-            .ingest(
-                "user-1",
-                UserEventBatchRequest {
-                    events: vec![event("01980000-0000-7000-8000-000000000005", "hide")],
-                },
-            )
+            .ingest(request(vec![event(
+                "01980000-0000-7000-8000-000000000005",
+                "hide",
+            )]))
             .await
             .expect("event persistence should not depend on Redis");
 
@@ -393,7 +623,71 @@ mod tests {
     #[test]
     fn accepts_mobile_conversion_and_safety_events() {
         assert!(super::valid_event_type("join_route"));
+        assert!(super::valid_event_type("save_knowledge"));
+        assert!(super::valid_event_type("follow"));
         assert!(super::valid_event_type("report"));
+    }
+
+    #[test]
+    fn accepts_unattributed_follow_events_without_a_content_id() {
+        let mut follow = event("01980000-0000-7000-8000-000000000011", "follow");
+        follow.component_id = "creator-follow".to_string();
+        follow.content_id = None;
+        follow.request_id = None;
+        follow.position = None;
+
+        assert!(is_valid(&follow));
+    }
+
+    #[test]
+    fn accepts_typed_hide_reasons_but_rejects_them_for_other_events() {
+        let mut hide = event("01980000-0000-7000-8000-000000000012", "hide");
+        hide.negative_feedback_reason = Some(pb::NegativeFeedbackReason::AlreadySeen as i32);
+        assert!(is_valid(&hide));
+
+        let mut like = event("01980000-0000-7000-8000-000000000013", "like");
+        like.negative_feedback_reason = Some(pb::NegativeFeedbackReason::NotRelevant as i32);
+        assert!(!is_valid(&like));
+
+        let mut unspecified = event("01980000-0000-7000-8000-000000000014", "hide");
+        unspecified.negative_feedback_reason = Some(pb::NegativeFeedbackReason::Unspecified as i32);
+        assert!(!is_valid(&unspecified));
+    }
+
+    #[test]
+    fn request_attribution_requires_content_and_position() {
+        let mut missing_content = event("01980000-0000-7000-8000-000000000006", "click");
+        missing_content.content_id = None;
+        assert!(!is_valid(&missing_content));
+
+        let mut missing_position = event("01980000-0000-7000-8000-000000000007", "click");
+        missing_position.position = None;
+        assert!(!is_valid(&missing_position));
+    }
+
+    #[test]
+    fn invalid_attribution_is_rejected_without_dropping_unattributed_feedback() {
+        let attributed = event("01980000-0000-7000-8000-000000000008", "hide");
+        let mut unattributed = event("01980000-0000-7000-8000-000000000009", "bookmark");
+        unattributed.request_id = None;
+        unattributed.position = None;
+        let mut events = vec![
+            AcceptedEvent {
+                user_id: "user-1".to_string(),
+                event: attributed,
+            },
+            AcceptedEvent {
+                user_id: "user-1".to_string(),
+                event: unattributed,
+            },
+        ];
+        let mut rejected = 0;
+
+        retain_verified_attributions(&mut events, &[0], vec![false], &mut rejected);
+
+        assert_eq!(rejected, 1);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event.event_type, "bookmark");
     }
 
     #[test]

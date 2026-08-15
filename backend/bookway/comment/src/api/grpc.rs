@@ -2,8 +2,6 @@
 
 use super::pb::{self, comment_server::Comment};
 use crate::domain::Domain;
-use bookway_api::{CommentQueryRequest, CreateCommentRequest};
-use serde::Serialize;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
@@ -16,52 +14,132 @@ impl Comment for GrpcServer {
     async fn list(
         &self,
         request: Request<pb::ListRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
-        let payload = if request.request_json.is_empty() {
-            CommentQueryRequest::default()
-        } else {
-            from_json(&request.request_json)?
-        };
-        json_response(
-            &self
-                .domain
-                .list(&request.post_id, payload)
+    ) -> Result<Response<pb::CommentPage>, Status> {
+        Ok(Response::new(
+            self.domain
+                .list(request.into_inner())
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn create(
         &self,
         request: Request<pb::CreateRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
-        let payload: CreateCommentRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .create_with_context(
-                    &request.user_id,
-                    &request.post_id,
-                    payload,
-                    request.idempotency_key,
-                )
+    ) -> Result<Response<pb::CreateCommentResult>, Status> {
+        Ok(Response::new(
+            self.domain
+                .create(request.into_inner())
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn delete(
         &self,
         request: Request<pb::DeleteRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
+    ) -> Result<Response<pb::DeleteResponse>, Status> {
         self.domain
-            .delete(&request.user_id, &request.post_id, &request.comment_id)
+            .delete(request.into_inner())
             .await
             .map_err(internal_error)?;
-        json_response(&())
+        Ok(Response::new(pb::DeleteResponse {}))
+    }
+
+    async fn list_moderation(
+        &self,
+        request: Request<pb::ListModerationRequest>,
+    ) -> Result<Response<pb::ModerationCommentPage>, Status> {
+        Ok(Response::new(
+            self.domain
+                .list_moderation(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
+    async fn review(
+        &self,
+        request: Request<pb::ReviewCommentRequest>,
+    ) -> Result<Response<pb::ReviewCommentResult>, Status> {
+        Ok(Response::new(
+            self.domain
+                .review(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
+    async fn report(
+        &self,
+        request: Request<pb::CreateCommentReportRequest>,
+    ) -> Result<Response<pb::CommentReport>, Status> {
+        Ok(Response::new(
+            self.domain
+                .report(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
+    async fn list_reports(
+        &self,
+        request: Request<pb::ListCommentReportsRequest>,
+    ) -> Result<Response<pb::CommentReportPage>, Status> {
+        Ok(Response::new(
+            self.domain
+                .list_reports(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
+    async fn review_report(
+        &self,
+        request: Request<pb::ReviewCommentReportRequest>,
+    ) -> Result<Response<pb::CommentReport>, Status> {
+        Ok(Response::new(
+            self.domain
+                .review_report(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
+    async fn appeal(
+        &self,
+        request: Request<pb::CreateCommentAppealRequest>,
+    ) -> Result<Response<pb::CommentAppeal>, Status> {
+        Ok(Response::new(
+            self.domain
+                .appeal(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
+    async fn list_appeals(
+        &self,
+        request: Request<pb::ListCommentAppealsRequest>,
+    ) -> Result<Response<pb::CommentAppealPage>, Status> {
+        Ok(Response::new(
+            self.domain
+                .list_appeals(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
+    async fn review_appeal(
+        &self,
+        request: Request<pb::ReviewCommentAppealRequest>,
+    ) -> Result<Response<pb::CommentAppeal>, Status> {
+        Ok(Response::new(
+            self.domain
+                .review_appeal(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
     }
 }
 
@@ -82,10 +160,6 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .await
 }
 
-fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, Status> {
-    serde_json::from_str(value).map_err(|error| Status::invalid_argument(error.to_string()))
-}
-
 fn internal_error(error: crate::domain::CommentError) -> Status {
     let message = error.to_string();
     match error {
@@ -94,29 +168,28 @@ fn internal_error(error: crate::domain::CommentError) -> Status {
             crate::datasource::RepositoryError::ReplyDepthExceeded,
         ) => Status::invalid_argument(message),
         crate::domain::CommentError::Repository(
-            crate::datasource::RepositoryError::ParentNotFound(_),
+            crate::datasource::RepositoryError::ParentNotFound(_)
+            | crate::datasource::RepositoryError::NotFound(_)
+            | crate::datasource::RepositoryError::ReportNotFound(_)
+            | crate::datasource::RepositoryError::AppealNotFound(_),
         ) => Status::not_found(message),
-        crate::domain::CommentError::Repository(crate::datasource::RepositoryError::NotFound(
-            _,
-        )) => Status::not_found(message),
         crate::domain::CommentError::Repository(
-            crate::datasource::RepositoryError::IdempotencyConflict,
+            crate::datasource::RepositoryError::IdempotencyConflict
+            | crate::datasource::RepositoryError::ReportIdempotencyConflict
+            | crate::datasource::RepositoryError::AppealIdempotencyConflict,
         ) => Status::already_exists(message),
-        crate::domain::CommentError::Repository(crate::datasource::RepositoryError::Database(
-            _,
-        )) => Status::internal(message),
         crate::domain::CommentError::Repository(
-            crate::datasource::RepositoryError::InvalidModerationState(_),
-        )
-        | crate::domain::CommentError::Repository(
-            crate::datasource::RepositoryError::InvalidReplyHierarchy,
-        ) => Status::internal(message),
+            crate::datasource::RepositoryError::ModerationConflict
+            | crate::datasource::RepositoryError::ReportConflict
+            | crate::datasource::RepositoryError::AppealConflict,
+        ) => Status::aborted(message),
+        crate::domain::CommentError::Repository(crate::datasource::RepositoryError::SelfReport) => {
+            Status::permission_denied(message)
+        }
+        crate::domain::CommentError::Repository(
+            crate::datasource::RepositoryError::NotReportable(_)
+            | crate::datasource::RepositoryError::ActionConflict,
+        ) => Status::failed_precondition(message),
+        crate::domain::CommentError::Repository(_) => Status::internal(message),
     }
-}
-
-fn json_response<T: Serialize>(value: &T) -> Result<Response<pb::JsonResponse>, Status> {
-    Ok(Response::new(pb::JsonResponse {
-        response_json: serde_json::to_string(value)
-            .map_err(|error| Status::internal(error.to_string()))?,
-    }))
 }

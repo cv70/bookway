@@ -1,4 +1,4 @@
-import { BookOpenText, Route, X } from 'lucide-react-native';
+import { BookOpenText, Route, Video, X } from 'lucide-react-native';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { colors } from '../theme';
@@ -8,9 +8,10 @@ type Props = {
   onClose: () => void;
   onCreateEntry: () => void;
   onCreateJourney: () => void;
+  onCreatePost: () => void;
 };
 
-export function CreateMenuModal({ visible, onClose, onCreateEntry, onCreateJourney }: Props) {
+export function CreateMenuModal({ visible, onClose, onCreateEntry, onCreateJourney, onCreatePost }: Props) {
   return (
     <Modal animationType="fade" onRequestClose={onClose} transparent visible={visible}>
       <View style={styles.overlay}>
@@ -24,6 +25,10 @@ export function CreateMenuModal({ visible, onClose, onCreateEntry, onCreateJourn
           <Pressable onPress={onCreateJourney} style={({ pressed }) => [styles.option, pressed && styles.pressed]}>
             <View style={[styles.optionIcon, styles.routeIcon]}><Route color={colors.blue} size={21} /></View>
             <View style={styles.copy}><Text style={styles.optionTitle}>创建路线</Text><Text style={styles.optionText}>从一条可执行的长期计划开始</Text></View>
+          </Pressable>
+          <Pressable onPress={onCreatePost} style={({ pressed }) => [styles.option, pressed && styles.pressed]}>
+            <View style={[styles.optionIcon, styles.postIcon]}><Video color={colors.coral} size={21} /></View>
+            <View style={styles.copy}><Text style={styles.optionTitle}>发布心得或视频</Text><Text style={styles.optionText}>分享可被他人实践的方法与过程</Text></View>
           </Pressable>
         </View>
       </View>
@@ -41,6 +46,7 @@ const styles = StyleSheet.create({
   optionIcon: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 7 },
   entryIcon: { backgroundColor: colors.evergreenSoft },
   routeIcon: { backgroundColor: colors.blueSoft },
+  postIcon: { backgroundColor: colors.coralSoft },
   copy: { flex: 1, minWidth: 0 },
   optionTitle: { color: colors.ink, fontSize: 15, fontWeight: '700', letterSpacing: 0 },
   optionText: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 3, letterSpacing: 0 },

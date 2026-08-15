@@ -3,7 +3,9 @@ owner: data-platform
 kind: dual-http-grpc-event-service
 port: 8089
 healthcheck: /health
-dependencies: []
+dependencies:
+  - bookway-recommend-main
+  - bookway-search-main
 contracts:
   - src/api/pb/server.proto
 events:

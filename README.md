@@ -835,6 +835,7 @@ flowchart TB
 首版服务自治方式拆分：
 
 - `gateway`：8080，App 唯一入口，鉴权、聚合、限流、CORS 和对外版本化 REST。
+- `account`：8094，持有可编辑的公开资料；身份凭证仍由 Gateway 验证，不与资料数据混存。
 - `growth`：8081，私人成长核心，包括路线、行动、今日清单、行动留痕和周回望。
 - `bbs`：8082，只持有关注、拉黑、静音和社交图谱。
 - `recommend-main`：8083，负责 Query Hydration、候选源、补全、过滤、意图评分、多样性选择和曝光副作用。
@@ -985,6 +986,7 @@ erDiagram
 | --- | --- |
 | `users` | `id`, `auth_state`, `created_at`, `deleted_at` |
 | `profiles` | `user_id`, `display_name`, `timezone`, `locale`, `week_starts_on` |
+| `account_profiles` | `user_id`, `display_name`, `avatar_url`, `bio`, `updated_at` |
 | `journeys` | `id`, `user_id`, `domain`, `type`, `title`, `intent`, `status`, `start_on`, `end_on`, `completion_rule`, `version` |
 | `stages` | `id`, `journey_id`, `title`, `position`, `start_on`, `end_on`, `status` |
 | `action_plans` | `id`, `journey_id`, `stage_id`, `title`, `metric_type`, `target_value`, `schedule_rule`, `light_version`, `active` |
@@ -1144,7 +1146,7 @@ DELETE /v1/account
 | 创作者服务 | 付费路线分成、会员社群、数据工具和品牌合作撮合 |
 | 品牌与本地服务 | 与路线情境匹配、显著标识且可关闭的广告或交易佣金 |
 
-定价不在开发前拍脑袋确定。先通过用户访谈和付费意向页验证“高级回顾”“AI 规划”“专业路线”三个价值点，再开展 A/B 实验。首发 MVP 不需要接入支付。
+定价不在开发前拍脑袋确定。先通过用户访谈和付费意向页验证“高级回顾”“AI 规划”“专业路线”三个价值点，再开展 A/B 实验。当前后端已具备广告、商品目录、订单和库存预占边界，并由独立 Worker 回收过期订单和库存预占；仍不提供面向客户端的“直接支付成功”接口。支付渠道回调必须经受服务令牌保护的 `mall-order` 内部契约完成核验后再结算，且同一 provider 流水号只能结算一个订单。
 
 商业化顺序建议为 `Plus 订阅 → 专业路线 / 创作者分成 → 场景化品牌合作 → 本地服务交易`。早期不投放信息流广告；只有推荐质量、品牌安全、转化归因和用户控制都成熟后才开放。达到大规模后，广告可能成为重要收入，但不能反向把产品优化目标变为纯停留时长。
 

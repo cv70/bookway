@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-bookway-bbs-link.workspace = true
+bookway-bbs-link-api.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
 futures.workspace = true

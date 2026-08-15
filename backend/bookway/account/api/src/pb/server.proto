@@ -1,0 +1,25 @@
+syntax = "proto3";
+package bookway.account;
+
+message ProfileRequest { string user_id = 1; }
+
+message UpdateProfileRequest {
+  string user_id = 1;
+  optional string display_name = 2;
+  optional string avatar_url = 3;
+  optional string bio = 4;
+}
+
+message AccountProfile {
+  string user_id = 1;
+  string display_name = 2;
+  string avatar_url = 3;
+  string bio = 4;
+  string created_at = 5;
+  string updated_at = 6;
+}
+
+service Account {
+  rpc Profile(ProfileRequest) returns (AccountProfile);
+  rpc UpdateProfile(UpdateProfileRequest) returns (AccountProfile);
+}

@@ -1,0 +1,160 @@
+syntax = "proto3";
+package bookway.bbs.message;
+
+enum DirectMessageKind {
+  DIRECT_MESSAGE_KIND_TEXT = 0;
+}
+
+enum DirectMessageReportReason {
+  DIRECT_MESSAGE_REPORT_REASON_SPAM = 0;
+  DIRECT_MESSAGE_REPORT_REASON_HARASSMENT = 1;
+  DIRECT_MESSAGE_REPORT_REASON_UNSAFE = 2;
+  DIRECT_MESSAGE_REPORT_REASON_FRAUD = 3;
+  DIRECT_MESSAGE_REPORT_REASON_PRIVACY = 4;
+  DIRECT_MESSAGE_REPORT_REASON_OTHER = 5;
+}
+
+enum DirectMessageReportStatus {
+  DIRECT_MESSAGE_REPORT_STATUS_PENDING = 0;
+  DIRECT_MESSAGE_REPORT_STATUS_REVIEWING = 1;
+  DIRECT_MESSAGE_REPORT_STATUS_RESOLVED = 2;
+  DIRECT_MESSAGE_REPORT_STATUS_REJECTED = 3;
+}
+
+enum DirectMessageModerationAction {
+  DIRECT_MESSAGE_MODERATION_ACTION_NO_ACTION = 0;
+  DIRECT_MESSAGE_MODERATION_ACTION_RESTRICT_SENDER = 1;
+}
+
+message DirectMessage {
+  string id = 1;
+  string conversation_id = 2;
+  string sender_user_id = 3;
+  string recipient_user_id = 4;
+  DirectMessageKind kind = 5;
+  string body = 6;
+  string created_at = 7;
+  optional string read_at = 8;
+}
+
+message Conversation {
+  string id = 1;
+  string peer_user_id = 2;
+  string last_message_preview = 3;
+  string last_message_at = 4;
+  uint64 unread_count = 5;
+}
+
+message DirectMessagePreferences {
+  string user_id = 1;
+  bool allow_direct_messages = 2;
+  string updated_at = 3;
+}
+
+message SendDirectMessageRequest {
+  string sender_user_id = 1;
+  string recipient_user_id = 2;
+  string client_message_id = 3;
+  DirectMessageKind kind = 4;
+  string body = 5;
+}
+
+message ConversationRequest {
+  string user_id = 1;
+  string conversation_id = 2;
+}
+
+message UserRequest { string user_id = 1; }
+
+message ListConversationsRequest {
+  string user_id = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+}
+
+message ConversationPage {
+  repeated Conversation items = 1;
+  optional string next_cursor = 2;
+}
+
+message ListMessagesRequest {
+  string user_id = 1;
+  string conversation_id = 2;
+  optional string cursor = 3;
+  optional uint32 limit = 4;
+}
+
+message DirectMessagePage {
+  repeated DirectMessage items = 1;
+  optional string next_cursor = 2;
+}
+
+message MarkConversationReadRequest {
+  string user_id = 1;
+  string conversation_id = 2;
+  optional string through_message_id = 3;
+}
+
+message MarkConversationReadResponse {
+  uint64 marked_count = 1;
+  string read_at = 2;
+}
+
+message UpdateDirectMessagePreferencesRequest {
+  string user_id = 1;
+  bool allow_direct_messages = 2;
+}
+
+message ReportDirectMessageRequest {
+  string reporter_user_id = 1;
+  string message_id = 2;
+  optional string idempotency_key = 3;
+  DirectMessageReportReason reason = 4;
+  string details = 5;
+}
+
+message DirectMessageReport {
+  string id = 1;
+  string reporter_user_id = 2;
+  string reported_user_id = 3;
+  DirectMessage reported_message = 4;
+  DirectMessageReportReason reason = 5;
+  string details = 6;
+  DirectMessageReportStatus status = 7;
+  optional string reviewer_user_id = 8;
+  optional string resolution = 9;
+  DirectMessageModerationAction action = 10;
+  string created_at = 11;
+  string updated_at = 12;
+}
+
+message ListDirectMessageReportsRequest {
+  optional DirectMessageReportStatus status = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+}
+
+message DirectMessageReportPage {
+  repeated DirectMessageReport items = 1;
+  optional string next_cursor = 2;
+}
+
+message ReviewDirectMessageReportRequest {
+  string reviewer_user_id = 1;
+  string report_id = 2;
+  DirectMessageReportStatus status = 3;
+  string resolution = 4;
+  DirectMessageModerationAction action = 5;
+}
+
+service BbsMessage {
+  rpc Send(SendDirectMessageRequest) returns (DirectMessage);
+  rpc ListConversations(ListConversationsRequest) returns (ConversationPage);
+  rpc ListMessages(ListMessagesRequest) returns (DirectMessagePage);
+  rpc MarkConversationRead(MarkConversationReadRequest) returns (MarkConversationReadResponse);
+  rpc GetPreferences(UserRequest) returns (DirectMessagePreferences);
+  rpc UpdatePreferences(UpdateDirectMessagePreferencesRequest) returns (DirectMessagePreferences);
+  rpc Report(ReportDirectMessageRequest) returns (DirectMessageReport);
+  rpc ListReports(ListDirectMessageReportsRequest) returns (DirectMessageReportPage);
+  rpc ReviewReport(ReviewDirectMessageReportRequest) returns (DirectMessageReport);
+}

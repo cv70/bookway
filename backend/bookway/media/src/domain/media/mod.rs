@@ -1,15 +1,19 @@
+use std::collections::HashSet;
+
 use uuid::Uuid;
 
-use crate::api::{MediaResponse, UploadRequest, UploadResponse};
-use crate::datasource::NewMedia;
-use crate::domain::{Domain, MediaError};
+use crate::{
+    api::pb,
+    datasource::{NewMedia, RepositoryError},
+    domain::{Domain, MediaError},
+};
 
 impl Domain {
     pub(crate) async fn create_upload(
         &self,
-        owner: &str,
-        request: UploadRequest,
-    ) -> Result<UploadResponse, MediaError> {
+        request: pb::CreateUploadRequest,
+    ) -> Result<pb::UploadResponse, MediaError> {
+        let owner = &request.user_id;
         if request.size_bytes == 0 || request.size_bytes > 512 * 1024 * 1024 {
             return Err(MediaError::Validation(
                 "文件大小必须在 1B 到 512MB 之间".to_string(),
@@ -35,7 +39,7 @@ impl Domain {
                 cdn_url: cdn_url.clone(),
             })
             .await?;
-        Ok(UploadResponse {
+        Ok(pb::UploadResponse {
             id,
             upload_url: self.objects.presign_put(&object_key),
             object_key,
@@ -48,7 +52,7 @@ impl Domain {
         owner: &str,
         id: &str,
         body: axum::body::Bytes,
-    ) -> Result<MediaResponse, MediaError> {
+    ) -> Result<pb::MediaResource, MediaError> {
         if !self.proxy_upload {
             return Err(MediaError::Forbidden);
         }
@@ -59,14 +63,28 @@ impl Domain {
         self.objects
             .upload(&media.object_key, &media.mime_type, body)
             .await?;
-        Ok(self.repository.mark_ready(id).await?)
+        // Byte presence and declared metadata are checked synchronously. The
+        // asset cannot be attached to content until the durable processor has
+        // finished its additional integrity/audit pass.
+        Ok(self.repository.mark_processing(id).await?)
     }
     pub(crate) async fn complete_upload(
         &self,
-        owner: &str,
-        id: &str,
-    ) -> Result<MediaResponse, MediaError> {
-        let media = self.repository.pending(id, owner).await?;
+        request: pb::ResourceRequest,
+    ) -> Result<pb::MediaResource, MediaError> {
+        let owner = &request.user_id;
+        let id = &request.id;
+        let media = match self.repository.pending(id, owner).await {
+            Ok(media) => media,
+            Err(RepositoryError::NotFound) => {
+                // Completion can be retried after a timeout. Once ownership
+                // has been established by `get`, returning the existing
+                // terminal/intermediate state is safer than creating a
+                // second processing job or falsely reporting a missing file.
+                return Ok(self.repository.owned(id, owner).await?);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let Some(metadata) = self.objects.metadata(&media.object_key).await? else {
             return Err(MediaError::Validation("对象尚未上传完成".to_string()));
         };
@@ -83,9 +101,45 @@ impl Domain {
                 metadata.mime_type.as_deref().unwrap_or("unknown")
             )));
         }
-        Ok(self.repository.mark_ready(id).await?)
+        Ok(self.repository.mark_processing(id).await?)
     }
-    pub(crate) async fn get(&self, owner: &str, id: &str) -> Result<MediaResponse, MediaError> {
-        Ok(self.repository.get(id, owner).await?)
+    pub(crate) async fn get(
+        &self,
+        request: pb::ResourceRequest,
+    ) -> Result<pb::MediaResource, MediaError> {
+        Ok(self.repository.get(&request.id, &request.user_id).await?)
+    }
+
+    pub(crate) async fn owned_ready_batch(
+        &self,
+        request: pb::OwnedReadyMediaRequest,
+    ) -> Result<pb::OwnedReadyMediaResponse, MediaError> {
+        if request.user_id.trim().is_empty() {
+            return Err(MediaError::Validation("媒体所有者不能为空".to_string()));
+        }
+        if request.ids.is_empty() || request.ids.len() > 12 {
+            return Err(MediaError::Validation(
+                "一次只能校验 1 到 12 个媒体资源".to_string(),
+            ));
+        }
+        let mut seen = HashSet::with_capacity(request.ids.len());
+        let ids = request
+            .ids
+            .iter()
+            .map(|value| value.trim().to_string())
+            .map(|id| {
+                if Uuid::parse_str(&id).is_err() || !seen.insert(id.clone()) {
+                    Err(MediaError::Validation("媒体资源 ID 无效或重复".to_string()))
+                } else {
+                    Ok(id)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(pb::OwnedReadyMediaResponse {
+            items: self
+                .repository
+                .owned_ready_batch(request.user_id.trim(), &ids)
+                .await?,
+        })
     }
 }

@@ -1,0 +1,22 @@
+syntax = "proto3";
+package bookway.search.main;
+
+import "bbs-search/api/src/pb/server.proto";
+
+message SearchAttribution {
+  string request_id = 1;
+  string session_id = 2;
+  string result_id = 3;
+  uint32 position = 4;
+}
+message ValidateSearchAttributionsRequest {
+  string user_id = 1;
+  repeated SearchAttribution attributions = 2;
+}
+message ValidateSearchAttributionsResponse { repeated bool valid = 1; }
+
+service SearchMain {
+  rpc Search(bookway.bbs.search.SearchRequest) returns (bookway.bbs.search.SearchResponse);
+  rpc Suggestions(bookway.bbs.search.SuggestionsRequest) returns (bookway.bbs.search.SuggestionsResponse);
+  rpc ValidateAttributions(ValidateSearchAttributionsRequest) returns (ValidateSearchAttributionsResponse);
+}

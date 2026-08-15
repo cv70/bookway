@@ -1,38 +1,28 @@
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
+use url::Url;
 use uuid::Uuid;
 
-use crate::api::{
-    ActionDto, ActionRecurrenceDto, ActionRecurrenceFrequencyDto, ActionStateDto,
-    CompanionBriefDto, CompanionModeDto, CreateActionRequest, CreateGrowthEntryRequest,
-    CreateJourneyRequest, CreateJourneyStageRequest, CreateKnowledgeResourceRequest,
-    CreateUserNotificationRequest, GrowthDomainDto, GrowthEntryDto, JourneyDetailDto, JourneyDto,
-    JourneyStageDto, JourneyStatusDto, JourneyTypeDto, KnowledgeQueryRequest, KnowledgeResourceDto,
-    NotificationPageDto, NotificationQueryRequest, PushDeviceDto, RegisterPushDeviceRequest,
-    ReminderPreferencesDto, ReviewActionPatchDto, ReviewAdjustmentKindDto,
-    ReviewAdjustmentSuggestionDto, ReviewDomainProgressDto, ReviewJourneyPatchDto,
-    RouteParticipationIntentDto, TodayDto, UpdateActionRequest, UpdateJourneyRequest,
-    UpdateKnowledgeResourceRequest, UpdateReminderPreferencesRequest, UserNotificationDto,
-    WeekdayDto, WeeklyReviewDto,
-};
+use crate::api::pb;
 use crate::domain::{Domain, GrowthError};
 
 impl Domain {
     pub(crate) async fn list_journeys(
         &self,
         user_id: &str,
-    ) -> Result<Vec<JourneyDto>, GrowthError> {
+    ) -> Result<Vec<pb::Journey>, GrowthError> {
         Ok(self.repository.list_journeys(user_id).await?)
     }
 
     pub(crate) async fn create_journey(
         &self,
         user_id: &str,
-        request: CreateJourneyRequest,
-    ) -> Result<JourneyDto, GrowthError> {
+        mut request: pb::CreateJourneyRequest,
+    ) -> Result<pb::Journey, GrowthError> {
+        let idempotency_key = normalize_idempotency_key(request.idempotency_key.take())?;
         let (journey, first_action) = build_journey(request)?;
         Ok(self
             .repository
-            .create_journey(user_id, journey, first_action)
+            .create_journey(user_id, journey, first_action, idempotency_key)
             .await?)
     }
 
@@ -40,13 +30,20 @@ impl Domain {
         &self,
         user_id: &str,
         source_route_id: &str,
-        request: CreateJourneyRequest,
-    ) -> Result<JourneyDto, GrowthError> {
+        request: pb::CreateJourneyRequest,
+        additional_actions: Vec<pb::RouteActionTemplate>,
+    ) -> Result<pb::Journey, GrowthError> {
         validate_identifier("来源路线 ID", source_route_id)?;
         let (journey, first_action) = build_journey(request)?;
+        let mut actions = vec![first_action];
+        actions.extend(build_route_actions(
+            &journey.id,
+            &journey.stages,
+            additional_actions,
+        )?);
         Ok(self
             .repository
-            .create_route_journey(user_id, source_route_id, journey, first_action)
+            .create_route_journey(user_id, source_route_id, journey, actions)
             .await?)
     }
 
@@ -56,7 +53,7 @@ impl Domain {
         route_id: &str,
         active: bool,
         private_journey_id: Option<String>,
-    ) -> Result<RouteParticipationIntentDto, GrowthError> {
+    ) -> Result<pb::RouteParticipationIntent, GrowthError> {
         validate_identifier("路线 ID", route_id)?;
         if let Some(journey_id) = private_journey_id.as_deref() {
             validate_identifier("私人路线 ID", journey_id)?;
@@ -76,7 +73,7 @@ impl Domain {
         &self,
         user_id: &str,
         journey_id: &str,
-    ) -> Result<JourneyDetailDto, GrowthError> {
+    ) -> Result<pb::JourneyDetail, GrowthError> {
         Ok(self.repository.get_journey(user_id, journey_id).await?)
     }
 
@@ -84,8 +81,8 @@ impl Domain {
         &self,
         user_id: &str,
         journey_id: &str,
-        request: UpdateJourneyRequest,
-    ) -> Result<JourneyDto, GrowthError> {
+        request: pb::UpdateJourneyRequest,
+    ) -> Result<pb::Journey, GrowthError> {
         validate_journey_update(&request)?;
         Ok(self
             .repository
@@ -96,8 +93,9 @@ impl Domain {
     pub(crate) async fn create_action(
         &self,
         user_id: &str,
-        mut request: CreateActionRequest,
-    ) -> Result<ActionDto, GrowthError> {
+        mut request: pb::CreateActionRequest,
+    ) -> Result<pb::Action, GrowthError> {
+        let idempotency_key = normalize_idempotency_key(request.idempotency_key.take())?;
         validate_action(
             &request.title,
             request.estimated_minutes,
@@ -109,13 +107,18 @@ impl Domain {
             .repository
             .get_journey(user_id, &request.journey_id)
             .await?;
-        validate_action_stage(request.stage_id.as_deref(), &journey.journey.stages)?;
+        let stages = journey
+            .journey
+            .as_ref()
+            .map(|journey| journey.stages.as_slice())
+            .ok_or_else(|| GrowthError::Validation("路线数据不完整".to_string()))?;
+        validate_action_stage(request.stage_id.as_deref(), stages)?;
         request.recurrence = normalize_recurrence(
             request.recurrence,
             scheduled_for.as_deref(),
             scheduled_timezone.as_deref(),
         )?;
-        let action = ActionDto {
+        let action = pb::Action {
             id: Uuid::now_v7().to_string(),
             journey_id: request.journey_id,
             stage_id: request.stage_id.map(|value| value.trim().to_string()),
@@ -126,9 +129,12 @@ impl Domain {
             scheduled_for,
             scheduled_timezone,
             recurrence: request.recurrence,
-            state: ActionStateDto::Pending,
+            state: pb::ActionState::Pending as i32,
         };
-        Ok(self.repository.create_action(user_id, action).await?)
+        Ok(self
+            .repository
+            .create_action(user_id, action, idempotency_key)
+            .await?)
     }
 
     pub(crate) async fn today_for(
@@ -136,7 +142,7 @@ impl Domain {
         user_id: &str,
         local_date: Option<&str>,
         timezone: Option<&str>,
-    ) -> Result<TodayDto, GrowthError> {
+    ) -> Result<pb::TodaySummary, GrowthError> {
         let schedule_context = schedule_context(local_date, timezone)?;
         let actions = self
             .repository
@@ -144,16 +150,16 @@ impl Domain {
             .await?;
         let completed = actions
             .iter()
-            .filter(|action| action.state == ActionStateDto::Completed)
+            .filter(|action| action.state == pb::ActionState::Completed as i32)
             .count();
         let focus_minutes = actions
             .iter()
-            .filter(|action| action.state == ActionStateDto::Completed)
-            .map(|action| u32::from(action.estimated_minutes))
+            .filter(|action| action.state == pb::ActionState::Completed as i32)
+            .map(|action| action.estimated_minutes)
             .sum();
-        Ok(TodayDto {
-            completed,
-            total: actions.len(),
+        Ok(pb::TodaySummary {
+            completed: count_u32(completed),
+            total: count_u32(actions.len()),
             focus_minutes,
             actions,
         })
@@ -163,16 +169,32 @@ impl Domain {
         &self,
         user_id: &str,
         action_id: &str,
-    ) -> Result<ActionDto, GrowthError> {
-        Ok(self.repository.complete_action(user_id, action_id).await?)
+    ) -> Result<pb::CompleteActionResponse, GrowthError> {
+        let action = self.repository.complete_action(user_id, action_id).await?;
+        let source_route_id = self
+            .repository
+            .source_route_id_for_journey(user_id, &action.journey_id)
+            .await?;
+        let source_knowledge_content_id = if source_route_id.is_none() {
+            self.repository
+                .source_knowledge_content_id_for_journey(user_id, &action.journey_id)
+                .await?
+        } else {
+            None
+        };
+        Ok(pb::CompleteActionResponse {
+            action: Some(action),
+            source_route_id,
+            source_knowledge_content_id,
+        })
     }
 
     pub(crate) async fn update_action(
         &self,
         user_id: &str,
         action_id: &str,
-        mut request: UpdateActionRequest,
-    ) -> Result<ActionDto, GrowthError> {
+        mut request: pb::UpdateActionRequest,
+    ) -> Result<pb::Action, GrowthError> {
         if let Some(title) = &request.title
             && title.trim().is_empty()
         {
@@ -192,7 +214,7 @@ impl Domain {
         {
             return Err(GrowthError::Validation("安排时间不能为空".to_string()));
         }
-        if request.state == Some(ActionStateDto::Completed) {
+        if request.state == Some(pb::ActionState::Completed as i32) {
             return Err(GrowthError::Validation(
                 "请使用完成行动接口，以便保留重复计划的下一次安排".to_string(),
             ));
@@ -212,15 +234,15 @@ impl Domain {
     pub(crate) async fn reminder_preferences(
         &self,
         user_id: &str,
-    ) -> Result<ReminderPreferencesDto, GrowthError> {
+    ) -> Result<pb::ReminderPreference, GrowthError> {
         Ok(self.repository.reminder_preferences(user_id).await?)
     }
 
     pub(crate) async fn update_reminder_preferences(
         &self,
         user_id: &str,
-        mut request: UpdateReminderPreferencesRequest,
-    ) -> Result<ReminderPreferencesDto, GrowthError> {
+        mut request: pb::UpdateReminderPreferencesRequest,
+    ) -> Result<pb::ReminderPreference, GrowthError> {
         validate_reminder_preferences(&request)?;
         request.timezone = request.timezone.trim().to_string();
         request.quiet_hours_start = request
@@ -238,8 +260,8 @@ impl Domain {
     pub(crate) async fn register_push_device(
         &self,
         user_id: &str,
-        mut request: RegisterPushDeviceRequest,
-    ) -> Result<PushDeviceDto, GrowthError> {
+        mut request: pb::RegisterPushDeviceRequest,
+    ) -> Result<pb::PushDevice, GrowthError> {
         validate_identifier("设备 ID", &request.device_id)?;
         validate_text(&request.endpoint, 1, 4_096, "推送地址")?;
         request.device_id = request.device_id.trim().to_string();
@@ -265,8 +287,8 @@ impl Domain {
     pub(crate) async fn list_notifications(
         &self,
         user_id: &str,
-        mut request: NotificationQueryRequest,
-    ) -> Result<NotificationPageDto, GrowthError> {
+        mut request: pb::NotificationQueryRequest,
+    ) -> Result<pb::NotificationPage, GrowthError> {
         request.cursor = normalize_notification_cursor(request.cursor)?;
         Ok(self.repository.list_notifications(user_id, request).await?)
     }
@@ -274,8 +296,8 @@ impl Domain {
     pub(crate) async fn create_notification(
         &self,
         user_id: &str,
-        mut request: CreateUserNotificationRequest,
-    ) -> Result<UserNotificationDto, GrowthError> {
+        mut request: pb::CreateNotificationRequest,
+    ) -> Result<pb::UserNotification, GrowthError> {
         validate_identifier("通知接收者 ID", user_id)?;
         validate_notification(&request)?;
         request.source_id = request.source_id.trim().to_string();
@@ -291,7 +313,7 @@ impl Domain {
         &self,
         user_id: &str,
         notification_id: &str,
-    ) -> Result<UserNotificationDto, GrowthError> {
+    ) -> Result<pb::UserNotification, GrowthError> {
         Uuid::parse_str(notification_id)
             .map_err(|_| GrowthError::Validation("通知 ID 格式不正确".to_string()))?;
         Ok(self
@@ -303,17 +325,23 @@ impl Domain {
     pub(crate) async fn list_entries(
         &self,
         user_id: &str,
-    ) -> Result<Vec<GrowthEntryDto>, GrowthError> {
+    ) -> Result<Vec<pb::GrowthEntry>, GrowthError> {
         Ok(self.repository.list_entries(user_id).await?)
     }
 
     pub(crate) async fn create_entry(
         &self,
         user_id: &str,
-        request: CreateGrowthEntryRequest,
-    ) -> Result<GrowthEntryDto, GrowthError> {
+        mut request: pb::CreateEntryRequest,
+    ) -> Result<pb::GrowthEntry, GrowthError> {
+        let idempotency_key = normalize_idempotency_key(request.idempotency_key.take())?;
         validate_entry(&request)?;
-        let entry = GrowthEntryDto {
+        let publication_status = if request.published {
+            pb::EntryPublicationStatus::Pending as i32
+        } else {
+            pb::EntryPublicationStatus::Private as i32
+        };
+        let entry = pb::GrowthEntry {
             id: Uuid::now_v7().to_string(),
             action_id: request.action_id,
             journey_id: request.journey_id,
@@ -322,27 +350,52 @@ impl Domain {
             duration_minutes: request.duration_minutes,
             quantity: trimmed_option(request.quantity),
             location: trimmed_option(request.location),
-            photo_url: trimmed_option(request.photo_url),
+            // Raw URLs cannot safely be carried into the public travelogue
+            // pipeline. A Media asset ID is validated by BBS Link at attach
+            // time with the entry author's identity.
+            photo_url: None,
+            photo_media_id: trimmed_option(request.photo_media_id),
             created_at: now_rfc3339(),
-            published: request.published,
+            // A public request is only intent. The durable publication worker
+            // changes this after content review returns a terminal status.
+            published: false,
+            publication_status,
+            public_content_id: None,
+            publication_error: None,
         };
-        Ok(self.repository.create_entry(user_id, entry).await?)
+        Ok(self
+            .repository
+            .create_entry(user_id, entry, idempotency_key)
+            .await?)
+    }
+
+    pub(crate) async fn retry_entry_publication(
+        &self,
+        user_id: &str,
+        entry_id: &str,
+    ) -> Result<pb::GrowthEntry, GrowthError> {
+        Uuid::parse_str(entry_id)
+            .map_err(|_| GrowthError::Validation("记录 ID 格式不正确".to_string()))?;
+        Ok(self
+            .repository
+            .retry_entry_publication(user_id, entry_id)
+            .await?)
     }
 
     pub(crate) async fn weekly_review(
         &self,
         user_id: &str,
-    ) -> Result<WeeklyReviewDto, GrowthError> {
+    ) -> Result<pb::WeeklyReviewSummary, GrowthError> {
         let snapshot = self.repository.review_snapshot(user_id).await?;
         let completed_actions = snapshot
             .actions
             .iter()
-            .filter(|action| action.state == ActionStateDto::Completed)
+            .filter(|action| action.state == pb::ActionState::Completed as i32)
             .count();
         let skipped_actions = snapshot
             .actions
             .iter()
-            .filter(|action| action.state == ActionStateDto::Skipped)
+            .filter(|action| action.state == pb::ActionState::Skipped as i32)
             .count();
         let decided_actions = completed_actions + skipped_actions;
         let completion_rate = if decided_actions == 0 {
@@ -354,7 +407,6 @@ impl Domain {
             .entries
             .iter()
             .filter_map(|entry| entry.duration_minutes)
-            .map(u32::from)
             .sum();
         let focus_minutes = if recorded_minutes > 0 {
             recorded_minutes
@@ -362,8 +414,8 @@ impl Domain {
             snapshot
                 .actions
                 .iter()
-                .filter(|action| action.state == ActionStateDto::Completed)
-                .map(|action| u32::from(action.estimated_minutes))
+                .filter(|action| action.state == pb::ActionState::Completed as i32)
+                .map(|action| action.estimated_minutes)
                 .sum()
         };
         let journey_domains = snapshot
@@ -371,22 +423,22 @@ impl Domain {
             .iter()
             .map(|journey| (journey.id.as_str(), journey.domain))
             .collect::<std::collections::HashMap<_, _>>();
-        let mut domains = std::collections::HashMap::<GrowthDomainDto, (usize, usize)>::new();
+        let mut domains = std::collections::HashMap::<i32, (usize, usize)>::new();
         for action in &snapshot.actions {
             let Some(domain) = journey_domains.get(action.journey_id.as_str()) else {
                 continue;
             };
             let counts = domains.entry(*domain).or_default();
             counts.1 += 1;
-            counts.0 += usize::from(action.state == ActionStateDto::Completed);
+            counts.0 += usize::from(action.state == pb::ActionState::Completed as i32);
         }
         let mut domains = domains
             .into_iter()
             .map(
-                |(domain, (completed_actions, total_actions))| ReviewDomainProgressDto {
+                |(domain, (completed_actions, total_actions))| pb::ReviewDomainProgress {
                     domain,
-                    completed_actions,
-                    total_actions,
+                    completed_actions: count_u32(completed_actions),
+                    total_actions: count_u32(total_actions),
                 },
             )
             .collect::<Vec<_>>();
@@ -405,18 +457,20 @@ impl Domain {
             completed_actions,
             skipped_actions,
         );
-        Ok(WeeklyReviewDto {
+        Ok(pb::WeeklyReviewSummary {
             period_start: week_start.to_string(),
             period_end: now.date().to_string(),
-            completed_actions,
-            skipped_actions,
+            completed_actions: count_u32(completed_actions),
+            skipped_actions: count_u32(skipped_actions),
             focus_minutes,
-            entry_count: snapshot.entries.len(),
+            entry_count: count_u32(snapshot.entries.len()),
             active_journeys: snapshot
                 .journeys
                 .iter()
-                .filter(|journey| journey.status == JourneyStatusDto::Active)
-                .count(),
+                .filter(|journey| journey.status == pb::JourneyStatus::Active as i32)
+                .count()
+                .try_into()
+                .unwrap_or(u32::MAX),
             completion_rate,
             domains,
             reflection_prompts: reflection_prompts(completion_rate, snapshot.entries.is_empty()),
@@ -429,7 +483,7 @@ impl Domain {
         user_id: &str,
         local_date: Option<&str>,
         timezone: Option<&str>,
-    ) -> Result<CompanionBriefDto, GrowthError> {
+    ) -> Result<pb::CompanionBrief, GrowthError> {
         let schedule_context = schedule_context(local_date, timezone)?;
         let (actions, snapshot) = tokio::try_join!(
             self.repository.today(user_id, schedule_context.local_date),
@@ -438,7 +492,7 @@ impl Domain {
         let active_journey_ids = snapshot
             .journeys
             .iter()
-            .filter(|journey| journey.status == JourneyStatusDto::Active)
+            .filter(|journey| journey.status == pb::JourneyStatus::Active as i32)
             .map(|journey| journey.id.as_str())
             .collect::<std::collections::HashSet<_>>();
         let active_journeys = active_journey_ids.len();
@@ -448,17 +502,17 @@ impl Domain {
             .collect::<Vec<_>>();
         let completed_actions = active_actions
             .iter()
-            .filter(|action| action.state == ActionStateDto::Completed)
+            .filter(|action| action.state == pb::ActionState::Completed as i32)
             .count();
         let skipped_actions = active_actions
             .iter()
-            .filter(|action| action.state == ActionStateDto::Skipped)
+            .filter(|action| action.state == pb::ActionState::Skipped as i32)
             .count();
         let overdue_action = snapshot
             .actions
             .iter()
             .filter(|action| active_journey_ids.contains(action.journey_id.as_str()))
-            .filter(|action| action.state == ActionStateDto::Pending)
+            .filter(|action| action.state == pb::ActionState::Pending as i32)
             .filter(|action| action_is_overdue(action))
             .min_by(|left, right| {
                 left.scheduled_for
@@ -470,7 +524,7 @@ impl Domain {
             active_actions
                 .iter()
                 .copied()
-                .filter(|action| action.state == ActionStateDto::Pending)
+                .filter(|action| action.state == pb::ActionState::Pending as i32)
                 .min_by(|left, right| {
                     left.estimated_minutes
                         .cmp(&right.estimated_minutes)
@@ -486,7 +540,7 @@ impl Domain {
             (Some(action), true) => {
                 let minutes = recovery_minutes(action.estimated_minutes);
                 (
-                        CompanionModeDto::StartSmall,
+                        pb::CompanionMode::StartSmall as i32,
                         format!("让「{}」重新变得可开始", action.title),
                         "这一步的原定时间已经过去，不需要补上它。先给自己一个足够轻的版本，再决定要不要继续。"
                             .to_string(),
@@ -498,7 +552,7 @@ impl Domain {
             (Some(action), false) if completed_actions == 0 && skipped_actions > 0 => {
                 let minutes = recovery_minutes(action.estimated_minutes);
                 (
-                    CompanionModeDto::StartSmall,
+                    pb::CompanionMode::StartSmall as i32,
                     format!("把「{}」缩小到 {minutes} 分钟", action.title),
                     "不需要补上错过的计划。只做一个足够轻的小版本，再决定要不要继续。".to_string(),
                     "你今天有已跳过的行动，因此优先选择了最短的待办作为恢复入口。".to_string(),
@@ -509,7 +563,7 @@ impl Domain {
             (Some(action), false) if completed_actions == 0 => {
                 let minutes = recovery_minutes(action.estimated_minutes);
                 (
-                    CompanionModeDto::StartSmall,
+                    pb::CompanionMode::StartSmall as i32,
                     format!("先给「{}」{minutes} 分钟", action.title),
                     "今天不必做完所有事。先让最小的一步发生，节奏会重新回来。".to_string(),
                     "它是当前待办中用时最短的一步，适合作为低压力的开始。".to_string(),
@@ -518,7 +572,7 @@ impl Domain {
                 )
             }
             (Some(action), false) => (
-                CompanionModeDto::KeepGoing,
+                pb::CompanionMode::KeepGoing as i32,
                 format!("下一步是「{}」", action.title),
                 "已经走出的每一步都会留下来。按原有节奏继续，或根据状态自行缩小它。".to_string(),
                 "你已经完成了今天的一部分行动，因此保留当前路线的下一步。".to_string(),
@@ -526,7 +580,7 @@ impl Domain {
                 "今天已经发生的什么，让接下来的行动更顺一点？".to_string(),
             ),
             (None, _) if completed_actions > 0 => (
-                CompanionModeDto::Celebrate,
+                pb::CompanionMode::Celebrate as i32,
                 "今天的行动已经告一段落".to_string(),
                 "不需要再追赶。若愿意，留下一句感受，让这次完成成为以后能看见的证据。".to_string(),
                 "今天没有待办行动，且已有完成记录。".to_string(),
@@ -534,7 +588,7 @@ impl Domain {
                 "今天哪一个瞬间，最值得被记住？".to_string(),
             ),
             (None, _) if active_journeys > 0 => (
-                CompanionModeDto::PlanNext,
+                pb::CompanionMode::PlanNext as i32,
                 "今天可以留一点空白".to_string(),
                 "你的路线仍在这里。想继续时，为它安排一个足够小、足够具体的下一步即可。"
                     .to_string(),
@@ -543,7 +597,7 @@ impl Domain {
                 "下一次行动，怎样安排才更符合现在的生活节奏？".to_string(),
             ),
             (None, _) => (
-                CompanionModeDto::PlanNext,
+                pb::CompanionMode::PlanNext as i32,
                 "从一个想靠近的方向开始".to_string(),
                 "不必一次规划很远。选择一条想尝试的路线，再为今天留下第一个小行动。".to_string(),
                 "你还没有进行中的路线或待办行动。".to_string(),
@@ -552,16 +606,16 @@ impl Domain {
             ),
         };
 
-        Ok(CompanionBriefDto {
+        Ok(pb::CompanionBrief {
             mode,
             headline,
             message,
             reason,
             suggested_action: pending_action,
             suggested_minutes,
-            completed_actions,
-            total_actions: active_actions.len(),
-            active_journeys,
+            completed_actions: count_u32(completed_actions),
+            total_actions: count_u32(active_actions.len()),
+            active_journeys: count_u32(active_journeys),
             reflection_prompt,
         })
     }
@@ -569,8 +623,8 @@ impl Domain {
     pub(crate) async fn list_knowledge(
         &self,
         user_id: &str,
-        mut query: KnowledgeQueryRequest,
-    ) -> Result<Vec<KnowledgeResourceDto>, GrowthError> {
+        mut query: pb::KnowledgeQueryRequest,
+    ) -> Result<Vec<pb::KnowledgeResource>, GrowthError> {
         query.q = normalize_query_filter(query.q, "检索词")?;
         query.tag = normalize_query_filter(query.tag, "标签")?;
         Ok(self.repository.list_knowledge(user_id, query).await?)
@@ -579,13 +633,13 @@ impl Domain {
     pub(crate) async fn create_knowledge(
         &self,
         user_id: &str,
-        request: CreateKnowledgeResourceRequest,
+        request: pb::CreateKnowledgeRequest,
         idempotency_key: Option<String>,
-    ) -> Result<KnowledgeResourceDto, GrowthError> {
+    ) -> Result<pb::KnowledgeResource, GrowthError> {
         validate_knowledge_create(&request)?;
         let idempotency_key = normalize_idempotency_key(idempotency_key)?;
         let now = now_rfc3339();
-        let resource = KnowledgeResourceDto {
+        let resource = pb::KnowledgeResource {
             id: Uuid::now_v7().to_string(),
             title: request.title.trim().to_string(),
             creator: request.creator.trim().to_string(),
@@ -603,6 +657,7 @@ impl Domain {
             created_at: now.clone(),
             updated_at: now,
             last_opened_at: None,
+            source_content_id: trimmed_option(request.source_content_id),
         };
         Ok(self
             .repository
@@ -610,25 +665,60 @@ impl Domain {
             .await?)
     }
 
+    pub(crate) async fn start_knowledge_journey(
+        &self,
+        user_id: &str,
+        resource_id: &str,
+        request: pb::StartKnowledgeJourneyRequest,
+    ) -> Result<pb::KnowledgeJourney, GrowthError> {
+        validate_identifier("知识资源 ID", resource_id)?;
+        let (journey, first_action) = build_journey(pb::CreateJourneyRequest {
+            user_id: user_id.to_string(),
+            title: request.title,
+            intent: request.intent,
+            domain: request.domain,
+            journey_type: request.journey_type,
+            completion_criteria: request.completion_criteria,
+            stages: request.stages,
+            duration_label: request.duration_label,
+            first_action_title: request.first_action_title,
+            first_action_detail: request.first_action_detail,
+            estimated_minutes: request.estimated_minutes,
+            first_action_scheduled_label: request.first_action_scheduled_label,
+            first_action_scheduled_for: request.first_action_scheduled_for,
+            first_action_scheduled_timezone: request.first_action_scheduled_timezone,
+            first_action_stage_index: request.first_action_stage_index,
+            first_action_recurrence: request.first_action_recurrence,
+            idempotency_key: None,
+        })?;
+        Ok(self
+            .repository
+            .start_knowledge_journey(user_id, resource_id, journey, first_action)
+            .await?)
+    }
+
     pub(crate) async fn update_knowledge(
         &self,
         user_id: &str,
         resource_id: &str,
-        mut request: UpdateKnowledgeResourceRequest,
-    ) -> Result<KnowledgeResourceDto, GrowthError> {
+        mut request: pb::UpdateKnowledgeRequest,
+    ) -> Result<pb::KnowledgeResource, GrowthError> {
         validate_knowledge_update(&request)?;
         request.title = request.title.map(|value| value.trim().to_string());
         request.creator = request.creator.map(|value| value.trim().to_string());
         request.summary = request.summary.map(|value| value.trim().to_string());
         request.source_url = request.source_url.map(|value| value.trim().to_string());
         request.body = request.body.map(|value| value.trim().to_string());
-        request.tags = request.tags.map(normalize_tags);
+        request.tags = request.tags.map(|tags| pb::StringList {
+            values: normalize_tags(tags.values),
+        });
         request.journey_id = request.journey_id.map(|value| value.trim().to_string());
-        request.bookmarks = request.bookmarks.map(|bookmarks| {
-            bookmarks
+        request.bookmarks = request.bookmarks.map(|bookmarks| pb::StringList {
+            values: bookmarks
+                .values
                 .into_iter()
                 .map(|bookmark| bookmark.trim().to_string())
-                .collect()
+                .collect(),
         });
         request.last_opened_at = request.last_opened_at.map(|value| value.trim().to_string());
         Ok(self
@@ -638,7 +728,9 @@ impl Domain {
     }
 }
 
-fn build_journey(request: CreateJourneyRequest) -> Result<(JourneyDto, ActionDto), GrowthError> {
+fn build_journey(
+    request: pb::CreateJourneyRequest,
+) -> Result<(pb::Journey, pb::Action), GrowthError> {
     if request.title.trim().is_empty() {
         return Err(GrowthError::Validation("路线名称不能为空".to_string()));
     }
@@ -661,7 +753,11 @@ fn build_journey(request: CreateJourneyRequest) -> Result<(JourneyDto, ActionDto
     let stages = build_stages(request.stages)?;
     let first_action_stage_id = request
         .first_action_stage_index
-        .map(usize::from)
+        .map(|index| {
+            usize::try_from(index)
+                .map_err(|_| GrowthError::Validation("首个行动所属阶段不存在".to_string()))
+        })
+        .transpose()?
         .map(|index| {
             stages
                 .get(index)
@@ -680,7 +776,7 @@ fn build_journey(request: CreateJourneyRequest) -> Result<(JourneyDto, ActionDto
         &first_action_scheduled_label,
     )?;
     let journey_id = Uuid::now_v7().to_string();
-    let journey = JourneyDto {
+    let journey = pb::Journey {
         id: journey_id.clone(),
         title: request.title.trim().to_string(),
         intent: request.intent.trim().to_string(),
@@ -691,13 +787,13 @@ fn build_journey(request: CreateJourneyRequest) -> Result<(JourneyDto, ActionDto
             request.journey_type,
         ),
         stages,
-        status: JourneyStatusDto::Active,
+        status: pb::JourneyStatus::Active as i32,
         progress: 0,
         duration_label: request.duration_label,
         next_action: request.first_action_title.trim().to_string(),
         participant_count: 1,
     };
-    let first_action = ActionDto {
+    let first_action = pb::Action {
         id: Uuid::now_v7().to_string(),
         journey_id,
         stage_id: first_action_stage_id,
@@ -708,14 +804,12 @@ fn build_journey(request: CreateJourneyRequest) -> Result<(JourneyDto, ActionDto
         scheduled_for: first_action_scheduled_for,
         scheduled_timezone: first_action_scheduled_timezone,
         recurrence: first_action_recurrence,
-        state: ActionStateDto::Pending,
+        state: pb::ActionState::Pending as i32,
     };
     Ok((journey, first_action))
 }
 
-fn build_stages(
-    stages: Vec<CreateJourneyStageRequest>,
-) -> Result<Vec<JourneyStageDto>, GrowthError> {
+fn build_stages(stages: Vec<pb::JourneyStageInput>) -> Result<Vec<pb::JourneyStage>, GrowthError> {
     if stages.len() > 12 {
         return Err(GrowthError::Validation(
             "路线阶段不能超过 12 个".to_string(),
@@ -728,35 +822,84 @@ fn build_stages(
             validate_text(&stage.title, 1, 120, "阶段名称")?;
             validate_text(&stage.detail, 0, 1_000, "阶段说明")?;
             validate_text(&stage.completion_criteria, 0, 500, "阶段完成标准")?;
-            Ok(JourneyStageDto {
+            Ok(pb::JourneyStage {
                 id: Uuid::now_v7().to_string(),
                 title: stage.title.trim().to_string(),
                 detail: stage.detail.trim().to_string(),
                 completion_criteria: stage.completion_criteria.trim().to_string(),
-                position: u16::try_from(position)
+                position: u32::try_from(position)
                     .map_err(|_| GrowthError::Validation("路线阶段数量无效".to_string()))?,
             })
         })
         .collect()
 }
 
-fn normalized_completion_criteria(value: String, journey_type: JourneyTypeDto) -> String {
+fn build_route_actions(
+    journey_id: &str,
+    stages: &[pb::JourneyStage],
+    templates: Vec<pb::RouteActionTemplate>,
+) -> Result<Vec<pb::Action>, GrowthError> {
+    if templates.len() > 49 {
+        return Err(GrowthError::Validation(
+            "路线最多包含 50 个行动".to_string(),
+        ));
+    }
+    templates
+        .into_iter()
+        .map(|template| {
+            validate_action(
+                &template.title,
+                template.estimated_minutes,
+                &template.scheduled_label,
+            )?;
+            validate_text(&template.detail, 0, 1_000, "路线行动说明")?;
+            let stage_id = template
+                .stage_index
+                .map(|index| {
+                    let index = usize::try_from(index)
+                        .map_err(|_| GrowthError::Validation("路线行动阶段索引无效".to_string()))?;
+                    stages
+                        .get(index)
+                        .map(|stage| stage.id.clone())
+                        .ok_or_else(|| {
+                            GrowthError::Validation("路线行动所属阶段不存在".to_string())
+                        })
+                })
+                .transpose()?;
+            Ok(pb::Action {
+                id: Uuid::now_v7().to_string(),
+                journey_id: journey_id.to_string(),
+                stage_id,
+                title: template.title.trim().to_string(),
+                detail: template.detail.trim().to_string(),
+                estimated_minutes: template.estimated_minutes,
+                scheduled_label: template.scheduled_label.trim().to_string(),
+                scheduled_for: None,
+                scheduled_timezone: None,
+                recurrence: None,
+                state: pb::ActionState::Pending as i32,
+            })
+        })
+        .collect()
+}
+
+fn normalized_completion_criteria(value: String, journey_type: i32) -> String {
     let value = value.trim();
     if !value.is_empty() {
         return value.to_string();
     }
-    match journey_type {
-        JourneyTypeDto::Habit => "在自己的周期内达到期望频率".to_string(),
-        JourneyTypeDto::Project => "完成路线中的必要阶段和行动".to_string(),
-        JourneyTypeDto::Quantity => "达到为这条路线设定的累计目标".to_string(),
-        JourneyTypeDto::Travel => "完成行前、在途和归来后的关键经历".to_string(),
-        JourneyTypeDto::Challenge => "在限定周期内满足这条挑战的条件".to_string(),
+    match pb::JourneyType::try_from(journey_type).unwrap_or(pb::JourneyType::Project) {
+        pb::JourneyType::Habit => "在自己的周期内达到期望频率".to_string(),
+        pb::JourneyType::Project => "完成路线中的必要阶段和行动".to_string(),
+        pb::JourneyType::Quantity => "达到为这条路线设定的累计目标".to_string(),
+        pb::JourneyType::Travel => "完成行前、在途和归来后的关键经历".to_string(),
+        pb::JourneyType::Challenge => "在限定周期内满足这条挑战的条件".to_string(),
     }
 }
 
 fn validate_action_stage(
     stage_id: Option<&str>,
-    stages: &[JourneyStageDto],
+    stages: &[pb::JourneyStage],
 ) -> Result<(), GrowthError> {
     let Some(stage_id) = stage_id else {
         return Ok(());
@@ -770,10 +913,10 @@ fn validate_action_stage(
 }
 
 fn normalize_recurrence(
-    recurrence: Option<ActionRecurrenceDto>,
+    recurrence: Option<pb::ActionRecurrence>,
     scheduled_for: Option<&str>,
     scheduled_timezone: Option<&str>,
-) -> Result<Option<ActionRecurrenceDto>, GrowthError> {
+) -> Result<Option<pb::ActionRecurrence>, GrowthError> {
     let Some(mut recurrence) = recurrence else {
         return Ok(None);
     };
@@ -788,13 +931,13 @@ fn normalize_recurrence(
             "重复间隔需要在 1 到 365 之间".to_string(),
         ));
     }
-    match recurrence.frequency {
-        ActionRecurrenceFrequencyDto::Daily if !recurrence.weekdays.is_empty() => {
+    match pb::ActionRecurrenceFrequency::try_from(recurrence.frequency) {
+        Ok(pb::ActionRecurrenceFrequency::Daily) if !recurrence.weekdays.is_empty() => {
             return Err(GrowthError::Validation(
                 "按日重复不能设置星期几".to_string(),
             ));
         }
-        ActionRecurrenceFrequencyDto::Weekly if recurrence.weekdays.is_empty() => {
+        Ok(pb::ActionRecurrenceFrequency::Weekly) if recurrence.weekdays.is_empty() => {
             return Err(GrowthError::Validation(
                 "按周重复至少需要选择一个星期".to_string(),
             ));
@@ -833,15 +976,15 @@ fn normalize_recurrence(
     Ok(Some(recurrence))
 }
 
-fn weekday_order(weekday: &WeekdayDto) -> u8 {
-    match weekday {
-        WeekdayDto::Monday => 0,
-        WeekdayDto::Tuesday => 1,
-        WeekdayDto::Wednesday => 2,
-        WeekdayDto::Thursday => 3,
-        WeekdayDto::Friday => 4,
-        WeekdayDto::Saturday => 5,
-        WeekdayDto::Sunday => 6,
+fn weekday_order(weekday: &i32) -> u8 {
+    match pb::Weekday::try_from(*weekday).unwrap_or(pb::Weekday::Sunday) {
+        pb::Weekday::Monday => 0,
+        pb::Weekday::Tuesday => 1,
+        pb::Weekday::Wednesday => 2,
+        pb::Weekday::Thursday => 3,
+        pb::Weekday::Friday => 4,
+        pb::Weekday::Saturday => 5,
+        pb::Weekday::Sunday => 6,
     }
 }
 
@@ -857,7 +1000,7 @@ fn validate_identifier(label: &str, value: &str) -> Result<(), GrowthError> {
     Ok(())
 }
 
-fn validate_notification(request: &CreateUserNotificationRequest) -> Result<(), GrowthError> {
+fn validate_notification(request: &pb::CreateNotificationRequest) -> Result<(), GrowthError> {
     // Interaction keys include both actor and target identifiers, each of which may be 160 chars.
     validate_text(&request.source_id, 1, 512, "通知来源 ID")?;
     validate_text(&request.title, 1, 120, "通知标题")?;
@@ -873,17 +1016,18 @@ fn validate_notification(request: &CreateUserNotificationRequest) -> Result<(), 
     Ok(())
 }
 
-fn validate_knowledge_create(request: &CreateKnowledgeResourceRequest) -> Result<(), GrowthError> {
+fn validate_knowledge_create(request: &pb::CreateKnowledgeRequest) -> Result<(), GrowthError> {
     validate_text(&request.title, 1, 200, "资源标题")?;
     validate_text(&request.creator, 0, 120, "作者或来源")?;
     validate_text(&request.summary, 0, 1_000, "摘要")?;
-    validate_optional_text(request.source_url.as_deref(), 2_048, "来源地址")?;
+    validate_optional_source_url(request.source_url.as_deref())?;
     validate_optional_text(request.body.as_deref(), 500_000, "资源正文")?;
     validate_tags(&request.tags)?;
-    validate_optional_text(request.journey_id.as_deref(), 128, "路线标识")
+    validate_optional_text(request.journey_id.as_deref(), 128, "路线标识")?;
+    validate_optional_text(request.source_content_id.as_deref(), 160, "社区内容标识")
 }
 
-fn validate_knowledge_update(request: &UpdateKnowledgeResourceRequest) -> Result<(), GrowthError> {
+fn validate_knowledge_update(request: &pb::UpdateKnowledgeRequest) -> Result<(), GrowthError> {
     if let Some(title) = request.title.as_deref() {
         validate_text(title, 1, 200, "资源标题")?;
     }
@@ -893,22 +1037,22 @@ fn validate_knowledge_update(request: &UpdateKnowledgeResourceRequest) -> Result
     if let Some(summary) = request.summary.as_deref() {
         validate_text(summary, 0, 1_000, "摘要")?;
     }
-    validate_optional_text(request.source_url.as_deref(), 2_048, "来源地址")?;
+    validate_optional_source_url(request.source_url.as_deref())?;
     validate_optional_text(request.body.as_deref(), 500_000, "资源正文")?;
     validate_optional_text(request.journey_id.as_deref(), 128, "路线标识")?;
-    if let Some(tags) = request.tags.as_deref() {
-        validate_tags(tags)?;
+    if let Some(tags) = request.tags.as_ref() {
+        validate_tags(&tags.values)?;
     }
     if request.progress.is_some_and(|progress| progress > 100) {
         return Err(GrowthError::Validation(
             "阅读进度需要在 0 到 100 之间".to_string(),
         ));
     }
-    if let Some(bookmarks) = request.bookmarks.as_deref() {
-        if bookmarks.len() > 500 {
+    if let Some(bookmarks) = request.bookmarks.as_ref() {
+        if bookmarks.values.len() > 500 {
             return Err(GrowthError::Validation("书签不能超过 500 个".to_string()));
         }
-        for bookmark in bookmarks {
+        for bookmark in &bookmarks.values {
             validate_text(bookmark, 1, 200, "书签")?;
         }
     }
@@ -938,6 +1082,30 @@ fn validate_optional_text(value: Option<&str>, max: usize, field: &str) -> Resul
         )));
     }
     Ok(())
+}
+
+fn validate_optional_source_url(value: Option<&str>) -> Result<(), GrowthError> {
+    validate_optional_text(value, 2_048, "来源地址")?;
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let url = Url::parse(value)
+        .map_err(|_| GrowthError::Validation("来源地址必须是有效的 URL".to_string()))?;
+    let is_web_url = matches!(url.scheme(), "http" | "https") && url.host_str().is_some();
+    let is_content_reference = url.scheme() == "bookway"
+        && url.host_str() == Some("content")
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url
+            .path_segments()
+            .is_some_and(|mut segments| matches!((segments.next(), segments.next()), (Some(id), None) if !id.is_empty() && id.chars().count() <= 160));
+    if is_web_url || is_content_reference {
+        Ok(())
+    } else {
+        Err(GrowthError::Validation(
+            "来源地址仅支持 http(s) URL 或 bookway 内容引用".to_string(),
+        ))
+    }
 }
 
 fn validate_tags(tags: &[String]) -> Result<(), GrowthError> {
@@ -1006,7 +1174,10 @@ fn normalize_idempotency_key(value: Option<String>) -> Result<Option<String>, Gr
     Ok(Some(value))
 }
 
-fn validate_entry(request: &CreateGrowthEntryRequest) -> Result<(), GrowthError> {
+fn validate_entry(request: &pb::CreateEntryRequest) -> Result<(), GrowthError> {
+    if request.published && request.body.trim().is_empty() {
+        return Err(GrowthError::Validation("发布行记需要填写正文".to_string()));
+    }
     if request.body.chars().count() > 5_000 {
         return Err(GrowthError::Validation(
             "记录正文不能超过 5000 个字符".to_string(),
@@ -1034,9 +1205,18 @@ fn validate_entry(request: &CreateGrowthEntryRequest) -> Result<(), GrowthError>
     if request
         .photo_url
         .as_deref()
-        .is_some_and(|value| value.chars().count() > 2_048)
+        .is_some_and(|value| !value.trim().is_empty())
     {
-        return Err(GrowthError::Validation("图片地址过长".to_string()));
+        return Err(GrowthError::Validation(
+            "图片必须使用已上传的媒体资源 ID，不能直接提供 URL".to_string(),
+        ));
+    }
+    if let Some(media_id) = request.photo_media_id.as_deref()
+        && Uuid::parse_str(media_id.trim()).is_err()
+    {
+        return Err(GrowthError::Validation(
+            "图片媒体资源 ID 格式不正确".to_string(),
+        ));
     }
     if request.body.trim().is_empty()
         && request.duration_minutes.is_none()
@@ -1068,13 +1248,13 @@ fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
-fn domain_order(domain: GrowthDomainDto) -> u8 {
-    match domain {
-        GrowthDomainDto::Learning => 0,
-        GrowthDomainDto::Movement => 1,
-        GrowthDomainDto::Wellness => 2,
-        GrowthDomainDto::Travel => 3,
-        GrowthDomainDto::Leisure => 4,
+fn domain_order(domain: i32) -> u8 {
+    match pb::GrowthDomain::try_from(domain).unwrap_or(pb::GrowthDomain::Leisure) {
+        pb::GrowthDomain::Learning => 0,
+        pb::GrowthDomain::Movement => 1,
+        pb::GrowthDomain::Wellness => 2,
+        pb::GrowthDomain::Travel => 3,
+        pb::GrowthDomain::Leisure => 4,
     }
 }
 
@@ -1098,7 +1278,7 @@ fn review_adjustment_suggestions(
     completion_rate: f64,
     completed_actions: usize,
     skipped_actions: usize,
-) -> Vec<ReviewAdjustmentSuggestionDto> {
+) -> Vec<pb::ReviewAdjustmentSuggestion> {
     let mut suggestions = Vec::new();
     let decided_actions = completed_actions + skipped_actions;
     if completion_rate < 0.5
@@ -1106,16 +1286,16 @@ fn review_adjustment_suggestions(
         && let Some(action) = snapshot
             .actions
             .iter()
-            .filter(|action| action.state == ActionStateDto::Pending)
+            .filter(|action| action.state == pb::ActionState::Pending as i32)
             .max_by_key(|action| action.estimated_minutes)
     {
         let suggested_minutes = recovery_minutes(action.estimated_minutes);
-        suggestions.push(ReviewAdjustmentSuggestionDto {
-            kind: ReviewAdjustmentKindDto::ReduceActionDuration,
+        suggestions.push(pb::ReviewAdjustmentSuggestion {
+            kind: pb::ReviewAdjustmentKind::ReduceActionDuration as i32,
             title: format!("把「{}」先缩小到 {suggested_minutes} 分钟", action.title),
             rationale: "这周出现了中断。缩小下一步不会抹掉原计划，只是为恢复节奏留出更低的门槛。"
                 .to_string(),
-            action_patch: Some(ReviewActionPatchDto {
+            action_patch: Some(pb::ReviewActionPatch {
                 action_id: action.id.clone(),
                 estimated_minutes: Some(suggested_minutes),
                 scheduled_label: None,
@@ -1127,7 +1307,7 @@ fn review_adjustment_suggestions(
     for journey in snapshot
         .journeys
         .iter()
-        .filter(|journey| journey.status == JourneyStatusDto::Active)
+        .filter(|journey| journey.status == pb::JourneyStatus::Active as i32)
     {
         let actions = snapshot
             .actions
@@ -1137,18 +1317,18 @@ fn review_adjustment_suggestions(
         if !actions.is_empty()
             && actions
                 .iter()
-                .all(|action| action.state == ActionStateDto::Skipped)
+                .all(|action| action.state == pb::ActionState::Skipped as i32)
         {
-            suggestions.push(ReviewAdjustmentSuggestionDto {
-                kind: ReviewAdjustmentKindDto::PauseJourney,
+            suggestions.push(pb::ReviewAdjustmentSuggestion {
+                kind: pb::ReviewAdjustmentKind::PauseJourney as i32,
                 title: format!("先暂停「{}」", journey.title),
                 rationale:
                     "这条路线的行动都被跳过了。暂停是保留计划与记录的选择，准备好后仍可继续。"
                         .to_string(),
                 action_patch: None,
-                journey_patch: Some(ReviewJourneyPatchDto {
+                journey_patch: Some(pb::ReviewJourneyPatch {
                     journey_id: journey.id.clone(),
-                    status: JourneyStatusDto::Paused,
+                    status: pb::JourneyStatus::Paused as i32,
                 }),
             });
         }
@@ -1156,7 +1336,7 @@ fn review_adjustment_suggestions(
     suggestions
 }
 
-fn recovery_minutes(estimated_minutes: u16) -> u16 {
+fn recovery_minutes(estimated_minutes: u32) -> u32 {
     (estimated_minutes / 3).clamp(5, 15)
 }
 
@@ -1230,7 +1410,7 @@ fn validate_timezone(timezone: &str) -> Result<(), GrowthError> {
 }
 
 fn validate_reminder_preferences(
-    request: &UpdateReminderPreferencesRequest,
+    request: &pb::UpdateReminderPreferencesRequest,
 ) -> Result<(), GrowthError> {
     if request.lead_minutes > 1_440 {
         return Err(GrowthError::Validation(
@@ -1267,7 +1447,7 @@ fn parse_quiet_time(value: &str) -> Result<time::Time, GrowthError> {
     })
 }
 
-fn action_is_overdue(action: &ActionDto) -> bool {
+fn action_is_overdue(action: &pb::Action) -> bool {
     action
         .scheduled_for
         .as_deref()
@@ -1275,7 +1455,7 @@ fn action_is_overdue(action: &ActionDto) -> bool {
         .is_some_and(|timestamp| timestamp < OffsetDateTime::now_utc())
 }
 
-fn validate_journey_update(request: &UpdateJourneyRequest) -> Result<(), GrowthError> {
+fn validate_journey_update(request: &pb::UpdateJourneyRequest) -> Result<(), GrowthError> {
     if request
         .title
         .as_deref()
@@ -1295,7 +1475,7 @@ fn validate_journey_update(request: &UpdateJourneyRequest) -> Result<(), GrowthE
 
 fn validate_action(
     title: &str,
-    estimated_minutes: u16,
+    estimated_minutes: u32,
     scheduled_label: &str,
 ) -> Result<(), GrowthError> {
     if title.trim().is_empty() {
@@ -1312,19 +1492,15 @@ fn validate_action(
     Ok(())
 }
 
+fn count_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use bookway_api::{
-        ActionRecurrenceDto, ActionRecurrenceFrequencyDto, ActionStateDto, CompanionModeDto,
-        CreateJourneyStageRequest, EntryMoodDto, JourneyTypeDto, KnowledgeResourceKindDto,
-        KnowledgeResourceStatusDto, NotificationKindDto, PushProviderDto, ReviewAdjustmentKindDto,
-        WeekdayDto,
-    };
-
     use super::*;
-    use crate::api::GrowthDomainDto;
     use crate::{conf::Config, datasource::MemoryGrowthRepository};
 
     fn domain() -> Domain {
@@ -1336,17 +1512,44 @@ mod tests {
         )
     }
 
+    #[test]
+    fn accepts_openable_and_trusted_knowledge_source_urls_only() {
+        for source in [
+            "https://example.com/learn?topic=walk",
+            "http://localhost:8080/resource",
+            "bookway://content/post-reading",
+        ] {
+            assert!(
+                validate_optional_source_url(Some(source)).is_ok(),
+                "{source}"
+            );
+        }
+        for source in [
+            "javascript:alert(1)",
+            "file:///private/resource",
+            "https://",
+            "bookway://journey/secret",
+            "bookway://content/post-reading/extra",
+        ] {
+            assert!(
+                validate_optional_source_url(Some(source)).is_err(),
+                "{source}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn creates_a_journey_with_its_first_action() {
         let domain = domain();
         let journey = domain
             .create_journey(
                 "user-a",
-                CreateJourneyRequest {
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
                     title: "学习摄影".to_string(),
                     intent: "记录旅行".to_string(),
-                    domain: GrowthDomainDto::Learning,
-                    journey_type: JourneyTypeDto::Project,
+                    domain: pb::GrowthDomain::Learning as i32,
+                    journey_type: pb::JourneyType::Project as i32,
                     completion_criteria: String::new(),
                     stages: Vec::new(),
                     duration_label: "3 周".to_string(),
@@ -1358,6 +1561,7 @@ mod tests {
                     first_action_scheduled_timezone: None,
                     first_action_stage_index: None,
                     first_action_recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -1375,24 +1579,196 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn journey_creation_retries_return_the_original_journey_after_later_edits() {
+        let domain = domain();
+        let request = pb::CreateJourneyRequest {
+            user_id: String::new(),
+            title: "晨间阅读计划".to_string(),
+            intent: "每天保留一段稳定阅读时间".to_string(),
+            domain: pb::GrowthDomain::Learning as i32,
+            journey_type: pb::JourneyType::Habit as i32,
+            completion_criteria: "连续完成七次阅读".to_string(),
+            stages: vec![pb::JourneyStageInput {
+                title: "先建立节奏".to_string(),
+                detail: "从一本正在读的书开始".to_string(),
+                completion_criteria: "完成前三次阅读".to_string(),
+            }],
+            duration_label: "两周".to_string(),
+            first_action_title: "阅读十分钟".to_string(),
+            first_action_detail: "只读一个段落也算开始".to_string(),
+            estimated_minutes: 10,
+            first_action_scheduled_label: Some("今晚".to_string()),
+            first_action_scheduled_for: None,
+            first_action_scheduled_timezone: None,
+            first_action_stage_index: Some(0),
+            first_action_recurrence: None,
+            idempotency_key: Some("journey-create-1".to_string()),
+        };
+
+        let first = domain
+            .create_journey("journey-idempotency-user", request.clone())
+            .await
+            .expect("first Journey should persist");
+        let first_action = domain
+            .get_journey("journey-idempotency-user", &first.id)
+            .await
+            .expect("Journey should load")
+            .actions
+            .into_iter()
+            .next()
+            .expect("Journey should have its initial action");
+        domain
+            .update_journey(
+                "journey-idempotency-user",
+                &first.id,
+                pb::UpdateJourneyRequest {
+                    user_id: String::new(),
+                    journey_id: String::new(),
+                    title: Some("后来调整过的阅读计划".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("Journey should update");
+        domain
+            .update_action(
+                "journey-idempotency-user",
+                &first_action.id,
+                pb::UpdateActionRequest {
+                    user_id: String::new(),
+                    action_id: String::new(),
+                    title: Some("阅读五分钟".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("initial action should update");
+
+        let retry = domain
+            .create_journey("journey-idempotency-user", request.clone())
+            .await
+            .expect("matching retry should return the original Journey");
+        assert_eq!(retry.id, first.id);
+        assert_eq!(retry.title, "后来调整过的阅读计划");
+        assert_eq!(
+            domain
+                .list_journeys("journey-idempotency-user")
+                .await
+                .expect("Journeys should load")
+                .len(),
+            1
+        );
+
+        let mut conflicting = request;
+        conflicting.first_action_title = "改成另一项首要行动".to_string();
+        let error = domain
+            .create_journey("journey-idempotency-user", conflicting)
+            .await
+            .expect_err("one idempotency key cannot describe another Journey");
+        assert!(matches!(
+            error,
+            GrowthError::Repository(crate::datasource::RepositoryError::IdempotencyConflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn action_creation_retries_return_the_original_action_without_duplication() {
+        let domain = domain();
+        let journey = domain
+            .create_journey(
+                "action-idempotency-user",
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
+                    title: "稳定阅读计划".to_string(),
+                    intent: "每天留下可回看的阅读时间".to_string(),
+                    domain: pb::GrowthDomain::Learning as i32,
+                    journey_type: pb::JourneyType::Habit as i32,
+                    completion_criteria: "连续完成七次阅读".to_string(),
+                    stages: Vec::new(),
+                    duration_label: "2 周".to_string(),
+                    first_action_title: "阅读十分钟".to_string(),
+                    first_action_detail: String::new(),
+                    estimated_minutes: 10,
+                    first_action_scheduled_label: None,
+                    first_action_scheduled_for: None,
+                    first_action_scheduled_timezone: None,
+                    first_action_stage_index: None,
+                    first_action_recurrence: None,
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .expect("journey should be created");
+        let request = pb::CreateActionRequest {
+            user_id: String::new(),
+            journey_id: journey.id.clone(),
+            stage_id: None,
+            title: "记录一个观点".to_string(),
+            detail: "写下刚读到的一个想法".to_string(),
+            estimated_minutes: 12,
+            scheduled_label: "今晚".to_string(),
+            scheduled_for: None,
+            scheduled_timezone: None,
+            recurrence: None,
+            idempotency_key: Some("action-create-1".to_string()),
+        };
+
+        let first = domain
+            .create_action("action-idempotency-user", request.clone())
+            .await
+            .expect("first action should be created");
+        let replay = domain
+            .create_action("action-idempotency-user", request.clone())
+            .await
+            .expect("retry should return the existing action");
+        assert_eq!(replay.id, first.id);
+        assert_eq!(
+            domain
+                .get_journey("action-idempotency-user", &journey.id)
+                .await
+                .expect("journey should load")
+                .actions
+                .len(),
+            2
+        );
+
+        let conflict = domain
+            .create_action(
+                "action-idempotency-user",
+                pb::CreateActionRequest {
+                    title: "换成另一条行动".to_string(),
+                    ..request
+                },
+            )
+            .await;
+        assert!(matches!(
+            conflict,
+            Err(GrowthError::Repository(
+                crate::datasource::RepositoryError::IdempotencyConflict
+            ))
+        ));
+    }
+
+    #[tokio::test]
     async fn connects_actions_to_stages_and_materializes_the_next_repeat() {
         let domain = domain();
         let journey = domain
             .create_journey(
                 "repeat-user",
-                CreateJourneyRequest {
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
                     title: "晨间跑步恢复计划".to_string(),
                     intent: "用低压力节奏重新开始跑步".to_string(),
-                    domain: GrowthDomainDto::Movement,
-                    journey_type: JourneyTypeDto::Habit,
+                    domain: pb::GrowthDomain::Movement as i32,
+                    journey_type: pb::JourneyType::Habit as i32,
                     completion_criteria: "每周完成三次轻松跑".to_string(),
                     stages: vec![
-                        CreateJourneyStageRequest {
+                        pb::JourneyStageInput {
                             title: "恢复节奏".to_string(),
                             detail: "先保持轻松和可恢复".to_string(),
                             completion_criteria: "完成三次轻松跑".to_string(),
                         },
-                        CreateJourneyStageRequest {
+                        pb::JourneyStageInput {
                             title: "稳定提升".to_string(),
                             detail: String::new(),
                             completion_criteria: "连续两周按自己的节奏完成".to_string(),
@@ -1406,18 +1782,19 @@ mod tests {
                     first_action_scheduled_for: Some("2032-06-18T07:00:00+08:00".to_string()),
                     first_action_scheduled_timezone: Some("Asia/Shanghai".to_string()),
                     first_action_stage_index: Some(0),
-                    first_action_recurrence: Some(ActionRecurrenceDto {
-                        frequency: ActionRecurrenceFrequencyDto::Weekly,
+                    first_action_recurrence: Some(pb::ActionRecurrence {
+                        frequency: pb::ActionRecurrenceFrequency::Weekly as i32,
                         interval: 1,
-                        weekdays: vec![WeekdayDto::Monday, WeekdayDto::Thursday],
+                        weekdays: vec![pb::Weekday::Monday as i32, pb::Weekday::Thursday as i32],
                         ends_on: Some("2032-06-30".to_string()),
                         anchor_date: None,
                     }),
+                    idempotency_key: None,
                 },
             )
             .await
             .expect("journey should be created");
-        assert_eq!(journey.journey_type, JourneyTypeDto::Habit);
+        assert_eq!(journey.journey_type, pb::JourneyType::Habit as i32);
         assert_eq!(journey.stages.len(), 2);
         let first = domain
             .get_journey("repeat-user", &journey.id)
@@ -1446,7 +1823,7 @@ mod tests {
             .iter()
             .find(|action| action.id != first.id)
             .expect("next occurrence should be created");
-        assert_eq!(successor.state, ActionStateDto::Pending);
+        assert_eq!(successor.state, pb::ActionState::Pending as i32);
         assert_eq!(successor.stage_id, first.stage_id);
         assert_eq!(
             successor.scheduled_for.as_deref(),
@@ -1467,11 +1844,12 @@ mod tests {
         let journey = domain
             .create_journey(
                 "review-adjust-user",
-                CreateJourneyRequest {
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
                     title: "重新开始写作".to_string(),
                     intent: "让写作回到一周安排里".to_string(),
-                    domain: GrowthDomainDto::Learning,
-                    journey_type: JourneyTypeDto::Project,
+                    domain: pb::GrowthDomain::Learning as i32,
+                    journey_type: pb::JourneyType::Project as i32,
                     completion_criteria: "完成四篇短文".to_string(),
                     stages: Vec::new(),
                     duration_label: "4 周".to_string(),
@@ -1483,6 +1861,7 @@ mod tests {
                     first_action_scheduled_timezone: None,
                     first_action_stage_index: None,
                     first_action_recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -1499,8 +1878,10 @@ mod tests {
             .update_action(
                 "review-adjust-user",
                 &first.id,
-                UpdateActionRequest {
-                    state: Some(ActionStateDto::Skipped),
+                pb::UpdateActionRequest {
+                    user_id: String::new(),
+                    action_id: String::new(),
+                    state: Some(pb::ActionState::Skipped as i32),
                     ..Default::default()
                 },
             )
@@ -1509,7 +1890,8 @@ mod tests {
         let follow_up = domain
             .create_action(
                 "review-adjust-user",
-                CreateActionRequest {
+                pb::CreateActionRequest {
+                    user_id: String::new(),
                     journey_id: journey.id,
                     stage_id: None,
                     title: "修改一段".to_string(),
@@ -1519,6 +1901,7 @@ mod tests {
                     scheduled_for: None,
                     scheduled_timezone: None,
                     recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -1531,7 +1914,9 @@ mod tests {
         let suggestion = review
             .adjustment_suggestions
             .iter()
-            .find(|suggestion| suggestion.kind == ReviewAdjustmentKindDto::ReduceActionDuration)
+            .find(|suggestion| {
+                suggestion.kind == pb::ReviewAdjustmentKind::ReduceActionDuration as i32
+            })
             .expect("review should offer a smaller next step");
         assert_eq!(
             suggestion
@@ -1552,11 +1937,12 @@ mod tests {
     #[tokio::test]
     async fn route_journey_retries_reuse_the_same_private_journey() {
         let domain = domain();
-        let request = CreateJourneyRequest {
+        let request = pb::CreateJourneyRequest {
+            user_id: String::new(),
             title: "四周写作练习".to_string(),
             intent: "建立稳定节奏".to_string(),
-            domain: GrowthDomainDto::Learning,
-            journey_type: JourneyTypeDto::Project,
+            domain: pb::GrowthDomain::Learning as i32,
+            journey_type: pb::JourneyType::Project as i32,
             completion_criteria: String::new(),
             stages: Vec::new(),
             duration_label: "4 周".to_string(),
@@ -1568,26 +1954,28 @@ mod tests {
             first_action_scheduled_timezone: None,
             first_action_stage_index: None,
             first_action_recurrence: None,
+            idempotency_key: None,
         };
         let (first, retry) = tokio::join!(
-            domain.create_route_journey("user-a", "route-a", request.clone()),
-            domain.create_route_journey("user-a", "route-a", request.clone()),
+            domain.create_route_journey("user-a", "route-a", request.clone(), Vec::new()),
+            domain.create_route_journey("user-a", "route-a", request.clone(), Vec::new()),
         );
         let first = first.expect("first route join");
         let retry = retry.expect("concurrent route join retry");
         let other_user = domain
-            .create_route_journey("user-b", "route-a", request)
+            .create_route_journey("user-b", "route-a", request, Vec::new())
             .await
             .expect("other user route join");
         let after_source_edit = domain
             .create_route_journey(
                 "user-a",
                 "route-a",
-                CreateJourneyRequest {
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
                     title: "来源内容更新后的标题".to_string(),
                     intent: String::new(),
-                    domain: GrowthDomainDto::Leisure,
-                    journey_type: JourneyTypeDto::Project,
+                    domain: pb::GrowthDomain::Leisure as i32,
+                    journey_type: pb::JourneyType::Project as i32,
                     completion_criteria: String::new(),
                     stages: Vec::new(),
                     duration_label: "8 周".to_string(),
@@ -1599,7 +1987,9 @@ mod tests {
                     first_action_scheduled_timezone: None,
                     first_action_stage_index: None,
                     first_action_recurrence: None,
+                    idempotency_key: None,
                 },
+                Vec::new(),
             )
             .await
             .expect("retry after source edit");
@@ -1646,6 +2036,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_templates_copy_stages_and_actions_into_private_journeys() {
+        let domain = domain();
+        let journey = domain
+            .create_route_journey(
+                "template-user",
+                "route-template",
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
+                    title: "四周主题阅读".to_string(),
+                    intent: "从问题出发建立阅读方法".to_string(),
+                    domain: pb::GrowthDomain::Learning as i32,
+                    journey_type: pb::JourneyType::Project as i32,
+                    completion_criteria: "完成四次阅读和一次回望".to_string(),
+                    stages: vec![
+                        pb::JourneyStageInput {
+                            title: "选题".to_string(),
+                            detail: "选择一个真实问题".to_string(),
+                            completion_criteria: "确定阅读问题".to_string(),
+                        },
+                        pb::JourneyStageInput {
+                            title: "沉淀".to_string(),
+                            detail: "把结论写成自己的话".to_string(),
+                            completion_criteria: "完成一篇回望".to_string(),
+                        },
+                    ],
+                    duration_label: "4 周".to_string(),
+                    first_action_title: "选一本起步书".to_string(),
+                    first_action_detail: "只选一本最相关的书".to_string(),
+                    estimated_minutes: 15,
+                    first_action_scheduled_label: Some("今天".to_string()),
+                    first_action_scheduled_for: None,
+                    first_action_scheduled_timezone: None,
+                    first_action_stage_index: Some(0),
+                    first_action_recurrence: None,
+                    idempotency_key: None,
+                },
+                vec![
+                    pb::RouteActionTemplate {
+                        title: "读二十分钟".to_string(),
+                        detail: "标记一个值得验证的观点".to_string(),
+                        estimated_minutes: 20,
+                        scheduled_label: "本周".to_string(),
+                        stage_index: Some(0),
+                    },
+                    pb::RouteActionTemplate {
+                        title: "写一段回望".to_string(),
+                        detail: "记录哪些方法适合自己".to_string(),
+                        estimated_minutes: 25,
+                        scheduled_label: "第四周".to_string(),
+                        stage_index: Some(1),
+                    },
+                ],
+            )
+            .await
+            .expect("route template should create a private journey");
+
+        let detail = domain
+            .get_journey("template-user", &journey.id)
+            .await
+            .expect("private journey should load");
+        assert_eq!(detail.journey.expect("journey").stages.len(), 2);
+        assert_eq!(detail.actions.len(), 3);
+        assert!(
+            detail
+                .actions
+                .iter()
+                .all(|action| action.stage_id.is_some())
+        );
+        let action = detail
+            .actions
+            .iter()
+            .find(|action| action.title == "读二十分钟")
+            .expect("template action should exist");
+        let completion = domain
+            .complete_action("template-user", &action.id)
+            .await
+            .expect("adopted action should complete");
+        assert_eq!(
+            completion.source_route_id.as_deref(),
+            Some("route-template")
+        );
+        assert_eq!(
+            completion.action.map(|action| action.state),
+            Some(pb::ActionState::Completed as i32)
+        );
+    }
+
+    #[tokio::test]
     async fn memory_storage_keeps_journeys_and_actions_isolated_by_user() {
         let domain = domain();
 
@@ -1678,11 +2156,12 @@ mod tests {
         let result = domain
             .create_journey(
                 "user-a",
-                CreateJourneyRequest {
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
                     title: " ".to_string(),
                     intent: String::new(),
-                    domain: GrowthDomainDto::Learning,
-                    journey_type: JourneyTypeDto::Project,
+                    domain: pb::GrowthDomain::Learning as i32,
+                    journey_type: pb::JourneyType::Project as i32,
                     completion_criteria: String::new(),
                     stages: Vec::new(),
                     duration_label: "1 周".to_string(),
@@ -1694,6 +2173,7 @@ mod tests {
                     first_action_scheduled_timezone: None,
                     first_action_stage_index: None,
                     first_action_recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await;
@@ -1708,7 +2188,8 @@ mod tests {
         let preferences = domain
             .update_reminder_preferences(
                 "user-a",
-                UpdateReminderPreferencesRequest {
+                pb::UpdateReminderPreferencesRequest {
+                    user_id: String::new(),
                     enabled: true,
                     lead_minutes: 15,
                     timezone: "Asia/Shanghai".to_string(),
@@ -1738,7 +2219,8 @@ mod tests {
         let incomplete = domain
             .update_reminder_preferences(
                 "user-a",
-                UpdateReminderPreferencesRequest {
+                pb::UpdateReminderPreferencesRequest {
+                    user_id: String::new(),
                     enabled: true,
                     lead_minutes: 0,
                     timezone: "Asia/Shanghai".to_string(),
@@ -1750,7 +2232,8 @@ mod tests {
         let empty = domain
             .update_reminder_preferences(
                 "user-a",
-                UpdateReminderPreferencesRequest {
+                pb::UpdateReminderPreferencesRequest {
+                    user_id: String::new(),
                     enabled: true,
                     lead_minutes: 0,
                     timezone: "Asia/Shanghai".to_string(),
@@ -1770,9 +2253,10 @@ mod tests {
         let device = domain
             .register_push_device(
                 "user-a",
-                RegisterPushDeviceRequest {
+                pb::RegisterPushDeviceRequest {
+                    user_id: String::new(),
                     device_id: "ios-installation-1".to_string(),
-                    provider: PushProviderDto::Expo,
+                    provider: pb::PushProvider::Expo as i32,
                     endpoint: "ExponentPushToken[opaque]".to_string(),
                 },
             )
@@ -1780,7 +2264,7 @@ mod tests {
             .expect("device should register");
 
         assert_eq!(device.device_id, "ios-installation-1");
-        assert_eq!(device.provider, PushProviderDto::Expo);
+        assert_eq!(device.provider, pb::PushProvider::Expo as i32);
         assert!(device.active);
         domain
             .revoke_push_device("user-a", &device.device_id)
@@ -1794,11 +2278,12 @@ mod tests {
         let journey = domain
             .create_journey(
                 "user-a",
-                CreateJourneyRequest {
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
                     title: "四周写作练习".to_string(),
                     intent: "留下可回看的作品".to_string(),
-                    domain: GrowthDomainDto::Learning,
-                    journey_type: JourneyTypeDto::Project,
+                    domain: pb::GrowthDomain::Learning as i32,
+                    journey_type: pb::JourneyType::Project as i32,
                     completion_criteria: String::new(),
                     stages: Vec::new(),
                     duration_label: "4 周".to_string(),
@@ -1810,6 +2295,7 @@ mod tests {
                     first_action_scheduled_timezone: None,
                     first_action_stage_index: None,
                     first_action_recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -1824,7 +2310,8 @@ mod tests {
         let action = domain
             .create_action(
                 "user-a",
-                CreateActionRequest {
+                pb::CreateActionRequest {
+                    user_id: String::new(),
                     journey_id: journey.id.clone(),
                     stage_id: None,
                     title: "修改开头".to_string(),
@@ -1834,6 +2321,7 @@ mod tests {
                     scheduled_for: None,
                     scheduled_timezone: None,
                     recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -1842,27 +2330,31 @@ mod tests {
             .update_action(
                 "user-a",
                 &action.id,
-                UpdateActionRequest {
-                    state: Some(ActionStateDto::Skipped),
+                pb::UpdateActionRequest {
+                    user_id: String::new(),
+                    action_id: String::new(),
+                    state: Some(pb::ActionState::Skipped as i32),
                     ..Default::default()
                 },
             )
             .await
             .expect("action should update");
-        assert_eq!(updated.state, ActionStateDto::Skipped);
+        assert_eq!(updated.state, pb::ActionState::Skipped as i32);
 
         let paused = domain
             .update_journey(
                 "user-a",
                 &journey.id,
-                UpdateJourneyRequest {
-                    status: Some(JourneyStatusDto::Paused),
+                pb::UpdateJourneyRequest {
+                    user_id: String::new(),
+                    journey_id: String::new(),
+                    status: Some(pb::JourneyStatus::Paused as i32),
                     ..Default::default()
                 },
             )
             .await
             .expect("journey should update");
-        assert_eq!(paused.status, JourneyStatusDto::Paused);
+        assert_eq!(paused.status, pb::JourneyStatus::Paused as i32);
     }
 
     #[tokio::test]
@@ -1871,16 +2363,19 @@ mod tests {
         let entry = domain
             .create_entry(
                 "demo-user",
-                CreateGrowthEntryRequest {
+                pb::CreateEntryRequest {
+                    user_id: String::new(),
                     action_id: Some("action-stretch".to_string()),
                     journey_id: Some("journey-running".to_string()),
                     body: "跑后身体很放松".to_string(),
-                    mood: EntryMoodDto::Calm,
+                    mood: pb::EntryMood::Calm as i32,
                     duration_minutes: Some(8),
                     quantity: None,
                     location: None,
                     photo_url: None,
                     published: false,
+                    photo_media_id: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -1910,16 +2405,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn entry_creation_retries_return_the_original_entry_without_duplication() {
+        let domain = domain();
+        let request = pb::CreateEntryRequest {
+            user_id: String::new(),
+            action_id: Some("action-stretch".to_string()),
+            journey_id: Some("journey-running".to_string()),
+            body: "跑后留下一句身体感受".to_string(),
+            mood: pb::EntryMood::Calm as i32,
+            duration_minutes: Some(8),
+            quantity: None,
+            location: None,
+            photo_url: None,
+            published: true,
+            photo_media_id: None,
+            idempotency_key: Some("entry-create-1".to_string()),
+        };
+
+        let first = domain
+            .create_entry("demo-user", request.clone())
+            .await
+            .expect("first entry should persist");
+        let retry = domain
+            .create_entry("demo-user", request.clone())
+            .await
+            .expect("matching retry should return the original entry");
+
+        assert_eq!(retry.id, first.id);
+        assert_eq!(
+            domain
+                .list_entries("demo-user")
+                .await
+                .expect("entries should load")
+                .len(),
+            1
+        );
+
+        let mut conflicting = request;
+        conflicting.body = "不同的复盘内容".to_string();
+        let error = domain
+            .create_entry("demo-user", conflicting)
+            .await
+            .expect_err("a reused key cannot represent another entry");
+        assert!(matches!(
+            error,
+            GrowthError::Repository(crate::datasource::RepositoryError::IdempotencyConflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn public_entry_request_starts_as_a_durable_pending_publication() {
+        let domain = domain();
+        let entry = domain
+            .create_entry(
+                "demo-user",
+                pb::CreateEntryRequest {
+                    user_id: String::new(),
+                    action_id: None,
+                    journey_id: Some("journey-reading".to_string()),
+                    body: "今天把一个困惑写清楚了。".to_string(),
+                    mood: pb::EntryMood::Clear as i32,
+                    duration_minutes: Some(20),
+                    quantity: Some("1 个问题".to_string()),
+                    location: Some("private location".to_string()),
+                    photo_url: None,
+                    published: true,
+                    photo_media_id: None,
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .expect("entry should be accepted");
+
+        assert!(!entry.published);
+        assert_eq!(
+            entry.publication_status,
+            pb::EntryPublicationStatus::Pending as i32
+        );
+        assert!(entry.public_content_id.is_none());
+        assert!(entry.publication_error.is_none());
+    }
+
+    #[tokio::test]
     async fn companion_offers_a_small_recovery_step_without_changing_the_plan() {
         let domain = domain();
         let journey = domain
             .create_journey(
                 "recovering-user",
-                CreateJourneyRequest {
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
                     title: "恢复阅读节奏".to_string(),
                     intent: "重新建立低压力阅读习惯".to_string(),
-                    domain: GrowthDomainDto::Learning,
-                    journey_type: JourneyTypeDto::Project,
+                    domain: pb::GrowthDomain::Learning as i32,
+                    journey_type: pb::JourneyType::Project as i32,
                     completion_criteria: String::new(),
                     stages: Vec::new(),
                     duration_label: "4 周".to_string(),
@@ -1931,6 +2509,7 @@ mod tests {
                     first_action_scheduled_timezone: None,
                     first_action_stage_index: None,
                     first_action_recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -1947,8 +2526,10 @@ mod tests {
             .update_action(
                 "recovering-user",
                 &first_action.id,
-                UpdateActionRequest {
-                    state: Some(ActionStateDto::Skipped),
+                pb::UpdateActionRequest {
+                    user_id: String::new(),
+                    action_id: String::new(),
+                    state: Some(pb::ActionState::Skipped as i32),
                     ..Default::default()
                 },
             )
@@ -1957,7 +2538,8 @@ mod tests {
         let pending = domain
             .create_action(
                 "recovering-user",
-                CreateActionRequest {
+                pb::CreateActionRequest {
+                    user_id: String::new(),
                     journey_id: journey.id,
                     stage_id: None,
                     title: "读两页".to_string(),
@@ -1967,6 +2549,7 @@ mod tests {
                     scheduled_for: None,
                     scheduled_timezone: None,
                     recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -1977,7 +2560,7 @@ mod tests {
             .await
             .expect("companion brief should load");
 
-        assert_eq!(brief.mode, CompanionModeDto::StartSmall);
+        assert_eq!(brief.mode, pb::CompanionMode::StartSmall as i32);
         assert_eq!(brief.suggested_minutes, Some(8));
         assert_eq!(
             brief.suggested_action.as_ref().map(|action| &action.id),
@@ -1995,11 +2578,12 @@ mod tests {
         let journey = domain
             .create_journey(
                 "scheduled-user",
-                CreateJourneyRequest {
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
                     title: "傍晚散步".to_string(),
                     intent: "把散步留给下班后的自己".to_string(),
-                    domain: GrowthDomainDto::Wellness,
-                    journey_type: JourneyTypeDto::Project,
+                    domain: pb::GrowthDomain::Wellness as i32,
+                    journey_type: pb::JourneyType::Project as i32,
                     completion_criteria: String::new(),
                     stages: Vec::new(),
                     duration_label: "长期".to_string(),
@@ -2011,6 +2595,7 @@ mod tests {
                     first_action_scheduled_timezone: Some("Asia/Shanghai".to_string()),
                     first_action_stage_index: None,
                     first_action_recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -2030,7 +2615,9 @@ mod tests {
             .update_action(
                 "scheduled-user",
                 &scheduled.actions[0].id,
-                UpdateActionRequest {
+                pb::UpdateActionRequest {
+                    user_id: String::new(),
+                    action_id: String::new(),
                     scheduled_label: Some("后天 20:00".to_string()),
                     scheduled_for: Some("2032-06-20T20:00:00+08:00".to_string()),
                     scheduled_timezone: Some("Asia/Shanghai".to_string()),
@@ -2059,7 +2646,8 @@ mod tests {
         let invalid = domain
             .create_action(
                 "scheduled-user",
-                CreateActionRequest {
+                pb::CreateActionRequest {
+                    user_id: String::new(),
                     journey_id: journey.id,
                     stage_id: None,
                     title: "不完整安排".to_string(),
@@ -2069,6 +2657,7 @@ mod tests {
                     scheduled_for: Some("2032-06-18T20:00:00+08:00".to_string()),
                     scheduled_timezone: None,
                     recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await;
@@ -2081,11 +2670,12 @@ mod tests {
         let journey = domain
             .create_journey(
                 "overdue-user",
-                CreateJourneyRequest {
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
                     title: "重新建立写作节奏".to_string(),
                     intent: "把写作放回每周安排".to_string(),
-                    domain: GrowthDomainDto::Learning,
-                    journey_type: JourneyTypeDto::Project,
+                    domain: pb::GrowthDomain::Learning as i32,
+                    journey_type: pb::JourneyType::Project as i32,
                     completion_criteria: String::new(),
                     stages: Vec::new(),
                     duration_label: "4 周".to_string(),
@@ -2097,6 +2687,7 @@ mod tests {
                     first_action_scheduled_timezone: Some("Asia/Shanghai".to_string()),
                     first_action_stage_index: None,
                     first_action_recurrence: None,
+                    idempotency_key: None,
                 },
             )
             .await
@@ -2115,7 +2706,7 @@ mod tests {
             .await
             .expect("companion should load");
 
-        assert_eq!(brief.mode, CompanionModeDto::StartSmall);
+        assert_eq!(brief.mode, pb::CompanionMode::StartSmall as i32);
         assert_eq!(brief.suggested_minutes, Some(8));
         assert_eq!(
             brief
@@ -2143,7 +2734,7 @@ mod tests {
             .await
             .expect("companion brief should load");
 
-        assert_eq!(brief.mode, CompanionModeDto::PlanNext);
+        assert_eq!(brief.mode, pb::CompanionMode::PlanNext as i32);
         assert!(brief.suggested_action.is_none());
         assert_eq!(brief.active_journeys, 0);
     }
@@ -2151,16 +2742,19 @@ mod tests {
     #[tokio::test]
     async fn persists_searches_and_updates_private_knowledge_resources() {
         let domain = domain();
-        let request = CreateKnowledgeResourceRequest {
+        let request = pb::CreateKnowledgeRequest {
+            user_id: String::new(),
+            idempotency_key: None,
             title: " 看不见的城市 ".to_string(),
             creator: "伊塔洛·卡尔维诺".to_string(),
             summary: "关于城市、记忆与欲望".to_string(),
-            kind: KnowledgeResourceKindDto::Book,
-            status: KnowledgeResourceStatusDto::Active,
+            kind: pb::KnowledgeResourceKind::Book as i32,
+            status: pb::KnowledgeResourceStatus::Active as i32,
             source_url: None,
             body: Some("第一章\n城市与记忆".to_string()),
             tags: vec!["城市".to_string(), " 文学 ".to_string()],
             journey_id: Some("journey-reading".to_string()),
+            source_content_id: None,
         };
         let resource = domain
             .create_knowledge(
@@ -2178,7 +2772,7 @@ mod tests {
         assert_eq!(resource.tags, vec!["城市", "文学"]);
         assert!(
             domain
-                .list_knowledge("another-user", KnowledgeQueryRequest::default(),)
+                .list_knowledge("another-user", pb::KnowledgeQueryRequest::default(),)
                 .await
                 .expect("another user's resources should load")
                 .is_empty()
@@ -2186,9 +2780,9 @@ mod tests {
         let matches = domain
             .list_knowledge(
                 "demo-user",
-                KnowledgeQueryRequest {
+                pb::KnowledgeQueryRequest {
                     q: Some("记忆".to_string()),
-                    kind: Some(KnowledgeResourceKindDto::Book),
+                    kind: Some(pb::KnowledgeResourceKind::Book as i32),
                     ..Default::default()
                 },
             )
@@ -2199,11 +2793,13 @@ mod tests {
             .update_knowledge(
                 "demo-user",
                 &resource.id,
-                UpdateKnowledgeResourceRequest {
+                pb::UpdateKnowledgeRequest {
                     progress: Some(100),
                     current_position: Some(2),
                     reading_seconds: Some(900),
-                    bookmarks: Some(vec!["城市与记忆".to_string()]),
+                    bookmarks: Some(pb::StringList {
+                        values: vec!["城市与记忆".to_string()],
+                    }),
                     last_opened_at: Some("2026-08-15T08:00:00Z".to_string()),
                     ..Default::default()
                 },
@@ -2211,23 +2807,29 @@ mod tests {
             .await
             .expect("knowledge resource should update");
         assert_eq!(updated.progress, 100);
-        assert_eq!(updated.status, KnowledgeResourceStatusDto::Completed);
+        assert_eq!(
+            updated.status,
+            pb::KnowledgeResourceStatus::Completed as i32
+        );
         assert_eq!(updated.bookmarks, vec!["城市与记忆"]);
     }
 
     #[tokio::test]
     async fn rejects_knowledge_idempotency_conflicts_and_foreign_routes() {
         let domain = domain();
-        let request = CreateKnowledgeResourceRequest {
+        let request = pb::CreateKnowledgeRequest {
+            user_id: String::new(),
+            idempotency_key: None,
             title: "第一本书".to_string(),
             creator: String::new(),
             summary: String::new(),
-            kind: KnowledgeResourceKindDto::Book,
-            status: KnowledgeResourceStatusDto::Inbox,
+            kind: pb::KnowledgeResourceKind::Book as i32,
+            status: pb::KnowledgeResourceStatus::Inbox as i32,
             source_url: None,
             body: None,
             tags: Vec::new(),
             journey_id: None,
+            source_content_id: None,
         };
         domain
             .create_knowledge("demo-user", request.clone(), Some("same-key".to_string()))
@@ -2243,16 +2845,19 @@ mod tests {
                 crate::datasource::RepositoryError::IdempotencyConflict
             ))
         ));
-        let foreign_route = CreateKnowledgeResourceRequest {
+        let foreign_route = pb::CreateKnowledgeRequest {
+            user_id: String::new(),
+            idempotency_key: None,
             title: "越权资源".to_string(),
             creator: String::new(),
             summary: String::new(),
-            kind: KnowledgeResourceKindDto::Note,
-            status: KnowledgeResourceStatusDto::Inbox,
+            kind: pb::KnowledgeResourceKind::Note as i32,
+            status: pb::KnowledgeResourceStatus::Inbox as i32,
             source_url: None,
             body: None,
             tags: Vec::new(),
             journey_id: Some("journey-reading".to_string()),
+            source_content_id: None,
         };
         assert!(
             domain
@@ -2263,10 +2868,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deduplicates_community_knowledge_references_across_content_edits() {
+        let domain = domain();
+        let request = pb::CreateKnowledgeRequest {
+            user_id: String::new(),
+            idempotency_key: Some("knowledge-capture:post-reading".to_string()),
+            title: "旧标题".to_string(),
+            creator: "作者".to_string(),
+            summary: "第一版摘要".to_string(),
+            kind: pb::KnowledgeResourceKind::Article as i32,
+            status: pb::KnowledgeResourceStatus::Inbox as i32,
+            source_url: Some("bookway://content/post-reading".to_string()),
+            body: None,
+            tags: vec!["阅读".to_string()],
+            journey_id: None,
+            source_content_id: Some("post-reading".to_string()),
+        };
+        let captured = domain
+            .create_knowledge(
+                "demo-user",
+                request.clone(),
+                request.idempotency_key.clone(),
+            )
+            .await
+            .expect("first public reference should be captured");
+        let mut edited = request;
+        edited.title = "新标题".to_string();
+        edited.summary = "第二版摘要".to_string();
+        let retried = domain
+            .create_knowledge("demo-user", edited.clone(), edited.idempotency_key.clone())
+            .await
+            .expect("an edit must return the existing private reference");
+
+        assert_eq!(retried.id, captured.id);
+        assert_eq!(retried.title, "旧标题");
+        assert_eq!(retried.source_content_id.as_deref(), Some("post-reading"));
+    }
+
+    #[tokio::test]
+    async fn turns_one_private_resource_into_one_private_journey() {
+        let domain = domain();
+        let resource = domain
+            .create_knowledge(
+                "demo-user",
+                pb::CreateKnowledgeRequest {
+                    user_id: String::new(),
+                    idempotency_key: Some("knowledge-journey-source".to_string()),
+                    title: "街区观察方法".to_string(),
+                    creator: "作者".to_string(),
+                    summary: "从一次步行开始建立观察练习。".to_string(),
+                    kind: pb::KnowledgeResourceKind::Article as i32,
+                    status: pb::KnowledgeResourceStatus::Inbox as i32,
+                    source_url: Some("bookway://content/city-walk".to_string()),
+                    body: None,
+                    tags: vec!["城市".to_string(), "观察".to_string()],
+                    journey_id: None,
+                    source_content_id: Some("city-walk".to_string()),
+                },
+                Some("knowledge-journey-source".to_string()),
+            )
+            .await
+            .expect("knowledge resource should persist");
+        let request = pb::StartKnowledgeJourneyRequest {
+            user_id: String::new(),
+            resource_id: resource.id.clone(),
+            title: "城市观察练习".to_string(),
+            intent: "把阅读中的方法带到一次真实步行里".to_string(),
+            domain: pb::GrowthDomain::Learning as i32,
+            journey_type: pb::JourneyType::Project as i32,
+            completion_criteria: "完成三次街区观察记录".to_string(),
+            stages: Vec::new(),
+            duration_label: "3 周".to_string(),
+            first_action_title: "完成第一次 15 分钟街区观察".to_string(),
+            first_action_detail: "带着一个问题散步，并记录三个细节。".to_string(),
+            estimated_minutes: 15,
+            first_action_scheduled_label: Some("今天".to_string()),
+            first_action_scheduled_for: None,
+            first_action_scheduled_timezone: None,
+            first_action_stage_index: None,
+            first_action_recurrence: None,
+        };
+        let (first, retry) = tokio::join!(
+            domain.start_knowledge_journey("demo-user", &resource.id, request.clone()),
+            domain.start_knowledge_journey("demo-user", &resource.id, request),
+        );
+        let first = first.expect("first conversion should work");
+        let retry = retry.expect("concurrent retry should reuse the journey");
+        let journey_id = first
+            .resource
+            .as_ref()
+            .and_then(|resource| resource.journey_id.as_deref())
+            .expect("converted resource should link its journey")
+            .to_string();
+
+        assert_eq!(
+            retry
+                .resource
+                .as_ref()
+                .and_then(|item| item.journey_id.as_deref()),
+            Some(journey_id.as_str())
+        );
+        assert_eq!(
+            first.resource.as_ref().map(|item| item.status),
+            Some(pb::KnowledgeResourceStatus::Active as i32)
+        );
+        assert_eq!(
+            first
+                .journey
+                .as_ref()
+                .and_then(|detail| detail.journey.as_ref())
+                .map(|journey| journey.id.as_str()),
+            Some(journey_id.as_str())
+        );
+        let journey = domain
+            .get_journey("demo-user", &journey_id)
+            .await
+            .expect("linked journey should be readable");
+        assert_eq!(journey.actions.len(), 1);
+        assert_eq!(journey.actions[0].title, "完成第一次 15 分钟街区观察");
+        let completion = domain
+            .complete_action("demo-user", &journey.actions[0].id)
+            .await
+            .expect("knowledge-derived action should complete");
+        assert_eq!(
+            completion.source_knowledge_content_id.as_deref(),
+            Some("city-walk")
+        );
+        assert!(
+            domain
+                .start_knowledge_journey(
+                    "another-user",
+                    &resource.id,
+                    pb::StartKnowledgeJourneyRequest {
+                        user_id: String::new(),
+                        resource_id: resource.id.clone(),
+                        title: "不应越权创建".to_string(),
+                        intent: String::new(),
+                        domain: pb::GrowthDomain::Learning as i32,
+                        journey_type: pb::JourneyType::Project as i32,
+                        completion_criteria: String::new(),
+                        stages: Vec::new(),
+                        duration_label: String::new(),
+                        first_action_title: "无效".to_string(),
+                        first_action_detail: String::new(),
+                        estimated_minutes: 10,
+                        first_action_scheduled_label: None,
+                        first_action_scheduled_for: None,
+                        first_action_scheduled_timezone: None,
+                        first_action_stage_index: None,
+                        first_action_recurrence: None,
+                    }
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn exposes_a_private_notification_inbox_and_marks_items_read_idempotently() {
         let domain = domain();
         let inbox = domain
-            .list_notifications("demo-user", NotificationQueryRequest::default())
+            .list_notifications("demo-user", pb::NotificationQueryRequest::default())
             .await
             .expect("seeded inbox should load");
         assert_eq!(inbox.items.len(), 1);
@@ -2286,7 +3048,7 @@ mod tests {
         assert_eq!(retry.read_at, read.read_at);
         assert_eq!(
             domain
-                .list_notifications("demo-user", NotificationQueryRequest::default())
+                .list_notifications("demo-user", pb::NotificationQueryRequest::default())
                 .await
                 .expect("inbox should reload")
                 .unread_count,
@@ -2303,15 +3065,18 @@ mod tests {
     #[tokio::test]
     async fn creates_deduplicated_notifications_without_cross_user_access() {
         let domain = domain();
-        let request = CreateUserNotificationRequest {
-            kind: NotificationKindDto::Community,
+        let request = pb::CreateNotificationRequest {
+            user_id: String::new(),
+            kind: pb::NotificationKind::Community as i32,
             source_id: "like:reader:post-city".to_string(),
             title: "收到一个赞".to_string(),
             body: "有人赞了你的内容".to_string(),
-            data: serde_json::json!({
-                "post_id": "post-city",
-                "actor_id": "reader",
-            }),
+            data: [
+                ("post_id".to_string(), "post-city".to_string()),
+                ("actor_id".to_string(), "reader".to_string()),
+            ]
+            .into_iter()
+            .collect(),
         };
 
         let created = domain
@@ -2325,7 +3090,7 @@ mod tests {
         assert_eq!(retry.id, created.id);
         assert_eq!(
             domain
-                .list_notifications("author", NotificationQueryRequest::default())
+                .list_notifications("author", pb::NotificationQueryRequest::default())
                 .await
                 .expect("recipient inbox should load")
                 .items
@@ -2334,7 +3099,7 @@ mod tests {
         );
         assert!(
             domain
-                .list_notifications("reader", NotificationQueryRequest::default())
+                .list_notifications("reader", pb::NotificationQueryRequest::default())
                 .await
                 .expect("other inbox should load")
                 .items

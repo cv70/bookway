@@ -1,0 +1,7 @@
+name: bookway-ad-center
+owner: commercial-advertising
+kind: grpc-service
+port: 8097
+healthcheck: grpc
+contracts:
+  - src/api/pb/server.proto

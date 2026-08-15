@@ -1,0 +1,206 @@
+syntax = "proto3";
+package bookway.comment;
+
+enum CommentStatus {
+  COMMENT_STATUS_REVIEWING = 0;
+  COMMENT_STATUS_PUBLISHED = 1;
+  COMMENT_STATUS_RESTRICTED = 2;
+  COMMENT_STATUS_DELETED = 3;
+}
+
+enum CommentModerationDecision {
+  COMMENT_MODERATION_DECISION_UNSPECIFIED = 0;
+  COMMENT_MODERATION_DECISION_APPROVE = 1;
+  COMMENT_MODERATION_DECISION_RESTRICT = 2;
+}
+
+enum CommentReportReason {
+  COMMENT_REPORT_REASON_UNSPECIFIED = 0;
+  COMMENT_REPORT_REASON_SPAM = 1;
+  COMMENT_REPORT_REASON_HARASSMENT = 2;
+  COMMENT_REPORT_REASON_UNSAFE = 3;
+  COMMENT_REPORT_REASON_FRAUD = 4;
+  COMMENT_REPORT_REASON_PRIVACY = 5;
+  COMMENT_REPORT_REASON_OTHER = 6;
+}
+
+enum CommentReportStatus {
+  COMMENT_REPORT_STATUS_PENDING = 0;
+  COMMENT_REPORT_STATUS_REVIEWING = 1;
+  COMMENT_REPORT_STATUS_RESOLVED = 2;
+  COMMENT_REPORT_STATUS_REJECTED = 3;
+}
+
+enum CommentReportAction {
+  COMMENT_REPORT_ACTION_NO_ACTION = 0;
+  COMMENT_REPORT_ACTION_RESTRICT_COMMENT = 1;
+}
+
+enum CommentAppealStatus {
+  COMMENT_APPEAL_STATUS_PENDING = 0;
+  COMMENT_APPEAL_STATUS_REVIEWING = 1;
+  COMMENT_APPEAL_STATUS_RESOLVED = 2;
+  COMMENT_APPEAL_STATUS_REJECTED = 3;
+}
+
+enum CommentAppealAction {
+  COMMENT_APPEAL_ACTION_NO_ACTION = 0;
+  COMMENT_APPEAL_ACTION_RESTORE_COMMENT = 1;
+}
+
+message CommentItem {
+  string id = 1;
+  string post_id = 2;
+  string author_id = 3;
+  string author_name = 4;
+  string body = 5;
+  optional string parent_id = 6;
+  uint64 like_count = 7;
+  string created_at = 8;
+  CommentStatus status = 9;
+}
+
+message CreateCommentResult {
+  CommentItem comment = 1;
+  optional string parent_author_id = 2;
+}
+
+message ListRequest {
+  string post_id = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+  repeated string excluded_author_ids = 4;
+}
+message CommentPage {
+  repeated CommentItem items = 1;
+  optional string next_cursor = 2;
+}
+message CreateRequest {
+  string user_id = 1;
+  string post_id = 2;
+  optional string idempotency_key = 3;
+  string body = 4;
+  optional string parent_id = 5;
+  repeated string excluded_author_ids = 6;
+}
+message DeleteRequest {
+  string user_id = 1;
+  string post_id = 2;
+  string comment_id = 3;
+}
+message DeleteResponse {}
+
+message ListModerationRequest {
+  optional string cursor = 1;
+  optional uint32 limit = 2;
+}
+message ModerationCommentPage {
+  repeated CommentItem items = 1;
+  optional string next_cursor = 2;
+}
+message ReviewCommentRequest {
+  string reviewer_id = 1;
+  string comment_id = 2;
+  CommentModerationDecision decision = 3;
+}
+message ReviewCommentResult {
+  CommentItem comment = 1;
+  optional string parent_author_id = 2;
+}
+
+message CreateCommentReportRequest {
+  string reporter_id = 1;
+  string post_id = 2;
+  string comment_id = 3;
+  optional string idempotency_key = 4;
+  CommentReportReason reason = 5;
+  string details = 6;
+  repeated string excluded_author_ids = 7;
+}
+
+message CommentReport {
+  string id = 1;
+  string reporter_id = 2;
+  CommentItem reported_comment = 3;
+  CommentReportReason reason = 4;
+  string details = 5;
+  CommentReportStatus status = 6;
+  optional string reviewer_id = 7;
+  optional string resolution = 8;
+  CommentReportAction action = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+
+message ListCommentReportsRequest {
+  optional CommentReportStatus status = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+}
+
+message CommentReportPage {
+  repeated CommentReport items = 1;
+  optional string next_cursor = 2;
+}
+
+message ReviewCommentReportRequest {
+  string reviewer_id = 1;
+  string report_id = 2;
+  CommentReportStatus status = 3;
+  string resolution = 4;
+  CommentReportAction action = 5;
+}
+
+message CreateCommentAppealRequest {
+  string author_id = 1;
+  string comment_id = 2;
+  optional string idempotency_key = 3;
+  string details = 4;
+}
+
+message CommentAppeal {
+  string id = 1;
+  string author_id = 2;
+  CommentItem appealed_comment = 3;
+  string details = 4;
+  CommentAppealStatus status = 5;
+  optional string reviewer_id = 6;
+  optional string resolution = 7;
+  CommentAppealAction action = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message ListCommentAppealsRequest {
+  optional string author_id = 1;
+  optional CommentAppealStatus status = 2;
+  optional string cursor = 3;
+  optional uint32 limit = 4;
+}
+
+message CommentAppealPage {
+  repeated CommentAppeal items = 1;
+  optional string next_cursor = 2;
+}
+
+message ReviewCommentAppealRequest {
+  string reviewer_id = 1;
+  string appeal_id = 2;
+  CommentAppealStatus status = 3;
+  string resolution = 4;
+  CommentAppealAction action = 5;
+}
+
+service Comment {
+  rpc List(ListRequest) returns (CommentPage);
+  rpc Create(CreateRequest) returns (CreateCommentResult);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc ListModeration(ListModerationRequest) returns (ModerationCommentPage);
+  rpc Review(ReviewCommentRequest) returns (ReviewCommentResult);
+  rpc Report(CreateCommentReportRequest) returns (CommentReport);
+  rpc ListReports(ListCommentReportsRequest) returns (CommentReportPage);
+  rpc ReviewReport(ReviewCommentReportRequest) returns (CommentReport);
+  rpc Appeal(CreateCommentAppealRequest) returns (CommentAppeal);
+  rpc ListAppeals(ListCommentAppealsRequest) returns (CommentAppealPage);
+  rpc ReviewAppeal(ReviewCommentAppealRequest) returns (CommentAppeal);
+}

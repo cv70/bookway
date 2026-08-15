@@ -1,5 +1,4 @@
 mod grpc;
-#[path = "pb/bookway.recommend.rank.rs"]
-pub mod pb;
+pub use bookway_recommend_rank_api::pb;
 
 pub use grpc::serve;

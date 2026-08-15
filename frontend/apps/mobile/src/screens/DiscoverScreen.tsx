@@ -15,10 +15,12 @@ import { eventReporter } from '../analytics/eventReporter';
 import { FeedCard } from '../components/FeedCard';
 import { ScreenHeader } from '../components/ScreenHeader';
 import { colors, domainMeta } from '../theme';
-import { Feed, GrowthDomain, SearchResponse } from '../types';
+import { Feed, FeedItem, GrowthDomain, PublicAuthor, SearchResponse, SearchResult } from '../types';
+import { attachSearchAttribution, searchAttribution } from '../utils/feedAttribution';
 
 type Filter = 'all' | GrowthDomain;
 type FeedMode = 'recommend' | 'following';
+type FeedSurface = 'home' | 'following';
 
 const filters: Array<{ key: Filter; label: string }> = [
   { key: 'all', label: '为你推荐' },
@@ -42,6 +44,7 @@ export function DiscoverScreen({
   onJoin,
   onLoadMoreFeed,
   onOpen,
+  onOpenAuthor,
 }: {
   feed: Feed;
   followingFeed: Feed;
@@ -53,12 +56,13 @@ export function DiscoverScreen({
   joiningRouteIds?: Set<string>;
   routeParticipantCounts?: Record<string, number>;
   offline?: boolean;
-  onLike?: (postId: string) => void;
-  onBookmark?: (postId: string) => void;
-  onHide?: (postId: string) => void;
-  onJoin?: (post: Feed['items'][number]['post']) => void;
-  onLoadMoreFeed?: (surface: FeedMode) => void;
+  onLike?: (postId: string, context?: FeedItem['recommendation_context']) => void;
+  onBookmark?: (postId: string, context?: FeedItem['recommendation_context']) => void;
+  onHide?: (postId: string, context?: FeedItem['recommendation_context']) => void;
+  onJoin?: (post: Feed['items'][number]['post'], context?: FeedItem['recommendation_context']) => void;
+  onLoadMoreFeed?: (surface: FeedSurface) => void;
   onOpen?: (item: Feed['items'][number]) => void;
+  onOpenAuthor?: (author: PublicAuthor) => void;
 }) {
   const [filter, setFilter] = useState<Filter>('all');
   const [mode, setMode] = useState<FeedMode>('recommend');
@@ -76,9 +80,20 @@ export function DiscoverScreen({
   const feedLoading = mode === 'following' ? followingFeedLoadingMore : feedLoadingMore;
   const items = filter === 'all' ? visibleFeed : visibleFeed.filter((item) => item.post.domain === filter);
   const searchResults = searchResponse?.items ?? null;
-  const visibleSearchResults = filter === 'all'
-    ? searchResults
-    : searchResults?.filter((result) => (result.post?.domain ?? result.domain) === filter);
+  const visibleSearchResults = (searchResults?.map((result, position) => ({ result, attribution: result.event_context ?? searchAttribution(position, searchResponse?.request_id) })) ?? null)
+    ?.filter(({ result }) => filter === 'all' || (result.post?.domain ?? result.domain) === filter);
+
+  const openSearchResult = (result: SearchResult) => {
+    if (result.result_type === 'user') {
+      const authorId = result.author_id ?? result.id;
+      if (authorId) onOpenAuthor?.({ id: authorId, name: result.author_name ?? result.title, avatar_url: result.cover_url });
+      return;
+    }
+    if (result.result_type === 'topic') {
+      setQuery(result.title);
+      rememberQuery(result.title);
+    }
+  };
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -93,17 +108,18 @@ export function DiscoverScreen({
     setSearchResponse(null);
     setSearching(true);
     const timer = setTimeout(() => {
-      eventReporter.track({ event_type: 'search_submit', component_id: 'discover-search', source: 'mobile', content_id: undefined });
+      eventReporter.track({ event_type: 'search_submit', component_id: 'discover-search', source: 'mobile-search', content_id: undefined });
       searchApi(trimmed)
         .then((response) => {
           if (requestId !== searchRequestId.current) return;
           setRecentQueries((current) => [trimmed, ...current.filter((item) => item !== trimmed)].slice(0, 6));
-          setSearchResponse(response);
+          setSearchResponse(attachSearchAttribution(response));
         })
         .catch(() => {
           if (requestId !== searchRequestId.current) return;
           const lower = trimmed.toLowerCase();
           setSearchResponse({
+            request_id: '',
             query: trimmed,
             items: feed.items
               .filter(({ post }) => `${post.title} ${post.summary} ${post.tags.join(' ')}`.toLowerCase().includes(lower))
@@ -170,14 +186,15 @@ export function DiscoverScreen({
     searchApi(trimmed, cursor)
       .then((response) => {
         if (requestId !== searchRequestId.current) return;
+        const attributedResponse = attachSearchAttribution(response);
         setSearchResponse((current) => {
           if (!current || current.query !== trimmed) return current;
           const seenIds = new Set(current.items.map((item) => item.id));
           return {
-            ...response,
-            items: [...current.items, ...response.items.filter((item) => !seenIds.has(item.id))],
-            total_estimate: Math.max(current.total_estimate, response.total_estimate),
-            degraded: current.degraded || response.degraded,
+            ...attributedResponse,
+            items: [...current.items, ...attributedResponse.items.filter((item) => !seenIds.has(item.id))],
+            total_estimate: Math.max(current.total_estimate, attributedResponse.total_estimate),
+            degraded: current.degraded || attributedResponse.degraded,
           };
         });
       })
@@ -189,7 +206,7 @@ export function DiscoverScreen({
         // PIT-backed cursors are deliberately short-lived. Restart from page one so a user
         // can continue searching instead of retrying an expired cursor forever.
         return searchApi(trimmed).then((response) => {
-          if (requestId === searchRequestId.current) setSearchResponse(response);
+          if (requestId === searchRequestId.current) setSearchResponse(attachSearchAttribution(response));
         }).catch(() => {
           // Keep already rendered results if the refresh itself cannot be completed.
         });
@@ -208,7 +225,7 @@ export function DiscoverScreen({
       onScroll={({ nativeEvent }) => {
         if (nativeEvent.layoutMeasurement.height + nativeEvent.contentOffset.y < nativeEvent.contentSize.height - 180) return;
         if (query) loadMoreSearch();
-        else onLoadMoreFeed?.(mode);
+        else onLoadMoreFeed?.(mode === 'following' ? 'following' : 'home');
       }}
       scrollEventThrottle={200}
       showsVerticalScrollIndicator={false}
@@ -270,10 +287,10 @@ export function DiscoverScreen({
       </ScrollView>
       <View>
         {query
-          ? visibleSearchResults?.map((result) =>
+          ? visibleSearchResults?.map(({ result, attribution }) =>
               result.post ? (
                 <FeedCard
-                  item={{ author_id: result.author_id ?? '', post: result.post, score: result.score, source: 'search', reasons: result.highlights }}
+                  item={{ author_id: result.author_id ?? '', post: result.post, score: result.score, source: 'search', reasons: result.highlights, recommendation_context: attribution }}
                   bookmarked={bookmarkedPostIds?.has(result.id)}
                   key={result.id}
                   joined={joinedRouteIds?.has(result.id)}
@@ -287,10 +304,10 @@ export function DiscoverScreen({
                   onOpen={onOpen}
                 />
               ) : (
-                <View key={result.id} style={styles.resultRow}>
+                <Pressable accessibilityLabel={result.result_type === 'user' ? `查看创作者${result.title}` : `搜索话题${result.title}`} key={result.id} onPress={() => openSearchResult(result)} style={({ pressed }) => [styles.resultRow, pressed && styles.pressed]}>
                   <Text style={styles.resultTitle}>{result.title}</Text>
                   <Text style={styles.resultSnippet}>{result.snippet}</Text>
-                </View>
+                </Pressable>
               ),
             )
           : items.map((item) => (
@@ -317,7 +334,7 @@ export function DiscoverScreen({
         </Pressable>
       ) : null}
       {!query && activeFeed.meta.next_cursor ? (
-        <Pressable accessibilityRole="button" disabled={feedLoading} onPress={() => onLoadMoreFeed?.(mode)} style={[styles.loadMore, feedLoading && styles.loadMoreDisabled]}>
+        <Pressable accessibilityRole="button" disabled={feedLoading} onPress={() => onLoadMoreFeed?.(mode === 'following' ? 'following' : 'home')} style={[styles.loadMore, feedLoading && styles.loadMoreDisabled]}>
           {feedLoading ? <ActivityIndicator color={colors.evergreen} size="small" /> : <Text style={styles.loadMoreText}>加载更多{mode === 'following' ? '关注内容' : '推荐内容'}</Text>}
         </Pressable>
       ) : null}
@@ -363,4 +380,5 @@ const styles = StyleSheet.create({
   loadMore: { minHeight: 42, marginHorizontal: 16, marginTop: 14, alignItems: 'center', justifyContent: 'center', borderRadius: 6, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
   loadMoreDisabled: { opacity: 0.65 },
   loadMoreText: { color: colors.evergreen, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  pressed: { opacity: 0.62 },
 });

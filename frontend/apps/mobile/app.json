@@ -8,6 +8,16 @@
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "jsEngine": "hermes",
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "允许万卷行访问照片和视频，以便发布行动记录、心得与视频。",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ]
+    ],
     "ios": {
       "supportsTablet": true
     },

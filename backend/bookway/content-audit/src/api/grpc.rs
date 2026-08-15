@@ -1,15 +1,7 @@
 #![allow(clippy::result_large_err)] // tonic::Status is fixed by the transport API.
 
 use super::pb::{self, content_audit_server::ContentAudit};
-use crate::{
-    api::{
-        ContentAppealQueryRequest, ContentAuditRequest, ContentReportQueryRequest,
-        CreateContentAppealRequest, CreateContentReportRequest, ReviewContentAppealRequest,
-        ReviewContentReportRequest,
-    },
-    domain::{AuditError, Domain},
-};
-use serde::Serialize;
+use crate::domain::{AuditError, Domain};
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
@@ -22,112 +14,91 @@ impl ContentAudit for GrpcServer {
     async fn audit(
         &self,
         request: Request<pb::AuditRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let payload: ContentAuditRequest = from_json(&request.into_inner().request_json)?;
+    ) -> Result<Response<pb::AuditResponse>, Status> {
         let response = self
             .domain
-            .audit(payload)
+            .audit(request.into_inner())
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
-        json_response(&response)
+        Ok(Response::new(response))
     }
 
     async fn report(
         &self,
-        request: Request<pb::ReportRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+        request: Request<pb::CreateReportRequest>,
+    ) -> Result<Response<pb::ContentReport>, Status> {
         require_moderation_access(&request)?;
-        let request = request.into_inner();
-        let payload: CreateContentReportRequest = from_json(&request.request_json)?;
         let response = self
             .domain
-            .report(
-                &request.reporter_id,
-                &request.content_id,
-                payload,
-                (!request.idempotency_key.is_empty()).then_some(request.idempotency_key),
-            )
+            .report(request.into_inner())
             .await
             .map_err(audit_status)?;
-        json_response(&response)
+        Ok(Response::new(response))
     }
 
     async fn list_reports(
         &self,
         request: Request<pb::ListReportsRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::ReportPage>, Status> {
         require_moderation_access(&request)?;
-        let payload: ContentReportQueryRequest = from_json(&request.into_inner().request_json)?;
         let response = self
             .domain
-            .list_reports(payload)
+            .list_reports(request.into_inner())
             .await
             .map_err(audit_status)?;
-        json_response(&response)
+        Ok(Response::new(response))
     }
 
     async fn appeal(
         &self,
-        request: Request<pb::AppealRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+        request: Request<pb::CreateAppealRequest>,
+    ) -> Result<Response<pb::ContentAppeal>, Status> {
         require_moderation_access(&request)?;
-        let request = request.into_inner();
-        let payload: CreateContentAppealRequest = from_json(&request.request_json)?;
         let response = self
             .domain
-            .appeal(
-                &request.appellant_id,
-                &request.content_id,
-                payload,
-                (!request.idempotency_key.is_empty()).then_some(request.idempotency_key),
-            )
+            .appeal(request.into_inner())
             .await
             .map_err(audit_status)?;
-        json_response(&response)
+        Ok(Response::new(response))
     }
 
     async fn review_report(
         &self,
         request: Request<pb::ReviewReportRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::ContentReport>, Status> {
         require_moderation_access(&request)?;
-        let request = request.into_inner();
-        let payload: ReviewContentReportRequest = from_json(&request.request_json)?;
         let response = self
             .domain
-            .review_report(&request.reviewer_id, &request.report_id, payload)
+            .review_report(request.into_inner())
             .await
             .map_err(audit_status)?;
-        json_response(&response)
+        Ok(Response::new(response))
     }
 
     async fn list_appeals(
         &self,
         request: Request<pb::ListAppealsRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::AppealPage>, Status> {
         require_moderation_access(&request)?;
-        let payload: ContentAppealQueryRequest = from_json(&request.into_inner().request_json)?;
         let response = self
             .domain
-            .list_appeals(payload)
+            .list_appeals(request.into_inner())
             .await
             .map_err(audit_status)?;
-        json_response(&response)
+        Ok(Response::new(response))
     }
 
     async fn review_appeal(
         &self,
         request: Request<pb::ReviewAppealRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::ContentAppeal>, Status> {
         require_moderation_access(&request)?;
-        let request = request.into_inner();
-        let payload: ReviewContentAppealRequest = from_json(&request.request_json)?;
         let response = self
             .domain
-            .review_appeal(&request.reviewer_id, &request.appeal_id, payload)
+            .review_appeal(request.into_inner())
             .await
             .map_err(audit_status)?;
-        json_response(&response)
+        Ok(Response::new(response))
     }
 }
 
@@ -144,17 +115,6 @@ pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
         ))
         .serve(addr)
         .await
-}
-
-fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, Status> {
-    serde_json::from_str(value).map_err(|error| Status::invalid_argument(error.to_string()))
-}
-
-fn json_response<T: Serialize>(value: &T) -> Result<Response<pb::JsonResponse>, Status> {
-    Ok(Response::new(pb::JsonResponse {
-        response_json: serde_json::to_string(value)
-            .map_err(|error| Status::internal(error.to_string()))?,
-    }))
 }
 
 fn require_moderation_access<T>(request: &Request<T>) -> Result<(), Status> {

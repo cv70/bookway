@@ -4,10 +4,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use super::api::{
-    RouteParticipationContextDto, RouteParticipationDto, RouteParticipationStateDto,
-    SocialContextDto, SocialEdgeTypeDto, SocialVisibilityDto,
-};
+use crate::api::pb;
 
 #[derive(Debug, Error)]
 pub(crate) enum RepositoryError {
@@ -21,27 +18,27 @@ pub(crate) enum RepositoryError {
 
 #[async_trait]
 pub(crate) trait BbsRepository: Send + Sync {
-    async fn context(&self, user_id: &str) -> Result<SocialContextDto, RepositoryError>;
+    async fn context(&self, user_id: &str) -> Result<pb::SocialContext, RepositoryError>;
     async fn visibility_context(
         &self,
         user_id: &str,
-    ) -> Result<SocialVisibilityDto, RepositoryError>;
+    ) -> Result<pb::SocialVisibility, RepositoryError>;
     async fn set_edge(
         &self,
         user_id: &str,
         target_user_id: &str,
-        edge: SocialEdgeTypeDto,
+        edge: pb::SocialEdgeType,
         active: bool,
-    ) -> Result<SocialContextDto, RepositoryError>;
+    ) -> Result<pb::SocialContext, RepositoryError>;
     async fn list_route_participations(
         &self,
         user_id: &str,
-    ) -> Result<Vec<RouteParticipationDto>, RepositoryError>;
+    ) -> Result<Vec<pb::RouteParticipation>, RepositoryError>;
     async fn route_context(
         &self,
         user_id: &str,
         route_ids: &[String],
-    ) -> Result<RouteParticipationContextDto, RepositoryError>;
+    ) -> Result<pb::RouteParticipationContext, RepositoryError>;
     async fn set_route_participation(
         &self,
         user_id: &str,
@@ -49,12 +46,12 @@ pub(crate) trait BbsRepository: Send + Sync {
         active: bool,
         private_journey_id: Option<String>,
         intent_version: Option<u64>,
-    ) -> Result<RouteParticipationStateDto, RepositoryError>;
+    ) -> Result<pb::RouteParticipationState, RepositoryError>;
 }
 
 pub(crate) struct MemoryBbsRepository {
-    edges: RwLock<HashSet<(String, String, SocialEdgeTypeDto)>>,
-    route_participations: RwLock<HashMap<(String, String), RouteParticipationDto>>,
+    edges: RwLock<HashSet<(String, String, pb::SocialEdgeType)>>,
+    route_participations: RwLock<HashMap<(String, String), pb::RouteParticipation>>,
     route_intent_versions: RwLock<HashMap<(String, String), u64>>,
 }
 
@@ -64,7 +61,7 @@ impl MemoryBbsRepository {
             edges: RwLock::new(HashSet::from([(
                 "demo-user".to_string(),
                 "author-changfeng".to_string(),
-                SocialEdgeTypeDto::Follow,
+                pb::SocialEdgeType::Follow,
             )])),
             route_participations: RwLock::new(HashMap::new()),
             route_intent_versions: RwLock::new(HashMap::new()),
@@ -74,12 +71,12 @@ impl MemoryBbsRepository {
 
 #[async_trait]
 impl BbsRepository for MemoryBbsRepository {
-    async fn context(&self, user_id: &str) -> Result<SocialContextDto, RepositoryError> {
+    async fn context(&self, user_id: &str) -> Result<pb::SocialContext, RepositoryError> {
         let edges = self.edges.read().await;
-        Ok(SocialContextDto {
-            followed_author_ids: targets(&edges, user_id, SocialEdgeTypeDto::Follow),
-            blocked_author_ids: targets(&edges, user_id, SocialEdgeTypeDto::Block),
-            muted_author_ids: targets(&edges, user_id, SocialEdgeTypeDto::Mute),
+        Ok(pb::SocialContext {
+            followed_author_ids: targets(&edges, user_id, pb::SocialEdgeType::Follow),
+            blocked_author_ids: targets(&edges, user_id, pb::SocialEdgeType::Block),
+            muted_author_ids: targets(&edges, user_id, pb::SocialEdgeType::Mute),
             liked_post_ids: Vec::new(),
             bookmarked_post_ids: Vec::new(),
         })
@@ -88,21 +85,21 @@ impl BbsRepository for MemoryBbsRepository {
     async fn visibility_context(
         &self,
         user_id: &str,
-    ) -> Result<SocialVisibilityDto, RepositoryError> {
+    ) -> Result<pb::SocialVisibility, RepositoryError> {
         let edges = self.edges.read().await;
         let mut excluded_author_ids = edges
             .iter()
             .filter_map(|(source, target, edge)| match edge {
-                SocialEdgeTypeDto::Block | SocialEdgeTypeDto::Mute if source == user_id => {
+                pb::SocialEdgeType::Block | pb::SocialEdgeType::Mute if source == user_id => {
                     Some(target.clone())
                 }
-                SocialEdgeTypeDto::Block if target == user_id => Some(source.clone()),
+                pb::SocialEdgeType::Block if target == user_id => Some(source.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
         excluded_author_ids.sort();
         excluded_author_ids.dedup();
-        Ok(SocialVisibilityDto {
+        Ok(pb::SocialVisibility {
             excluded_author_ids,
         })
     }
@@ -111,22 +108,22 @@ impl BbsRepository for MemoryBbsRepository {
         &self,
         user_id: &str,
         target_user_id: &str,
-        edge: SocialEdgeTypeDto,
+        edge: pb::SocialEdgeType,
         active: bool,
-    ) -> Result<SocialContextDto, RepositoryError> {
+    ) -> Result<pb::SocialContext, RepositoryError> {
         let mut edges = self.edges.write().await;
         let key = (user_id.to_string(), target_user_id.to_string(), edge);
-        if active && edge == SocialEdgeTypeDto::Follow {
+        if active && edge == pb::SocialEdgeType::Follow {
             let blocked = [
                 (
                     user_id.to_string(),
                     target_user_id.to_string(),
-                    SocialEdgeTypeDto::Block,
+                    pb::SocialEdgeType::Block,
                 ),
                 (
                     target_user_id.to_string(),
                     user_id.to_string(),
-                    SocialEdgeTypeDto::Block,
+                    pb::SocialEdgeType::Block,
                 ),
             ]
             .iter()
@@ -135,21 +132,21 @@ impl BbsRepository for MemoryBbsRepository {
                 return Err(RepositoryError::BlockedRelationship);
             }
         }
-        if active && edge == SocialEdgeTypeDto::Block {
+        if active && edge == pb::SocialEdgeType::Block {
             edges.remove(&(
                 user_id.to_string(),
                 target_user_id.to_string(),
-                SocialEdgeTypeDto::Follow,
+                pb::SocialEdgeType::Follow,
             ));
             edges.remove(&(
                 target_user_id.to_string(),
                 user_id.to_string(),
-                SocialEdgeTypeDto::Follow,
+                pb::SocialEdgeType::Follow,
             ));
             edges.remove(&(
                 user_id.to_string(),
                 target_user_id.to_string(),
-                SocialEdgeTypeDto::Mute,
+                pb::SocialEdgeType::Mute,
             ));
         }
         if active {
@@ -164,7 +161,7 @@ impl BbsRepository for MemoryBbsRepository {
     async fn list_route_participations(
         &self,
         user_id: &str,
-    ) -> Result<Vec<RouteParticipationDto>, RepositoryError> {
+    ) -> Result<Vec<pb::RouteParticipation>, RepositoryError> {
         let participations = self.route_participations.read().await;
         let mut items = participations
             .iter()
@@ -179,10 +176,10 @@ impl BbsRepository for MemoryBbsRepository {
         &self,
         user_id: &str,
         route_ids: &[String],
-    ) -> Result<RouteParticipationContextDto, RepositoryError> {
+    ) -> Result<pb::RouteParticipationContext, RepositoryError> {
         let requested = route_ids.iter().collect::<HashSet<_>>();
         let participations = self.route_participations.read().await;
-        let mut context = RouteParticipationContextDto::default();
+        let mut context = pb::RouteParticipationContext::default();
         for (route_id, participant_id) in participations.keys() {
             if !requested.contains(route_id) {
                 continue;
@@ -206,7 +203,7 @@ impl BbsRepository for MemoryBbsRepository {
         active: bool,
         private_journey_id: Option<String>,
         intent_version: Option<u64>,
-    ) -> Result<RouteParticipationStateDto, RepositoryError> {
+    ) -> Result<pb::RouteParticipationState, RepositoryError> {
         let key = (route_id.to_string(), user_id.to_string());
         let mut versions = self.route_intent_versions.write().await;
         let mut participations = self.route_participations.write().await;
@@ -222,7 +219,7 @@ impl BbsRepository for MemoryBbsRepository {
                 .unwrap_or(format_timestamp(time::OffsetDateTime::now_utc())?);
             participations.insert(
                 key.clone(),
-                RouteParticipationDto {
+                pb::RouteParticipation {
                     route_id: route_id.to_string(),
                     private_journey_id: private_journey_id.clone(),
                     joined_at: joined_at.clone(),
@@ -236,7 +233,7 @@ impl BbsRepository for MemoryBbsRepository {
             .filter(|(current_route_id, _)| current_route_id == route_id)
             .count() as u64;
         let participation = participations.get(&key);
-        Ok(RouteParticipationStateDto {
+        Ok(pb::RouteParticipationState {
             route_id: route_id.to_string(),
             joined: participation.is_some(),
             private_journey_id: participation.and_then(|item| item.private_journey_id.clone()),
@@ -258,7 +255,7 @@ impl PostgresBbsRepository {
 
 #[async_trait]
 impl BbsRepository for PostgresBbsRepository {
-    async fn context(&self, user_id: &str) -> Result<SocialContextDto, RepositoryError> {
+    async fn context(&self, user_id: &str) -> Result<pb::SocialContext, RepositoryError> {
         let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT target_user_id, edge_type FROM social_edges WHERE source_user_id = $1 AND deleted_at IS NULL ORDER BY target_user_id",
         )
@@ -266,7 +263,7 @@ impl BbsRepository for PostgresBbsRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(RepositoryError::Database)?;
-        let mut context = SocialContextDto {
+        let mut context = pb::SocialContext {
             followed_author_ids: Vec::new(),
             blocked_author_ids: Vec::new(),
             muted_author_ids: Vec::new(),
@@ -287,7 +284,7 @@ impl BbsRepository for PostgresBbsRepository {
     async fn visibility_context(
         &self,
         user_id: &str,
-    ) -> Result<SocialVisibilityDto, RepositoryError> {
+    ) -> Result<pb::SocialVisibility, RepositoryError> {
         let excluded_author_ids = sqlx::query_scalar::<_, String>(
             "SELECT DISTINCT CASE WHEN source_user_id = $1 THEN target_user_id ELSE source_user_id END FROM social_edges WHERE deleted_at IS NULL AND ((source_user_id = $1 AND edge_type IN ('block', 'mute')) OR (target_user_id = $1 AND edge_type = 'block')) ORDER BY 1",
         )
@@ -295,7 +292,7 @@ impl BbsRepository for PostgresBbsRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(RepositoryError::Database)?;
-        Ok(SocialVisibilityDto {
+        Ok(pb::SocialVisibility {
             excluded_author_ids,
         })
     }
@@ -304,12 +301,21 @@ impl BbsRepository for PostgresBbsRepository {
         &self,
         user_id: &str,
         target_user_id: &str,
-        edge: SocialEdgeTypeDto,
+        edge: pb::SocialEdgeType,
         active: bool,
-    ) -> Result<SocialContextDto, RepositoryError> {
+    ) -> Result<pb::SocialContext, RepositoryError> {
         let edge_type = edge_name(edge);
         let mut transaction = self.pool.begin().await.map_err(RepositoryError::Database)?;
-        if active && edge == SocialEdgeTypeDto::Follow {
+        let (first_user_id, second_user_id) = ordered_social_pair(user_id, target_user_id);
+        // A block removes follows in both directions. Serialize every mutation
+        // for this user pair so a concurrent follow cannot commit after that cleanup.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::TEXT), hashtext($2::TEXT))")
+            .bind(first_user_id)
+            .bind(second_user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::Database)?;
+        if active && edge == pb::SocialEdgeType::Follow {
             let blocked = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM social_edges WHERE edge_type = 'block' AND deleted_at IS NULL AND ((source_user_id = $1 AND target_user_id = $2) OR (source_user_id = $2 AND target_user_id = $1)))",
             )
@@ -322,7 +328,7 @@ impl BbsRepository for PostgresBbsRepository {
                 return Err(RepositoryError::BlockedRelationship);
             }
         }
-        if active && edge == SocialEdgeTypeDto::Block {
+        if active && edge == pb::SocialEdgeType::Block {
             sqlx::query(
                 "UPDATE social_edges SET deleted_at = now() WHERE deleted_at IS NULL AND ((edge_type = 'follow' AND ((source_user_id = $1 AND target_user_id = $2) OR (source_user_id = $2 AND target_user_id = $1))) OR (edge_type = 'mute' AND source_user_id = $1 AND target_user_id = $2))",
             )
@@ -363,7 +369,7 @@ impl BbsRepository for PostgresBbsRepository {
     async fn list_route_participations(
         &self,
         user_id: &str,
-    ) -> Result<Vec<RouteParticipationDto>, RepositoryError> {
+    ) -> Result<Vec<pb::RouteParticipation>, RepositoryError> {
         let rows = sqlx::query_as::<_, (String, Option<String>, time::OffsetDateTime)>(
             "SELECT route_id, private_journey_id, joined_at FROM route_participations WHERE user_id = $1 AND left_at IS NULL ORDER BY joined_at DESC",
         )
@@ -373,7 +379,7 @@ impl BbsRepository for PostgresBbsRepository {
         .map_err(RepositoryError::Database)?;
         rows.into_iter()
             .map(|(route_id, private_journey_id, joined_at)| {
-                Ok(RouteParticipationDto {
+                Ok(pb::RouteParticipation {
                     route_id,
                     private_journey_id,
                     joined_at: format_timestamp(joined_at)?,
@@ -386,9 +392,9 @@ impl BbsRepository for PostgresBbsRepository {
         &self,
         user_id: &str,
         route_ids: &[String],
-    ) -> Result<RouteParticipationContextDto, RepositoryError> {
+    ) -> Result<pb::RouteParticipationContext, RepositoryError> {
         if route_ids.is_empty() {
-            return Ok(RouteParticipationContextDto::default());
+            return Ok(pb::RouteParticipationContext::default());
         }
         let counts = sqlx::query_as::<_, (String, i64)>(
             "SELECT route_id, SUM(active_count)::BIGINT FROM route_participation_count_shards WHERE route_id = ANY($1) GROUP BY route_id",
@@ -405,7 +411,7 @@ impl BbsRepository for PostgresBbsRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(RepositoryError::Database)?;
-        Ok(RouteParticipationContextDto {
+        Ok(pb::RouteParticipationContext {
             joined_route_ids,
             participant_counts: counts
                 .into_iter()
@@ -421,7 +427,7 @@ impl BbsRepository for PostgresBbsRepository {
         active: bool,
         private_journey_id: Option<String>,
         intent_version: Option<u64>,
-    ) -> Result<RouteParticipationStateDto, RepositoryError> {
+    ) -> Result<pb::RouteParticipationState, RepositoryError> {
         let mut transaction = self.pool.begin().await.map_err(RepositoryError::Database)?;
         // Only commands for the same user and route need ordering. Hot routes can use all shards.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::TEXT), hashtext($2::TEXT))")
@@ -483,7 +489,7 @@ impl BbsRepository for PostgresBbsRepository {
             .commit()
             .await
             .map_err(RepositoryError::Database)?;
-        Ok(RouteParticipationStateDto {
+        Ok(pb::RouteParticipationState {
             route_id: route_id.to_string(),
             joined,
             private_journey_id: joined.then_some(private_journey_id).flatten(),
@@ -507,22 +513,43 @@ fn format_timestamp(value: time::OffsetDateTime) -> Result<String, time::error::
     value.format(&time::format_description::well_known::Rfc3339)
 }
 
-fn edge_name(edge: SocialEdgeTypeDto) -> &'static str {
+fn edge_name(edge: pb::SocialEdgeType) -> &'static str {
     match edge {
-        SocialEdgeTypeDto::Follow => "follow",
-        SocialEdgeTypeDto::Block => "block",
-        SocialEdgeTypeDto::Mute => "mute",
+        pb::SocialEdgeType::Follow => "follow",
+        pb::SocialEdgeType::Block => "block",
+        pb::SocialEdgeType::Mute => "mute",
+    }
+}
+
+fn ordered_social_pair<'a>(first: &'a str, second: &'a str) -> (&'a str, &'a str) {
+    if first <= second {
+        (first, second)
+    } else {
+        (second, first)
     }
 }
 
 fn targets(
-    edges: &HashSet<(String, String, SocialEdgeTypeDto)>,
+    edges: &HashSet<(String, String, pb::SocialEdgeType)>,
     user_id: &str,
-    edge_type: SocialEdgeTypeDto,
+    edge_type: pb::SocialEdgeType,
 ) -> Vec<String> {
     edges
         .iter()
         .filter(|(source, _, edge)| source == user_id && *edge == edge_type)
         .map(|(_, target, _)| target.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ordered_social_pair;
+
+    #[test]
+    fn social_pair_lock_has_one_key_for_both_directions() {
+        assert_eq!(
+            ordered_social_pair("user-a", "user-b"),
+            ordered_social_pair("user-b", "user-a")
+        );
+    }
 }

@@ -4,19 +4,14 @@ use std::{
     time::Instant,
 };
 
-use bookway_api::{
-    ContentDto, ContentQueryRequest, ContentStatusDto, ContentTypeDto, PostSummaryDto,
-    SearchResultDto, SearchResultTypeDto, SearchTypeDto, SuggestionDto,
-};
+use bookway_bbs_link_api::pb::{self as bbs_link_pb, bbs_link_client::BbsLinkClient};
+use bookway_bbs_search_api::pb;
 use thiserror::Error;
 
-use super::{
-    api::{SearchQueryRequest, SearchResponseDto, SuggestionQueryRequest, SuggestionResponseDto},
-    datasource::{
-        GrpcContentSearchSource, MemorySearchAnalytics, MemorySearchSessionStore, OpenSearchSource,
-        PostgresSearchAnalytics, PostgresSearchSessionStore, SearchSession, SearchSessionStore,
-        SearchSource, SearchSourceError, SharedSearchAnalytics, search_type_name, stable_hash,
-    },
+use super::datasource::{
+    MemorySearchAnalytics, MemorySearchSessionStore, OpenSearchSource, PostgresSearchAnalytics,
+    PostgresSearchSessionStore, SearchSession, SearchSessionStore, SearchSource, SearchSourceError,
+    SearchSourceResult, SharedSearchAnalytics, search_type_name, stable_hash,
 };
 use crate::conf::Config;
 
@@ -29,19 +24,19 @@ const MAX_PUBLIC_CURSOR_BYTES: usize = 128;
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) search: SearchService,
+    search: SearchService,
+    content_client: BbsLinkClient<tonic::transport::Channel>,
 }
 
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let fallback = GrpcContentSearchSource::connect(config.bbs_link_url.clone()).await?;
-        let source: Arc<dyn SearchSource> = match config.opensearch_url.clone() {
-            Some(url) => Arc::new(OpenSearchSource::new(
+        let content_client = BbsLinkClient::connect(config.bbs_link_url.clone()).await?;
+        let source: Option<Arc<dyn SearchSource>> = match config.opensearch_url.clone() {
+            Some(url) => Some(Arc::new(OpenSearchSource::new(
                 url,
-                config.opensearch_index.clone(),
-                fallback,
-            )),
-            None => Arc::new(fallback),
+                config.opensearch_read_alias.clone(),
+            ))),
+            None => None,
         };
         let (analytics, sessions): (SharedSearchAnalytics, Arc<dyn SearchSessionStore>) =
             match bookway_data::storage_mode()? {
@@ -60,7 +55,26 @@ impl Domain {
         Ok(Self {
             config,
             search: SearchService::with_dependencies(source, analytics, sessions),
+            content_client,
         })
+    }
+
+    pub(crate) async fn search(
+        &self,
+        request: pb::SearchRequest,
+    ) -> Result<pb::SearchResponse, SearchError> {
+        self.search
+            .search_with_content_client(request, Some(self.content_client.clone()))
+            .await
+    }
+
+    pub(crate) async fn suggestions(
+        &self,
+        request: pb::SuggestionsRequest,
+    ) -> Result<pb::SuggestionsResponse, SearchError> {
+        self.search
+            .suggestions_with_content_client(request, Some(self.content_client.clone()))
+            .await
     }
 }
 
@@ -76,7 +90,7 @@ pub(crate) enum SearchError {
 
 #[derive(Clone)]
 pub(crate) struct SearchService {
-    source: Arc<dyn SearchSource>,
+    source: Option<Arc<dyn SearchSource>>,
     analytics: SharedSearchAnalytics,
     sessions: Arc<dyn SearchSessionStore>,
     popular_terms: Arc<Vec<String>>,
@@ -86,14 +100,14 @@ impl SearchService {
     #[cfg(test)]
     pub(crate) fn new(source: Arc<dyn SearchSource>) -> Self {
         Self::with_dependencies(
-            source,
+            Some(source),
             Arc::new(MemorySearchAnalytics::default()),
             Arc::new(MemorySearchSessionStore::default()),
         )
     }
 
     pub(crate) fn with_dependencies(
-        source: Arc<dyn SearchSource>,
+        source: Option<Arc<dyn SearchSource>>,
         analytics: SharedSearchAnalytics,
         sessions: Arc<dyn SearchSessionStore>,
     ) -> Self {
@@ -112,10 +126,21 @@ impl SearchService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn search(
         &self,
-        request: SearchQueryRequest,
-    ) -> Result<SearchResponseDto, SearchError> {
+        request: pb::SearchRequest,
+    ) -> Result<pb::SearchResponse, SearchError> {
+        self.search_with_content_client(request, None).await
+    }
+
+    async fn search_with_content_client(
+        &self,
+        request: pb::SearchRequest,
+        content_client: Option<BbsLinkClient<tonic::transport::Channel>>,
+    ) -> Result<pb::SearchResponse, SearchError> {
+        let search_type = pb::SearchType::try_from(request.search_type)
+            .map_err(|_| SearchError::Validation("搜索类型无效".to_string()))?;
         let query_text = request.q.trim().to_string();
         if query_text.is_empty() || query_text.chars().count() > 100 {
             return Err(SearchError::Validation(
@@ -126,21 +151,21 @@ impl SearchService {
         let excluded_authors = excluded_author_ids.iter().cloned().collect::<HashSet<_>>();
         let fingerprint = query_fingerprint(
             &query_text,
-            request.search_type,
+            search_type,
             request.user_id.as_deref(),
             &excluded_author_ids,
         );
         let session_id = parse_cursor(
             request.cursor.as_deref(),
             &query_text,
-            request.search_type,
+            search_type,
             request.user_id.as_deref(),
             &excluded_author_ids,
         )?;
         let limit = request
             .limit
-            .unwrap_or(DEFAULT_PAGE_SIZE)
-            .clamp(1, MAX_PAGE_SIZE);
+            .unwrap_or(DEFAULT_PAGE_SIZE as u32)
+            .clamp(1, MAX_PAGE_SIZE as u32) as usize;
         let started = Instant::now();
         let mut session = match session_id.as_deref() {
             Some(id) => self
@@ -172,23 +197,26 @@ impl SearchService {
                 break;
             }
             let source_result = self
-                .source
                 .search_contents(
-                    ContentQueryRequest {
+                    bbs_link_pb::ListRequest {
                         cursor: session.source_cursor.clone(),
-                        limit: Some(SOURCE_PAGE_SIZE),
-                        status: Some(ContentStatusDto::Published),
+                        limit: Some(SOURCE_PAGE_SIZE as u32),
+                        status: Some(bbs_link_pb::ContentStatus::Published as i32),
                         strategy: Some("fresh".to_string()),
                         ids: None,
                         author_id: None,
-                        content_type: match request.search_type {
-                            SearchTypeDto::Journeys => Some(ContentTypeDto::Route),
+                        content_type: match search_type {
+                            pb::SearchType::Journeys => {
+                                Some(bbs_link_pb::ContentType::Route as i32)
+                            }
                             _ => None,
                         },
                         domain: None,
+                        author_ids: Vec::new(),
                     },
                     &query_text,
                     &excluded_author_ids,
+                    content_client.as_ref(),
                 )
                 .await
                 .map_err(map_source_error)?;
@@ -197,13 +225,14 @@ impl SearchService {
             session.source_exhausted = session.source_cursor.is_none();
             session.source_total_estimate = session
                 .source_total_estimate
-                .max(source_result.page.total_estimate);
+                .max(usize::try_from(source_result.page.total_estimate).unwrap_or(usize::MAX));
             session.degraded |= source_result.degraded;
             let mut candidates = search_results(
                 &source_result.page.items,
                 &query_text,
-                request.search_type,
+                search_type,
                 &excluded_authors,
+                source_result.source_ranked,
             );
             if !source_result.source_ranked {
                 sort_results(&mut candidates);
@@ -235,7 +264,7 @@ impl SearchService {
             };
             Some(make_cursor(
                 &query_text,
-                request.search_type,
+                search_type,
                 request.user_id.as_deref(),
                 &excluded_author_ids,
                 &id,
@@ -248,46 +277,56 @@ impl SearchService {
         };
         if session_id.is_none() {
             self.analytics
-                .record(
-                    &query_text,
-                    request.search_type,
-                    !has_next_page && page.is_empty(),
-                )
+                .record(&query_text, search_type, !has_next_page && page.is_empty())
                 .await;
         }
-        Ok(SearchResponseDto {
+        Ok(pb::SearchResponse {
+            request_id: String::new(),
             query: query_text,
             items: page,
             next_cursor,
-            total_estimate,
+            total_estimate: u64::try_from(total_estimate).unwrap_or(u64::MAX),
             took_ms: started.elapsed().as_millis() as u64,
             degraded: session.degraded,
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn suggestions(
         &self,
-        request: SuggestionQueryRequest,
-    ) -> Result<SuggestionResponseDto, SearchError> {
+        request: pb::SuggestionsRequest,
+    ) -> Result<pb::SuggestionsResponse, SearchError> {
+        self.suggestions_with_content_client(request, None).await
+    }
+
+    async fn suggestions_with_content_client(
+        &self,
+        request: pb::SuggestionsRequest,
+        content_client: Option<BbsLinkClient<tonic::transport::Channel>>,
+    ) -> Result<pb::SuggestionsResponse, SearchError> {
         let query = request.q.trim().to_string();
         if query.is_empty() {
-            return Ok(SuggestionResponseDto {
+            return Ok(pb::SuggestionsResponse {
                 query,
                 items: Vec::new(),
             });
         }
         let excluded_author_ids = normalize_excluded_author_ids(&request.excluded_author_ids);
         let excluded_authors = excluded_author_ids.iter().cloned().collect::<HashSet<_>>();
-        let source_query = ContentQueryRequest {
+        let source_query = bbs_link_pb::ListRequest {
             limit: Some(30),
-            status: Some(ContentStatusDto::Published),
+            status: Some(bbs_link_pb::ContentStatus::Published as i32),
             strategy: Some("quality".to_string()),
             ..Default::default()
         };
         let (popular, source) = tokio::join!(
             self.analytics.suggestions(&query, 8),
-            self.source
-                .search_contents(source_query, &query, &excluded_author_ids),
+            self.search_contents(
+                source_query,
+                &query,
+                &excluded_author_ids,
+                content_client.as_ref(),
+            ),
         );
         let mut items = popular;
         if let Ok(source) = source {
@@ -297,8 +336,10 @@ impl SearchService {
                 &query,
                 &excluded_authors,
             ));
-            if let Some(cursor) = next_cursor {
-                self.source.release_search_cursor(&cursor).await;
+            if let Some(cursor) = next_cursor
+                && let Some(source) = &self.source
+            {
+                source.release_search_cursor(&cursor).await;
             }
         }
         let lower = query.to_lowercase();
@@ -307,9 +348,9 @@ impl SearchService {
                 .iter()
                 .filter(|term| term.to_lowercase().contains(&lower))
                 .enumerate()
-                .map(|(index, term)| SuggestionDto {
+                .map(|(index, term)| pb::Suggestion {
                     text: term.clone(),
-                    result_type: SearchResultTypeDto::Topic,
+                    result_type: pb::SearchResultType::Topic as i32,
                     score: 0.2 / (index as f64 + 1.0),
                 }),
         );
@@ -321,13 +362,187 @@ impl SearchService {
                 .then_with(|| left.text.cmp(&right.text))
         });
         items.truncate(8);
-        Ok(SuggestionResponseDto { query, items })
+        Ok(pb::SuggestionsResponse { query, items })
     }
+
+    async fn search_contents(
+        &self,
+        mut query: bbs_link_pb::ListRequest,
+        text: &str,
+        excluded_author_ids: &[String],
+        content_client: Option<&BbsLinkClient<tonic::transport::Channel>>,
+    ) -> Result<SearchSourceResult, SearchSourceError> {
+        let is_fallback_cursor = query
+            .cursor
+            .as_deref()
+            .and_then(|cursor| cursor.strip_prefix("fallback:"))
+            .map(str::to_string);
+        if let Some(cursor) = is_fallback_cursor {
+            query.cursor = Some(cursor);
+            return self.search_bbs_link(query, content_client, true).await;
+        }
+        let Some(source) = &self.source else {
+            return self.search_bbs_link(query, content_client, false).await;
+        };
+        match source
+            .search_contents(query.clone(), text, excluded_author_ids)
+            .await
+        {
+            Ok(result) => {
+                self.revalidate_indexed_contents(result, content_client)
+                    .await
+            }
+            Err(SearchSourceError::Fallback) => {
+                self.search_bbs_link(query, content_client, true).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn revalidate_indexed_contents(
+        &self,
+        result: SearchSourceResult,
+        content_client: Option<&BbsLinkClient<tonic::transport::Channel>>,
+    ) -> Result<SearchSourceResult, SearchSourceError> {
+        if !result.source_ranked || result.page.items.is_empty() {
+            return Ok(result);
+        }
+        let content_client = content_client.ok_or_else(|| {
+            SearchSourceError::Request(
+                "bbs-link public summary client is unavailable for indexed results".to_string(),
+            )
+        })?;
+        let ids = indexed_content_ids(&result.page.items)?;
+        let mut client = content_client.clone();
+        let summaries = client
+            .get_public_summaries(
+                bookway_runtime::grpc_service_request(bbs_link_pb::PublicContentSummariesRequest {
+                    ids,
+                })
+                .map_err(|error| SearchSourceError::Request(error.to_string()))?,
+            )
+            .await
+            .map_err(|error| SearchSourceError::Request(error.to_string()))?
+            .into_inner();
+        let (page, stale_index_hits) = reconcile_indexed_page(result.page, summaries)?;
+        Ok(SearchSourceResult {
+            page,
+            // A stale index can no longer leak content, but it may underfill
+            // this page until the outbox/reconciliation loop catches up.
+            degraded: result.degraded || stale_index_hits,
+            source_ranked: true,
+        })
+    }
+
+    async fn search_bbs_link(
+        &self,
+        query: bbs_link_pb::ListRequest,
+        content_client: Option<&BbsLinkClient<tonic::transport::Channel>>,
+        degraded: bool,
+    ) -> Result<SearchSourceResult, SearchSourceError> {
+        let content_client = content_client.ok_or_else(|| {
+            SearchSourceError::Request("bbs-link client is unavailable".to_string())
+        })?;
+        let mut client = content_client.clone();
+        let response = client
+            .list(
+                bookway_runtime::grpc_service_request(query)
+                    .map_err(|error| SearchSourceError::Request(error.to_string()))?,
+            )
+            .await
+            .map_err(|error| SearchSourceError::Request(error.to_string()))?
+            .into_inner();
+        let page = response;
+        Ok(SearchSourceResult {
+            page: bbs_link_pb::ContentPage {
+                next_cursor: page.next_cursor.map(|cursor| {
+                    if degraded {
+                        format!("fallback:{cursor}")
+                    } else {
+                        cursor
+                    }
+                }),
+                ..page
+            },
+            degraded,
+            source_ranked: false,
+        })
+    }
+}
+
+fn indexed_content_ids(items: &[bbs_link_pb::Content]) -> Result<Vec<String>, SearchSourceError> {
+    let mut ids = Vec::with_capacity(items.len());
+    let mut seen = HashSet::with_capacity(items.len());
+    for item in items {
+        let id = item.id.trim();
+        if id.is_empty() || id != item.id || !seen.insert(id.to_string()) {
+            return Err(SearchSourceError::Request(
+                "OpenSearch returned an invalid or duplicate content ID".to_string(),
+            ));
+        }
+        ids.push(id.to_string());
+    }
+    Ok(ids)
+}
+
+fn reconcile_indexed_page(
+    indexed: bbs_link_pb::ContentPage,
+    summaries: bbs_link_pb::PublicContentSummaries,
+) -> Result<(bbs_link_pb::ContentPage, bool), SearchSourceError> {
+    let requested = indexed_content_ids(&indexed.items)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut authoritative = HashMap::with_capacity(summaries.items.len());
+    for summary in summaries.items {
+        let Some(post) = summary.post.as_ref() else {
+            return Err(SearchSourceError::Request(
+                "bbs-link returned a public summary without post metadata".to_string(),
+            ));
+        };
+        if summary.id.is_empty()
+            || summary.id != post.id
+            || !requested.contains(&summary.id)
+            || authoritative.insert(summary.id.clone(), summary).is_some()
+        {
+            return Err(SearchSourceError::Request(
+                "bbs-link returned an invalid public summary batch".to_string(),
+            ));
+        }
+    }
+    let indexed_count = indexed.items.len();
+    let items = indexed
+        .items
+        .into_iter()
+        .filter_map(|content| {
+            let summary = authoritative.remove(&content.id)?;
+            // The index supplies only candidate IDs and rank. Rebuild every
+            // displayed field from the current BBS Link public projection.
+            Some(bbs_link_pb::Content {
+                id: summary.id,
+                post: summary.post,
+                author_id: summary.author_id,
+                content_type: summary.content_type,
+                status: bbs_link_pb::ContentStatus::Published as i32,
+                topics: summary.topics,
+                quality_score: summary.quality_score,
+                ..Default::default()
+            })
+        })
+        .collect::<Vec<_>>();
+    let stale_index_hits = items.len() != indexed_count;
+    Ok((
+        bbs_link_pb::ContentPage {
+            items,
+            next_cursor: indexed.next_cursor,
+            total_estimate: indexed.total_estimate,
+        },
+        stale_index_hits,
+    ))
 }
 
 fn make_cursor(
     query: &str,
-    search_type: SearchTypeDto,
+    search_type: pb::SearchType,
     viewer_id: Option<&str>,
     excluded_author_ids: &[String],
     session_id: &str,
@@ -339,7 +554,7 @@ fn make_cursor(
 fn parse_cursor(
     cursor: Option<&str>,
     query: &str,
-    search_type: SearchTypeDto,
+    search_type: pb::SearchType,
     viewer_id: Option<&str>,
     excluded_author_ids: &[String],
 ) -> Result<Option<String>, SearchError> {
@@ -381,7 +596,7 @@ fn map_source_error(error: SearchSourceError) -> SearchError {
 
 fn query_fingerprint(
     query: &str,
-    search_type: SearchTypeDto,
+    search_type: pb::SearchType,
     viewer_id: Option<&str>,
     excluded_author_ids: &[String],
 ) -> u64 {
@@ -406,41 +621,42 @@ fn normalize_excluded_author_ids(author_ids: &[String]) -> Vec<String> {
 }
 
 fn content_suggestions(
-    contents: &[ContentDto],
+    contents: &[bbs_link_pb::Content],
     query: &str,
     excluded_authors: &HashSet<String>,
-) -> Vec<SuggestionDto> {
+) -> Vec<pb::Suggestion> {
     let query = query.to_lowercase();
     let mut items = Vec::new();
-    for content in contents
+    for (content, post) in contents
         .iter()
         .filter(|content| !excluded_authors.contains(&content.author_id))
+        .filter_map(|content| content.post.as_ref().map(|post| (content, post)))
     {
         let base = content.quality_score.clamp(0.0, 1.0);
         push_suggestion(
             &mut items,
             &query,
-            &content.post.title,
-            if content.content_type == ContentTypeDto::Route {
-                SearchResultTypeDto::Journey
+            &post.title,
+            if content.content_type == bbs_link_pb::ContentType::Route as i32 {
+                pb::SearchResultType::Journey
             } else {
-                SearchResultTypeDto::Post
+                pb::SearchResultType::Post
             },
             1.5 + base,
         );
         push_suggestion(
             &mut items,
             &query,
-            &content.post.author_name,
-            SearchResultTypeDto::User,
+            &post.author_name,
+            pb::SearchResultType::User,
             0.8 + base,
         );
-        for topic in content.post.tags.iter().chain(&content.topics) {
+        for topic in post.tags.iter().chain(&content.topics) {
             push_suggestion(
                 &mut items,
                 &query,
                 topic,
-                SearchResultTypeDto::Topic,
+                pb::SearchResultType::Topic,
                 1.0 + base,
             );
         }
@@ -449,24 +665,24 @@ fn content_suggestions(
 }
 
 fn push_suggestion(
-    items: &mut Vec<SuggestionDto>,
+    items: &mut Vec<pb::Suggestion>,
     query: &str,
     text: &str,
-    result_type: SearchResultTypeDto,
+    result_type: pb::SearchResultType,
     score: f64,
 ) {
     let lower = text.to_lowercase();
     if !text.trim().is_empty() && lower.contains(query) {
-        items.push(SuggestionDto {
+        items.push(pb::Suggestion {
             text: text.to_string(),
-            result_type,
+            result_type: result_type as i32,
             score: score + if lower.starts_with(query) { 1.0 } else { 0.0 },
         });
     }
 }
 
-fn deduplicate_suggestions(items: &mut Vec<SuggestionDto>) {
-    let mut best = HashMap::<String, SuggestionDto>::new();
+fn deduplicate_suggestions(items: &mut Vec<pb::Suggestion>) {
+    let mut best = HashMap::<String, pb::Suggestion>::new();
     for item in items.drain(..) {
         let key = item.text.to_lowercase();
         match best.get(&key) {
@@ -480,22 +696,27 @@ fn deduplicate_suggestions(items: &mut Vec<SuggestionDto>) {
 }
 
 fn search_results(
-    contents: &[ContentDto],
+    contents: &[bbs_link_pb::Content],
     query: &str,
-    search_type: SearchTypeDto,
+    search_type: pb::SearchType,
     excluded_authors: &HashSet<String>,
-) -> Vec<SearchResultDto> {
+    source_ranked: bool,
+) -> Vec<pb::SearchResult> {
     let visible_contents = contents
         .iter()
         .filter(|content| !excluded_authors.contains(&content.author_id))
         .collect::<Vec<_>>();
     match search_type {
-        SearchTypeDto::Posts => content_results(&visible_contents, query, true, false),
-        SearchTypeDto::Journeys => content_results(&visible_contents, query, false, true),
-        SearchTypeDto::Users => user_results(&visible_contents, query),
-        SearchTypeDto::Topics => topic_results(&visible_contents, query),
-        SearchTypeDto::All => {
-            let mut results = content_results(&visible_contents, query, true, true);
+        pb::SearchType::Posts => {
+            content_results(&visible_contents, query, true, false, source_ranked)
+        }
+        pb::SearchType::Journeys => {
+            content_results(&visible_contents, query, false, true, source_ranked)
+        }
+        pb::SearchType::Users => user_results(&visible_contents, query),
+        pb::SearchType::Topics => topic_results(&visible_contents, query),
+        pb::SearchType::All => {
+            let mut results = content_results(&visible_contents, query, true, true, source_ranked);
             results.extend(user_results(&visible_contents, query));
             results.extend(topic_results(&visible_contents, query));
             results
@@ -503,7 +724,7 @@ fn search_results(
     }
 }
 
-fn sort_results(items: &mut [SearchResultDto]) {
+fn sort_results(items: &mut [pb::SearchResult]) {
     items.sort_by(|left, right| {
         right
             .score
@@ -512,70 +733,87 @@ fn sort_results(items: &mut [SearchResultDto]) {
     });
 }
 
-fn result_identity(item: &SearchResultDto) -> String {
-    let result_type = match item.result_type {
-        SearchResultTypeDto::Post => "post",
-        SearchResultTypeDto::Journey => "journey",
-        SearchResultTypeDto::User => "user",
-        SearchResultTypeDto::Topic => "topic",
+fn result_identity(item: &pb::SearchResult) -> String {
+    let result_type = match pb::SearchResultType::try_from(item.result_type) {
+        Ok(pb::SearchResultType::Post) => "post",
+        Ok(pb::SearchResultType::Journey) => "journey",
+        Ok(pb::SearchResultType::User) => "user",
+        Ok(pb::SearchResultType::Topic) | Err(_) => "topic",
     };
     format!("{result_type}:{}", item.id)
 }
 
 fn content_results(
-    contents: &[&ContentDto],
+    contents: &[&bbs_link_pb::Content],
     query: &str,
     include_posts: bool,
     include_journeys: bool,
-) -> Vec<SearchResultDto> {
+    source_ranked: bool,
+) -> Vec<pb::SearchResult> {
     contents
         .iter()
-        .filter(|content| match content.content_type {
-            ContentTypeDto::Route => include_journeys,
-            _ => include_posts,
+        .filter(|content| {
+            if content.content_type == bbs_link_pb::ContentType::Route as i32 {
+                include_journeys
+            } else {
+                include_posts
+            }
         })
         .filter_map(|content| {
-            let fields = [
-                content.post.title.as_str(),
-                content.post.summary.as_str(),
-                content.body.as_str(),
-            ];
-            let metadata = format!(
-                "{} {}",
-                content.post.tags.join(" "),
-                content.topics.join(" ")
-            );
-            let (mut score, highlights) = relevance(query, &fields, &metadata)?;
+            let post = content.post.as_ref()?;
+            let metadata = format!("{} {}", post.tags.join(" "), content.topics.join(" "));
+            let (mut score, highlights) = if source_ranked {
+                // A revalidated OpenSearch hit may match its current body,
+                // which is deliberately absent from the compact public read.
+                relevance(
+                    query,
+                    &[post.title.as_str(), post.summary.as_str()],
+                    &metadata,
+                )
+                .unwrap_or((0.0, Vec::new()))
+            } else {
+                relevance(
+                    query,
+                    &[
+                        post.title.as_str(),
+                        post.summary.as_str(),
+                        content.body.as_str(),
+                    ],
+                    &metadata,
+                )?
+            };
             score += content.quality_score;
-            Some(SearchResultDto {
+            Some(pb::SearchResult {
                 id: content.id.clone(),
-                result_type: if content.content_type == ContentTypeDto::Route {
-                    SearchResultTypeDto::Journey
+                result_type: if content.content_type == bbs_link_pb::ContentType::Route as i32 {
+                    pb::SearchResultType::Journey as i32
                 } else {
-                    SearchResultTypeDto::Post
+                    pb::SearchResultType::Post as i32
                 },
-                title: content.post.title.clone(),
-                snippet: content.post.summary.clone(),
-                cover_url: non_empty(&content.post.cover_url),
+                title: post.title.clone(),
+                snippet: post.summary.clone(),
+                cover_url: non_empty(&post.cover_url),
                 author_id: Some(content.author_id.clone()),
-                author_name: Some(content.post.author_name.clone()),
-                domain: Some(content.post.domain),
+                author_name: Some(post.author_name.clone()),
+                domain: Some(growth_domain(post.domain)),
                 score,
                 highlights,
-                post: Some(content.post.clone()),
+                post: Some(post_summary(post.clone())),
             })
         })
         .collect()
 }
 
-fn user_results(contents: &[&ContentDto], query: &str) -> Vec<SearchResultDto> {
-    let mut authors = HashMap::<String, (&PostSummaryDto, usize, f64)>::new();
+fn user_results(contents: &[&bbs_link_pb::Content], query: &str) -> Vec<pb::SearchResult> {
+    let mut authors = HashMap::<String, (&bbs_link_pb::PostSummary, usize, f64)>::new();
     for content in contents {
-        let entry = authors.entry(content.author_id.clone()).or_insert((
-            &content.post,
-            0,
-            content.quality_score,
-        ));
+        let Some(post) = content.post.as_ref() else {
+            continue;
+        };
+        let entry =
+            authors
+                .entry(content.author_id.clone())
+                .or_insert((post, 0, content.quality_score));
         entry.1 += 1;
         entry.2 = entry.2.max(content.quality_score);
     }
@@ -583,9 +821,9 @@ fn user_results(contents: &[&ContentDto], query: &str) -> Vec<SearchResultDto> {
         .into_iter()
         .filter_map(|(author_id, (post, content_count, quality))| {
             let (score, highlights) = relevance(query, &[post.author_name.as_str()], "")?;
-            Some(SearchResultDto {
+            Some(pb::SearchResult {
                 id: author_id.clone(),
-                result_type: SearchResultTypeDto::User,
+                result_type: pb::SearchResultType::User as i32,
                 title: post.author_name.clone(),
                 snippet: format!("{content_count} 篇公开内容"),
                 cover_url: non_empty(&post.author_avatar_url),
@@ -600,15 +838,18 @@ fn user_results(contents: &[&ContentDto], query: &str) -> Vec<SearchResultDto> {
         .collect()
 }
 
-fn topic_results(contents: &[&ContentDto], query: &str) -> Vec<SearchResultDto> {
+fn topic_results(contents: &[&bbs_link_pb::Content], query: &str) -> Vec<pb::SearchResult> {
     let mut topics = HashMap::new();
     for content in contents {
-        let content_topics: HashSet<_> = content.post.tags.iter().chain(&content.topics).collect();
+        let Some(post) = content.post.as_ref() else {
+            continue;
+        };
+        let content_topics: HashSet<_> = post.tags.iter().chain(&content.topics).collect();
         for topic in content_topics {
             let entry = topics.entry(topic.clone()).or_insert((
                 0_usize,
                 content.quality_score,
-                content.post.domain,
+                post.domain,
             ));
             entry.0 += 1;
             entry.1 = entry.1.max(content.quality_score);
@@ -618,15 +859,15 @@ fn topic_results(contents: &[&ContentDto], query: &str) -> Vec<SearchResultDto> 
         .into_iter()
         .filter_map(|(topic, (content_count, quality, domain))| {
             let (score, highlights) = relevance(query, &[topic.as_str()], "")?;
-            Some(SearchResultDto {
+            Some(pb::SearchResult {
                 id: format!("topic:{topic}"),
-                result_type: SearchResultTypeDto::Topic,
+                result_type: pb::SearchResultType::Topic as i32,
                 title: topic,
                 snippet: format!("{content_count} 条相关内容"),
                 cover_url: None,
                 author_id: None,
                 author_name: None,
-                domain: Some(domain),
+                domain: Some(growth_domain(domain)),
                 score: score + quality * 0.1,
                 highlights,
                 post: None,
@@ -661,10 +902,38 @@ fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+fn post_summary(value: bbs_link_pb::PostSummary) -> pb::PostSummary {
+    pb::PostSummary {
+        id: value.id,
+        author_name: value.author_name,
+        author_avatar_url: value.author_avatar_url,
+        title: value.title,
+        summary: value.summary,
+        domain: growth_domain(value.domain),
+        cover_url: value.cover_url,
+        route_title: value.route_title,
+        route_duration: value.route_duration,
+        join_count: value.join_count,
+        like_count: value.like_count,
+        freshness: value.freshness,
+        tags: value.tags,
+        is_route: value.is_route,
+    }
+}
+
+fn growth_domain(value: i32) -> i32 {
+    match bbs_link_pb::GrowthDomain::try_from(value) {
+        Ok(bbs_link_pb::GrowthDomain::Learning) => pb::GrowthDomain::Learning as i32,
+        Ok(bbs_link_pb::GrowthDomain::Movement) => pb::GrowthDomain::Movement as i32,
+        Ok(bbs_link_pb::GrowthDomain::Wellness) => pb::GrowthDomain::Wellness as i32,
+        Ok(bbs_link_pb::GrowthDomain::Travel) => pb::GrowthDomain::Travel as i32,
+        Ok(bbs_link_pb::GrowthDomain::Leisure) | Err(_) => pb::GrowthDomain::Unspecified as i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use bookway_api::{ContentMediaDto, ContentPageDto, GrowthDomainDto, SearchTypeDto};
 
     use super::*;
     use crate::datasource::{
@@ -672,25 +941,25 @@ mod tests {
     };
 
     struct StaticSearchSource {
-        items: Vec<ContentDto>,
+        items: Vec<bbs_link_pb::Content>,
         degraded: bool,
     }
 
     struct PagedSearchSource {
-        items: Vec<ContentDto>,
+        items: Vec<bbs_link_pb::Content>,
     }
 
     #[async_trait]
     impl SearchSource for StaticSearchSource {
         async fn contents(
             &self,
-            _query: ContentQueryRequest,
+            _query: bbs_link_pb::ListRequest,
         ) -> Result<SearchSourceResult, SearchSourceError> {
             Ok(SearchSourceResult {
-                page: ContentPageDto {
+                page: bbs_link_pb::ContentPage {
                     items: self.items.clone(),
                     next_cursor: None,
-                    total_estimate: self.items.len(),
+                    total_estimate: self.items.len() as u64,
                 },
                 degraded: self.degraded,
                 source_ranked: false,
@@ -702,7 +971,7 @@ mod tests {
     impl SearchSource for PagedSearchSource {
         async fn contents(
             &self,
-            query: ContentQueryRequest,
+            query: bbs_link_pb::ListRequest,
         ) -> Result<SearchSourceResult, SearchSourceError> {
             let offset = query
                 .cursor
@@ -714,20 +983,191 @@ mod tests {
                 .items
                 .iter()
                 .skip(offset)
-                .take(limit)
+                .take(limit as usize)
                 .cloned()
                 .collect::<Vec<_>>();
             let next_offset = offset + items.len();
             Ok(SearchSourceResult {
-                page: ContentPageDto {
+                page: bbs_link_pb::ContentPage {
                     items,
                     next_cursor: (next_offset < self.items.len()).then(|| next_offset.to_string()),
-                    total_estimate: self.items.len(),
+                    total_estimate: self.items.len() as u64,
                 },
                 degraded: false,
                 source_ranked: false,
             })
         }
+    }
+
+    #[test]
+    fn revalidation_drops_stale_hits_and_rebuilds_search_fields() {
+        let mut first = content("post-1", "索引中的旧作者", "索引中的旧标题", "旧话题");
+        first.author_id = "stale-author".to_string();
+        first.content_type = bbs_link_pb::ContentType::Article as i32;
+        first.status = bbs_link_pb::ContentStatus::Restricted as i32;
+        first.body = "已删除的旧正文命中".to_string();
+        first.media = vec![bbs_link_pb::ContentMedia {
+            id: "stale-media".to_string(),
+            url: "https://stale.example/media".to_string(),
+            kind: "image".to_string(),
+            width: 1,
+            height: 1,
+            duration_ms: None,
+        }];
+        let second = content("post-2", "索引中的第二作者", "索引中的第二标题", "旧话题");
+        let stale = content("post-3", "已受限作者", "已受限标题", "旧话题");
+        let (page, stale_index_hits) = reconcile_indexed_page(
+            bbs_link_pb::ContentPage {
+                items: vec![first, second, stale],
+                next_cursor: Some("private-pit-cursor".to_string()),
+                total_estimate: 3,
+            },
+            bbs_link_pb::PublicContentSummaries {
+                items: vec![
+                    public_summary(
+                        "post-2",
+                        "权威第二作者",
+                        "权威第二标题",
+                        "权威第二摘要",
+                        "第二话题",
+                        bbs_link_pb::ContentType::Article,
+                        0.4,
+                    ),
+                    public_summary(
+                        "post-1",
+                        "权威作者",
+                        "权威标题",
+                        "权威摘要",
+                        "权威话题",
+                        bbs_link_pb::ContentType::Route,
+                        0.9,
+                    ),
+                ],
+            },
+        )
+        .expect("valid authoritative summaries");
+
+        assert!(stale_index_hits);
+        assert_eq!(page.next_cursor.as_deref(), Some("private-pit-cursor"));
+        assert_eq!(page.total_estimate, 3);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["post-1", "post-2"],
+            "the OpenSearch rank order is retained"
+        );
+        let first = &page.items[0];
+        assert_eq!(first.author_id, "author-post-1");
+        assert_eq!(first.content_type, bbs_link_pb::ContentType::Route as i32);
+        assert_eq!(first.status, bbs_link_pb::ContentStatus::Published as i32);
+        assert_eq!(first.topics, vec!["权威话题"]);
+        assert_eq!(first.quality_score, 0.9);
+        assert_eq!(
+            first.post.as_ref().map(|post| post.title.as_str()),
+            Some("权威标题")
+        );
+        assert!(
+            first.body.is_empty(),
+            "stale indexed body is never retained"
+        );
+        assert!(
+            first.media.is_empty(),
+            "stale indexed media is never retained"
+        );
+        assert!(first.created_at.is_empty());
+        assert!(first.published_at.is_none());
+        assert!(first.route_template.is_none());
+    }
+
+    #[test]
+    fn revalidation_rejects_malformed_authoritative_summary_batches() {
+        let indexed = bbs_link_pb::ContentPage {
+            items: vec![content("post-1", "索引作者", "索引标题", "话题")],
+            ..Default::default()
+        };
+        let mut mismatched = public_summary(
+            "post-1",
+            "权威作者",
+            "权威标题",
+            "权威摘要",
+            "权威话题",
+            bbs_link_pb::ContentType::Article,
+            0.5,
+        );
+        mismatched.post.as_mut().expect("post summary").id = "other-id".to_string();
+        assert!(
+            reconcile_indexed_page(
+                indexed.clone(),
+                bbs_link_pb::PublicContentSummaries {
+                    items: vec![mismatched]
+                }
+            )
+            .is_err()
+        );
+
+        let duplicate = public_summary(
+            "post-1",
+            "权威作者",
+            "权威标题",
+            "权威摘要",
+            "权威话题",
+            bbs_link_pb::ContentType::Article,
+            0.5,
+        );
+        assert!(
+            reconcile_indexed_page(
+                indexed.clone(),
+                bbs_link_pb::PublicContentSummaries {
+                    items: vec![duplicate.clone(), duplicate]
+                }
+            )
+            .is_err()
+        );
+
+        assert!(
+            reconcile_indexed_page(
+                indexed,
+                bbs_link_pb::PublicContentSummaries {
+                    items: vec![public_summary(
+                        "unexpected-post",
+                        "权威作者",
+                        "权威标题",
+                        "权威摘要",
+                        "权威话题",
+                        bbs_link_pb::ContentType::Article,
+                        0.5,
+                    )]
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn revalidated_body_only_matches_keep_the_rank_without_exposing_body() {
+        let content = bbs_link_pb::Content {
+            id: "post-1".to_string(),
+            post: Some(bbs_link_pb::PostSummary {
+                id: "post-1".to_string(),
+                author_name: "权威作者".to_string(),
+                title: "当前标题".to_string(),
+                summary: "当前摘要".to_string(),
+                ..Default::default()
+            }),
+            author_id: "author-post-1".to_string(),
+            content_type: bbs_link_pb::ContentType::Article as i32,
+            status: bbs_link_pb::ContentStatus::Published as i32,
+            quality_score: 0.8,
+            ..Default::default()
+        };
+
+        let results = content_results(&[&content], "旧正文词", true, false, true);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "当前标题");
+        assert!(results[0].highlights.is_empty());
     }
 
     #[tokio::test]
@@ -737,16 +1177,22 @@ mod tests {
             degraded: false,
         }));
         let users = service
-            .search(request("一册", SearchTypeDto::Users, None, None))
+            .search(request("一册", pb::SearchType::Users, None, None))
             .await
             .expect("user search");
         let topics = service
-            .search(request("主题", SearchTypeDto::Topics, None, None))
+            .search(request("主题", pb::SearchType::Topics, None, None))
             .await
             .expect("topic search");
 
-        assert_eq!(users.items[0].result_type, SearchResultTypeDto::User);
-        assert_eq!(topics.items[0].result_type, SearchResultTypeDto::Topic);
+        assert_eq!(
+            users.items[0].result_type,
+            pb::SearchResultType::User as i32
+        );
+        assert_eq!(
+            topics.items[0].result_type,
+            pb::SearchResultType::Topic as i32
+        );
         assert_eq!(topics.items[0].snippet, "1 条相关内容");
     }
 
@@ -760,13 +1206,13 @@ mod tests {
             degraded: false,
         }));
         let first = service
-            .search(request("阅读", SearchTypeDto::Posts, None, Some(1)))
+            .search(request("阅读", pb::SearchType::Posts, None, Some(1)))
             .await
             .expect("first page");
         let second = service
             .search(request(
                 "阅读",
-                SearchTypeDto::Posts,
+                pb::SearchType::Posts,
                 first.next_cursor.clone(),
                 Some(1),
             ))
@@ -794,14 +1240,14 @@ mod tests {
             degraded: false,
         }));
         let first = service
-            .search(request("阅读", SearchTypeDto::Posts, None, Some(1)))
+            .search(request("阅读", pb::SearchType::Posts, None, Some(1)))
             .await
             .expect("first page");
 
         let error = service
             .search(request(
                 "跑步",
-                SearchTypeDto::Posts,
+                pb::SearchType::Posts,
                 first.next_cursor,
                 Some(1),
             ))
@@ -821,14 +1267,14 @@ mod tests {
             degraded: false,
         }));
         let first = service
-            .search(request("阅读", SearchTypeDto::Posts, None, Some(1)))
+            .search(request("阅读", pb::SearchType::Posts, None, Some(1)))
             .await
             .expect("first page");
 
         let error = service
             .search(request(
                 "阅读",
-                SearchTypeDto::Users,
+                pb::SearchType::Users,
                 first.next_cursor,
                 Some(1),
             ))
@@ -856,7 +1302,7 @@ mod tests {
         let mut pages = 0;
         loop {
             let response = service
-                .search(request("阅读", SearchTypeDto::Posts, cursor, Some(50)))
+                .search(request("阅读", pb::SearchType::Posts, cursor, Some(50)))
                 .await
                 .expect("page search");
             pages += 1;
@@ -896,7 +1342,7 @@ mod tests {
         let response = service
             .search(request_with_visibility(
                 "阅读",
-                SearchTypeDto::Posts,
+                pb::SearchType::Posts,
                 None,
                 Some(2),
                 "viewer-a",
@@ -932,7 +1378,7 @@ mod tests {
         let users = service
             .search(request_with_visibility(
                 "阅读",
-                SearchTypeDto::Users,
+                pb::SearchType::Users,
                 None,
                 None,
                 "viewer-a",
@@ -943,7 +1389,7 @@ mod tests {
         let topics = service
             .search(request_with_visibility(
                 "阅读",
-                SearchTypeDto::Topics,
+                pb::SearchType::Topics,
                 None,
                 None,
                 "viewer-a",
@@ -975,7 +1421,7 @@ mod tests {
         }));
 
         let suggestions = service
-            .suggestions(SuggestionQueryRequest {
+            .suggestions(pb::SuggestionsRequest {
                 q: "专属".to_string(),
                 user_id: Some("viewer-a".to_string()),
                 excluded_author_ids: vec!["author-hidden".to_string()],
@@ -1005,7 +1451,7 @@ mod tests {
         let first = service
             .search(request_with_visibility(
                 "阅读",
-                SearchTypeDto::Posts,
+                pb::SearchType::Posts,
                 None,
                 Some(1),
                 "viewer-a",
@@ -1017,7 +1463,7 @@ mod tests {
         let error = service
             .search(request_with_visibility(
                 "阅读",
-                SearchTypeDto::Posts,
+                pb::SearchType::Posts,
                 first.next_cursor,
                 Some(1),
                 "viewer-a",
@@ -1041,7 +1487,7 @@ mod tests {
         let first = service
             .search(request_with_visibility(
                 "阅读",
-                SearchTypeDto::Posts,
+                pb::SearchType::Posts,
                 None,
                 Some(1),
                 "viewer-a",
@@ -1053,7 +1499,7 @@ mod tests {
         let second = service
             .search(request_with_visibility(
                 "阅读",
-                SearchTypeDto::Posts,
+                pb::SearchType::Posts,
                 first.next_cursor,
                 Some(1),
                 "viewer-a",
@@ -1070,18 +1516,18 @@ mod tests {
     async fn reports_an_expired_server_side_session() {
         let sessions = Arc::new(MemorySearchSessionStore::default());
         let service = SearchService::with_dependencies(
-            Arc::new(StaticSearchSource {
+            Some(Arc::new(StaticSearchSource {
                 items: vec![
                     content("post-1", "一册", "阅读方法一", "阅读"),
                     content("post-2", "二页", "阅读方法二", "阅读"),
                 ],
                 degraded: false,
-            }),
+            })),
             Arc::new(MemorySearchAnalytics::default()),
             sessions.clone(),
         );
         let first = service
-            .search(request("阅读", SearchTypeDto::Posts, None, Some(1)))
+            .search(request("阅读", pb::SearchType::Posts, None, Some(1)))
             .await
             .expect("first page");
         let cursor = first.next_cursor.expect("continuation cursor");
@@ -1093,7 +1539,12 @@ mod tests {
         sessions.delete(id).await.expect("delete session");
 
         let error = service
-            .search(request("阅读", SearchTypeDto::Posts, Some(cursor), Some(1)))
+            .search(request(
+                "阅读",
+                pb::SearchType::Posts,
+                Some(cursor),
+                Some(1),
+            ))
             .await
             .expect_err("expired session");
         assert!(matches!(error, SearchError::CursorExpired));
@@ -1107,7 +1558,7 @@ mod tests {
         }));
 
         let response = service
-            .search(request("阅读", SearchTypeDto::Posts, None, None))
+            .search(request("阅读", pb::SearchType::Posts, None, None))
             .await
             .expect("degraded search");
 
@@ -1118,53 +1569,54 @@ mod tests {
     #[tokio::test]
     async fn separates_posts_and_journeys_without_misclassifying_all_results() {
         let mut route = content("route-1", "领路人", "阅读入门路线", "阅读");
-        route.content_type = ContentTypeDto::Route;
+        route.content_type = bbs_link_pb::ContentType::Route as i32;
         let service = SearchService::new(Arc::new(StaticSearchSource {
             items: vec![content("post-1", "一册", "阅读笔记", "阅读"), route],
             degraded: false,
         }));
 
         let posts = service
-            .search(request("阅读", SearchTypeDto::Posts, None, None))
+            .search(request("阅读", pb::SearchType::Posts, None, None))
             .await
             .expect("post search");
         let all = service
-            .search(request("阅读", SearchTypeDto::All, None, None))
+            .search(request("阅读", pb::SearchType::All, None, None))
             .await
             .expect("all search");
 
         assert_eq!(posts.items.len(), 1);
         assert_eq!(posts.items[0].id, "post-1");
         assert!(all.items.iter().any(|item| {
-            item.id == "route-1" && item.result_type == SearchResultTypeDto::Journey
+            item.id == "route-1" && item.result_type == pb::SearchResultType::Journey as i32
         }));
     }
 
     fn request(
         query: &str,
-        search_type: SearchTypeDto,
+        search_type: pb::SearchType,
         cursor: Option<String>,
         limit: Option<usize>,
-    ) -> SearchQueryRequest {
-        SearchQueryRequest {
+    ) -> pb::SearchRequest {
+        pb::SearchRequest {
             q: query.to_string(),
-            search_type,
+            search_type: search_type as i32,
             cursor,
-            limit,
+            limit: limit.map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
             user_id: None,
             excluded_author_ids: Vec::new(),
+            session_id: None,
         }
     }
 
     fn request_with_visibility(
         query: &str,
-        search_type: SearchTypeDto,
+        search_type: pb::SearchType,
         cursor: Option<String>,
         limit: Option<usize>,
         viewer_id: &str,
         excluded_author_ids: &[&str],
-    ) -> SearchQueryRequest {
-        SearchQueryRequest {
+    ) -> pb::SearchRequest {
+        pb::SearchRequest {
             user_id: Some(viewer_id.to_string()),
             excluded_author_ids: excluded_author_ids
                 .iter()
@@ -1174,16 +1626,16 @@ mod tests {
         }
     }
 
-    fn content(id: &str, author: &str, title: &str, topic: &str) -> ContentDto {
-        ContentDto {
+    fn content(id: &str, author: &str, title: &str, topic: &str) -> bbs_link_pb::Content {
+        bbs_link_pb::Content {
             id: id.to_string(),
-            post: PostSummaryDto {
+            post: Some(bbs_link_pb::PostSummary {
                 id: id.to_string(),
                 author_name: author.to_string(),
                 author_avatar_url: String::new(),
                 title: title.to_string(),
                 summary: "把方法用到行动中".to_string(),
-                domain: GrowthDomainDto::Learning,
+                domain: bbs_link_pb::GrowthDomain::Learning as i32,
                 cover_url: String::new(),
                 route_title: String::new(),
                 route_duration: String::new(),
@@ -1191,17 +1643,46 @@ mod tests {
                 like_count: 0,
                 freshness: 1.0,
                 tags: vec![topic.to_string()],
-            },
+                is_route: false,
+            }),
             author_id: format!("author-{id}"),
-            content_type: ContentTypeDto::Article,
-            status: ContentStatusDto::Published,
+            content_type: bbs_link_pb::ContentType::Article as i32,
+            status: bbs_link_pb::ContentStatus::Published as i32,
             body: "正文".to_string(),
-            media: Vec::<ContentMediaDto>::new(),
+            media: Vec::<bbs_link_pb::ContentMedia>::new(),
             topics: vec![topic.to_string()],
             created_at: "0".to_string(),
             published_at: Some("0".to_string()),
             version: 1,
             quality_score: 1.0,
+            route_template: None,
+        }
+    }
+
+    fn public_summary(
+        id: &str,
+        author_name: &str,
+        title: &str,
+        summary: &str,
+        topic: &str,
+        content_type: bbs_link_pb::ContentType,
+        quality_score: f64,
+    ) -> bbs_link_pb::PublicContentSummary {
+        bbs_link_pb::PublicContentSummary {
+            id: id.to_string(),
+            post: Some(bbs_link_pb::PostSummary {
+                id: id.to_string(),
+                author_name: author_name.to_string(),
+                title: title.to_string(),
+                summary: summary.to_string(),
+                tags: vec![topic.to_string()],
+                is_route: content_type == bbs_link_pb::ContentType::Route,
+                ..Default::default()
+            }),
+            author_id: format!("author-{id}"),
+            content_type: content_type as i32,
+            topics: vec![topic.to_string()],
+            quality_score,
         }
     }
 }

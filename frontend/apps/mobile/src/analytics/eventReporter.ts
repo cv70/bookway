@@ -1,6 +1,8 @@
 import { AppState, type AppStateStatus } from 'react-native';
 
 import { sendEvents } from '../api/client';
+import type { NegativeFeedbackReason } from '../types';
+import { analyticsSessionId } from './session';
 
 type EventType =
   | 'impression'
@@ -11,7 +13,6 @@ type EventType =
   | 'share'
   | 'hide'
   | 'complete'
-  | 'join_route'
   | 'follow'
   | 'report'
   | 'search_submit';
@@ -21,14 +22,16 @@ type PendingEvent = {
   event_type: EventType;
   session_id: string;
   request_id?: string;
+  attribution_source?: 'recommendation' | 'search';
   component_id: string;
   content_id?: string;
   position?: number;
   occurred_at: string;
   source: string;
+  negative_feedback_reason?: NegativeFeedbackReason;
 };
 
-const sessionId = uuid();
+const sessionId = analyticsSessionId();
 const pending: PendingEvent[] = [];
 const seenImpressions = new Set<string>();
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -52,11 +55,26 @@ export const eventReporter = {
     if (pending.length >= 100) void flush();
     else scheduleFlush();
   },
-  impression(contentId: string, componentId: string, position?: number) {
-    const key = `${sessionId}:${componentId}:${contentId}`;
+  impression(
+    contentId: string,
+    componentId: string,
+    position?: number,
+    requestId?: string,
+    attributionSource?: 'recommendation' | 'search',
+  ) {
+    // The same content may be legitimately re-served by a later request. Keep
+    // that exposure distinct while still deduplicating an un-attributed card.
+    const key = `${sessionId}:${requestId ?? 'unattributed'}:${componentId}:${contentId}`;
     if (seenImpressions.has(key)) return;
     seenImpressions.add(key);
-    this.track({ event_type: 'impression', component_id: componentId, content_id: contentId, position });
+    this.track({
+      event_type: 'impression',
+      component_id: componentId,
+      content_id: contentId,
+      position,
+      request_id: requestId,
+      attribution_source: attributionSource,
+    });
   },
   flush,
 };

@@ -1,0 +1,18 @@
+[package]
+name = "bookway-bbs-message-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bookway-api.workspace = true
+prost.workspace = true
+serde.workspace = true
+tonic.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[lints]
+workspace = true

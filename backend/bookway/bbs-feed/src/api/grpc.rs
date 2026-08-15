@@ -1,6 +1,6 @@
 use super::pb::{self, bbs_feed_server::BbsFeed};
-use crate::{api::FeedQueryRequest, domain::Domain};
-use serde::Serialize;
+use crate::domain::Domain;
+use bookway_recommend_main_api::pb as recommend_main;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
@@ -12,19 +12,14 @@ struct GrpcServer {
 impl BbsFeed for GrpcServer {
     async fn feed(
         &self,
-        request: Request<pb::FeedRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request: FeedQueryRequest = serde_json::from_str(&request.into_inner().request_json)
-            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        request: Request<recommend_main::FeedRequest>,
+    ) -> Result<Response<recommend_main::FeedResponse>, Status> {
         let response = self
             .domain
-            .feed(request)
+            .feed(request.into_inner())
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
-        Ok(Response::new(pb::JsonResponse {
-            response_json: serde_json::to_string(&response)
-                .map_err(|error| Status::internal(error.to_string()))?,
-        }))
+        Ok(Response::new(response))
     }
 }
 
@@ -42,5 +37,3 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .serve(addr)
         .await
 }
-
-fn _serialize_marker<T: Serialize>(_: &T) {}

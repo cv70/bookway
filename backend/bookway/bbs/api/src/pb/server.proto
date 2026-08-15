@@ -1,0 +1,67 @@
+syntax = "proto3";
+package bookway.bbs;
+
+enum SocialEdgeType {
+  SOCIAL_EDGE_TYPE_FOLLOW = 0;
+  SOCIAL_EDGE_TYPE_BLOCK = 1;
+  SOCIAL_EDGE_TYPE_MUTE = 2;
+}
+
+message SocialContext {
+  repeated string followed_author_ids = 1;
+  repeated string blocked_author_ids = 2;
+  repeated string muted_author_ids = 3;
+  repeated string liked_post_ids = 4;
+  repeated string bookmarked_post_ids = 5;
+}
+
+message SocialVisibility {
+  repeated string excluded_author_ids = 1;
+}
+
+message ContextRequest {
+  string user_id = 1;
+  repeated string post_ids = 2;
+}
+message SetEdgeRequest {
+  string user_id = 1;
+  string target_user_id = 2;
+  SocialEdgeType edge = 3;
+  bool active = 4;
+}
+message RouteContextRequest { string user_id = 1; repeated string route_ids = 2; }
+message RouteParticipation {
+  string route_id = 1;
+  optional string private_journey_id = 2;
+  string joined_at = 3;
+}
+message RouteParticipationList {
+  repeated RouteParticipation items = 1;
+}
+message RouteParticipationContext {
+  repeated string joined_route_ids = 1;
+  map<string, uint64> participant_counts = 2;
+}
+message RouteParticipationState {
+  string route_id = 1;
+  bool joined = 2;
+  optional string private_journey_id = 3;
+  optional string joined_at = 4;
+  uint64 participant_count = 5;
+}
+message RouteParticipationRequest {
+  string user_id = 1;
+  string route_id = 2;
+  bool active = 3;
+  optional string private_journey_id = 4;
+  optional uint64 intent_version = 5;
+}
+
+service Bbs {
+  rpc Context(ContextRequest) returns (SocialContext);
+  rpc VisibilityContext(ContextRequest) returns (SocialVisibility);
+  rpc SetEdge(SetEdgeRequest) returns (SocialContext);
+  rpc ListRouteParticipations(ContextRequest) returns (RouteParticipationList);
+  rpc RouteContext(RouteContextRequest) returns (RouteParticipationContext);
+  rpc SetRouteParticipation(RouteParticipationRequest) returns (RouteParticipationState);
+}

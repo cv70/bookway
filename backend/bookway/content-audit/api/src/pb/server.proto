@@ -1,0 +1,144 @@
+syntax = "proto3";
+package bookway.content.audit;
+
+enum AuditDecision {
+  AUDIT_DECISION_APPROVED = 0;
+  AUDIT_DECISION_REVIEWING = 1;
+  AUDIT_DECISION_RESTRICTED = 2;
+}
+
+enum ReportReason {
+  REPORT_REASON_SPAM = 0;
+  REPORT_REASON_HARASSMENT = 1;
+  REPORT_REASON_UNSAFE = 2;
+  REPORT_REASON_MISINFORMATION = 3;
+  REPORT_REASON_COPYRIGHT = 4;
+  REPORT_REASON_PRIVACY = 5;
+  REPORT_REASON_OTHER = 6;
+}
+
+enum ReportStatus {
+  REPORT_STATUS_PENDING = 0;
+  REPORT_STATUS_REVIEWING = 1;
+  REPORT_STATUS_RESOLVED = 2;
+  REPORT_STATUS_REJECTED = 3;
+}
+
+enum ContentAction {
+  CONTENT_ACTION_NO_ACTION = 0;
+  CONTENT_ACTION_RESTRICT = 1;
+  CONTENT_ACTION_RESTORE = 2;
+}
+
+enum AppealStatus {
+  APPEAL_STATUS_PENDING = 0;
+  APPEAL_STATUS_REVIEWING = 1;
+  APPEAL_STATUS_RESOLVED = 2;
+  APPEAL_STATUS_REJECTED = 3;
+}
+
+message AuditRequest {
+  string content_id = 1;
+  uint32 version = 2;
+  string title = 3;
+  string body = 4;
+}
+
+message AuditResponse {
+  AuditDecision decision = 1;
+  double risk_score = 2;
+  repeated string reasons = 3;
+  string provider = 4;
+}
+
+message CreateReportRequest {
+  string reporter_id = 1;
+  string content_id = 2;
+  optional string idempotency_key = 3;
+  ReportReason reason = 4;
+  string details = 5;
+}
+
+message ContentReport {
+  string id = 1;
+  string reporter_id = 2;
+  string content_id = 3;
+  ReportReason reason = 4;
+  string details = 5;
+  ReportStatus status = 6;
+  string created_at = 7;
+  optional string assignee_id = 8;
+  optional string resolution = 9;
+  ContentAction action = 10;
+  string updated_at = 11;
+}
+
+message ListReportsRequest {
+  optional ReportStatus status = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+}
+
+message ReportPage {
+  repeated ContentReport items = 1;
+  optional string next_cursor = 2;
+}
+
+message ReviewReportRequest {
+  string reviewer_id = 1;
+  string report_id = 2;
+  ReportStatus status = 3;
+  string resolution = 4;
+  ContentAction action = 5;
+}
+
+message CreateAppealRequest {
+  string appellant_id = 1;
+  string content_id = 2;
+  optional string idempotency_key = 3;
+  string details = 4;
+}
+
+message ContentAppeal {
+  string id = 1;
+  string content_id = 2;
+  string appellant_id = 3;
+  string details = 4;
+  AppealStatus status = 5;
+  optional string assignee_id = 6;
+  optional string resolution = 7;
+  ContentAction action = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message ListAppealsRequest {
+  optional AppealStatus status = 1;
+  optional string appellant_id = 2;
+  optional string content_id = 3;
+  optional string cursor = 4;
+  optional uint32 limit = 5;
+}
+
+message AppealPage {
+  repeated ContentAppeal items = 1;
+  optional string next_cursor = 2;
+}
+
+message ReviewAppealRequest {
+  string reviewer_id = 1;
+  string appeal_id = 2;
+  AppealStatus status = 3;
+  string resolution = 4;
+  ContentAction action = 5;
+}
+
+service ContentAudit {
+  rpc Audit(AuditRequest) returns (AuditResponse);
+  rpc Report(CreateReportRequest) returns (ContentReport);
+  rpc Appeal(CreateAppealRequest) returns (ContentAppeal);
+  rpc ListReports(ListReportsRequest) returns (ReportPage);
+  rpc ReviewReport(ReviewReportRequest) returns (ContentReport);
+  rpc ListAppeals(ListAppealsRequest) returns (AppealPage);
+  rpc ReviewAppeal(ReviewAppealRequest) returns (ContentAppeal);
+}

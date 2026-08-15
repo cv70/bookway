@@ -16,6 +16,8 @@ type Props = {
   savedPosts: CommunityPost[];
   review?: WeeklyReview;
   onApplyReviewSuggestion: (suggestion: ReviewAdjustmentSuggestion) => void;
+  onRetryEntryPublication: (entryId: string) => Promise<void>;
+  retryingEntryIds: Set<string>;
   onClose: () => void;
 };
 
@@ -28,7 +30,7 @@ const titles: Record<ProfileSection, string> = {
   settings: '设置与数据',
 };
 
-export function ProfileSectionModal({ section, visible, journeys, entries, savedPosts, review, onApplyReviewSuggestion, onClose }: Props) {
+export function ProfileSectionModal({ section, visible, journeys, entries, savedPosts, review, onApplyReviewSuggestion, onRetryEntryPublication, retryingEntryIds, onClose }: Props) {
   const [notifications, setNotifications] = useState(false);
   const [reminderPreferences, setReminderPreferences] = useState<ReminderPreferences>();
   const [remindersLoading, setRemindersLoading] = useState(false);
@@ -203,7 +205,7 @@ export function ProfileSectionModal({ section, visible, journeys, entries, saved
         <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
           {section === 'review' ? <Review entries={entries} journeys={journeys} onApplySuggestion={onApplyReviewSuggestion} review={review} /> : null}
           {section === 'saved' ? <Saved posts={savedPosts} journeys={journeys} /> : null}
-          {section === 'creation' ? <Creation appeals={appeals} appealsLoadMoreError={appealsLoadMoreError} appealsLoadingMore={appealsLoadingMore} appealsNextCursor={appealsNextCursor} contentManagementError={contentManagementError} contentManagementLoading={contentManagementLoading} contents={ownContents} contentsLoadMoreError={ownContentsLoadMoreError} contentsLoadingMore={ownContentsLoadingMore} contentsNextCursor={ownContentsNextCursor} entries={entries} onLoadMoreAppeals={() => void loadMoreAppeals()} onLoadMoreContents={() => void loadMoreOwnContents()} onRefreshContentManagement={() => setContentManagementRefresh((value) => value + 1)} onSubmitAppeal={submitAppeal} submittingContentId={appealSubmittingContentId} /> : null}
+          {section === 'creation' ? <Creation appeals={appeals} appealsLoadMoreError={appealsLoadMoreError} appealsLoadingMore={appealsLoadingMore} appealsNextCursor={appealsNextCursor} contentManagementError={contentManagementError} contentManagementLoading={contentManagementLoading} contents={ownContents} contentsLoadMoreError={ownContentsLoadMoreError} contentsLoadingMore={ownContentsLoadingMore} contentsNextCursor={ownContentsNextCursor} entries={entries} onLoadMoreAppeals={() => void loadMoreAppeals()} onLoadMoreContents={() => void loadMoreOwnContents()} onRefreshContentManagement={() => setContentManagementRefresh((value) => value + 1)} onRetryEntryPublication={onRetryEntryPublication} onSubmitAppeal={submitAppeal} retryingEntryIds={retryingEntryIds} submittingContentId={appealSubmittingContentId} /> : null}
           {section === 'archive' ? <Archive entries={entries} journeys={journeys} /> : null}
           {section === 'privacy' ? <Privacy privateByDefault={privateByDefault} setPrivateByDefault={setPrivateByDefault} /> : null}
           {section === 'settings' ? <SettingsPanel analytics={analytics} exportPreview={exportPreview} notificationStatus={reminderError ?? (remindersLoading ? '正在读取提醒设置…' : remindersSaving ? '正在保存提醒设置…' : undefined)} notifications={notifications} remindersBusy={remindersLoading || remindersSaving} setAnalytics={setAnalytics} setNotifications={setNotificationsPreference} /> : null}
@@ -231,9 +233,30 @@ function Saved({ posts, journeys }: { posts: CommunityPost[]; journeys: Journey[
   return <><Text style={styles.lead}>把值得参考的经验留在手边。</Text><Text style={styles.section}>收藏内容</Text>{posts.length ? posts.map((post) => <View key={post.id} style={styles.row}><Text numberOfLines={1} style={styles.rowTitle}>{post.title}</Text><Text style={styles.rowMeta}>{post.author_name} · {post.route_title}</Text></View>) : <Empty text="收藏的行记会出现在这里。" />}<Text style={styles.section}>加入的路线</Text>{journeys.length ? journeys.map((journey) => <View key={journey.id} style={styles.row}><Text numberOfLines={1} style={styles.rowTitle}>{journey.title}</Text><Text style={styles.rowMeta}>{journey.progress}% · {journey.status === 'active' ? '进行中' : journey.status === 'paused' ? '已暂停' : '已完成'}</Text></View>) : <Empty text="从发现页加入一条路线。" />}</>;
 }
 
-function Creation({ appeals, appealsLoadMoreError, appealsLoadingMore, appealsNextCursor, contentManagementError, contentManagementLoading, contents, contentsLoadMoreError, contentsLoadingMore, contentsNextCursor, entries, onLoadMoreAppeals, onLoadMoreContents, onRefreshContentManagement, onSubmitAppeal, submittingContentId }: { appeals: ContentAppeal[]; appealsLoadMoreError?: string; appealsLoadingMore: boolean; appealsNextCursor?: string; contentManagementError?: string; contentManagementLoading: boolean; contents: OwnedContent[]; contentsLoadMoreError?: string; contentsLoadingMore: boolean; contentsNextCursor?: string; entries: GrowthEntry[]; onLoadMoreAppeals: () => void; onLoadMoreContents: () => void; onRefreshContentManagement: () => void; onSubmitAppeal: (contentId: string, details: string) => Promise<void>; submittingContentId?: string }) {
-  const published = entries.filter((entry) => entry.published);
-  return <><Text style={styles.lead}>由真实行动产生的内容，才有可以传递的经验。</Text><View style={styles.statGrid}><Stat value={String(entries.length)} label="草稿与记录" /><Stat value={String(published.length)} label="已发布行记" /><Stat value={String(entries.length - published.length)} label="私密记录" /></View><Text style={styles.section}>已发布</Text>{published.length ? published.map((entry) => <View key={entry.id} style={styles.entry}><Text style={styles.entryBody}>{entry.body}</Text><Text style={styles.entryMeta}>行记 · 已发布</Text></View>) : <Empty text="发布的行记会在这里管理。" />}<ContentAppeals appeals={appeals} appealsLoadMoreError={appealsLoadMoreError} appealsLoadingMore={appealsLoadingMore} appealsNextCursor={appealsNextCursor} contentLoadMoreError={contentsLoadMoreError} contents={contents} contentsLoadingMore={contentsLoadingMore} contentsNextCursor={contentsNextCursor} error={contentManagementError} loading={contentManagementLoading} onLoadMoreAppeals={onLoadMoreAppeals} onLoadMoreContents={onLoadMoreContents} onRefresh={onRefreshContentManagement} onSubmit={onSubmitAppeal} submittingContentId={submittingContentId} /></>;
+function Creation({ appeals, appealsLoadMoreError, appealsLoadingMore, appealsNextCursor, contentManagementError, contentManagementLoading, contents, contentsLoadMoreError, contentsLoadingMore, contentsNextCursor, entries, onLoadMoreAppeals, onLoadMoreContents, onRefreshContentManagement, onRetryEntryPublication, onSubmitAppeal, retryingEntryIds, submittingContentId }: { appeals: ContentAppeal[]; appealsLoadMoreError?: string; appealsLoadingMore: boolean; appealsNextCursor?: string; contentManagementError?: string; contentManagementLoading: boolean; contents: OwnedContent[]; contentsLoadMoreError?: string; contentsLoadingMore: boolean; contentsNextCursor?: string; entries: GrowthEntry[]; onLoadMoreAppeals: () => void; onLoadMoreContents: () => void; onRefreshContentManagement: () => void; onRetryEntryPublication: (entryId: string) => Promise<void>; onSubmitAppeal: (contentId: string, details: string) => Promise<void>; retryingEntryIds: Set<string>; submittingContentId?: string }) {
+  const publicationEntries = entries.filter((entry) => publicationStatus(entry) !== 'private');
+  const published = publicationEntries.filter((entry) => publicationStatus(entry) === 'published');
+  const privateEntries = entries.filter((entry) => publicationStatus(entry) === 'private');
+  return <><Text style={styles.lead}>由真实行动产生的内容，才有可以传递的经验。</Text><View style={styles.statGrid}><Stat value={String(entries.length)} label="草稿与记录" /><Stat value={String(published.length)} label="已发布行记" /><Stat value={String(privateEntries.length)} label="私密记录" /></View><Text style={styles.section}>行记发布状态</Text>{publicationEntries.length ? publicationEntries.map((entry) => { const status = publicationStatus(entry); const retrying = retryingEntryIds.has(entry.id); return <View key={entry.id} style={styles.entry}><Text style={styles.entryBody}>{entry.body}</Text><Text style={styles.entryMeta}>{publicationLabel(status)}{entry.publication_error ? ` · ${entry.publication_error}` : ''}</Text>{status === 'failed' ? <Pressable accessibilityLabel="重试发布行记" disabled={retrying} onPress={() => void onRetryEntryPublication(entry.id)} style={[styles.suggestionApply, retrying && styles.appealSubmitDisabled]}><Text style={styles.suggestionApplyText}>{retrying ? '正在重新提交…' : '重新提交发布'}</Text></Pressable> : null}</View>; }) : <Empty text="主动发布的行记会在这里显示审核和公开状态。" />}<ContentAppeals appeals={appeals} appealsLoadMoreError={appealsLoadMoreError} appealsLoadingMore={appealsLoadingMore} appealsNextCursor={appealsNextCursor} contentLoadMoreError={contentsLoadMoreError} contents={contents} contentsLoadingMore={contentsLoadingMore} contentsNextCursor={contentsNextCursor} error={contentManagementError} loading={contentManagementLoading} onLoadMoreAppeals={onLoadMoreAppeals} onLoadMoreContents={onLoadMoreContents} onRefresh={onRefreshContentManagement} onSubmit={onSubmitAppeal} submittingContentId={submittingContentId} /></>;
+}
+
+function publicationStatus(entry: GrowthEntry): 'private' | 'pending' | 'reviewing' | 'published' | 'restricted' | 'failed' {
+  const status = entry.publication_status;
+  if (status === 'pending') return 'pending';
+  if (status === 'reviewing') return 'reviewing';
+  if (status === 'published' || entry.published) return 'published';
+  if (status === 'restricted') return 'restricted';
+  if (status === 'failed') return 'failed';
+  return 'private';
+}
+
+function publicationLabel(status: ReturnType<typeof publicationStatus>) {
+  if (status === 'pending') return '行记 · 正在提交审核';
+  if (status === 'reviewing') return '行记 · 审核中';
+  if (status === 'published') return '行记 · 已公开';
+  if (status === 'restricted') return '行记 · 未公开';
+  if (status === 'failed') return '行记 · 提交失败';
+  return '私密记录';
 }
 
 function ContentAppeals({ appeals, appealsLoadMoreError, appealsLoadingMore, appealsNextCursor, contentLoadMoreError, contents, contentsLoadingMore, contentsNextCursor, loading, error, submittingContentId, onLoadMoreAppeals, onLoadMoreContents, onRefresh, onSubmit }: { appeals: ContentAppeal[]; appealsLoadMoreError?: string; appealsLoadingMore: boolean; appealsNextCursor?: string; contentLoadMoreError?: string; contents: OwnedContent[]; contentsLoadingMore: boolean; contentsNextCursor?: string; loading: boolean; error?: string; submittingContentId?: string; onLoadMoreAppeals: () => void; onLoadMoreContents: () => void; onRefresh: () => void; onSubmit: (contentId: string, details: string) => Promise<void> }) {

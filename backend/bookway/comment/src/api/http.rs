@@ -1,13 +1,10 @@
+use crate::api::{ApiResponse, ErrorResponse, HealthResponse, pb};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get},
-};
-use bookway_api::{
-    ApiResponse, CommentDto, CommentPageDto, CommentQueryRequest, CreateCommentRequest,
-    ErrorResponse, HealthResponse,
 };
 use tower_http::trace::TraceLayer;
 
@@ -50,28 +47,22 @@ async fn health() -> Json<HealthResponse> {
 async fn list_comments(
     State(state): State<AppState>,
     Path(post_id): Path<String>,
-    Query(request): Query<CommentQueryRequest>,
-) -> Result<Json<ApiResponse<CommentPageDto>>, HttpError> {
-    Ok(Json(ApiResponse::new(
-        state.domain.list(&post_id, request).await?,
-    )))
+    Query(mut request): Query<pb::ListRequest>,
+) -> Result<Json<ApiResponse<pb::CommentPage>>, HttpError> {
+    request.post_id = post_id;
+    Ok(Json(ApiResponse::new(state.domain.list(request).await?)))
 }
 
 async fn create_comment(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(post_id): Path<String>,
-    Json(request): Json<CreateCommentRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<CommentDto>>), HttpError> {
-    let comment = state
-        .domain
-        .create(
-            &user_id(&headers),
-            &post_id,
-            request,
-            idempotency_key(&headers),
-        )
-        .await?;
+    Json(mut request): Json<pb::CreateRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<pb::CreateCommentResult>>), HttpError> {
+    request.user_id = user_id(&headers);
+    request.post_id = post_id;
+    request.idempotency_key = idempotency_key(&headers);
+    let comment = state.domain.create(request).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::new(comment))))
 }
 
@@ -82,7 +73,11 @@ async fn delete_comment(
 ) -> Result<StatusCode, HttpError> {
     state
         .domain
-        .delete(&user_id(&headers), &post_id, &comment_id)
+        .delete(pb::DeleteRequest {
+            user_id: user_id(&headers),
+            post_id,
+            comment_id,
+        })
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -126,6 +121,36 @@ impl IntoResponse for HttpError {
             }
             CommentError::Repository(crate::datasource::RepositoryError::IdempotencyConflict) => {
                 (StatusCode::CONFLICT, "idempotency_conflict")
+            }
+            CommentError::Repository(crate::datasource::RepositoryError::ModerationConflict) => {
+                (StatusCode::CONFLICT, "moderation_conflict")
+            }
+            CommentError::Repository(crate::datasource::RepositoryError::NotReportable(_)) => {
+                (StatusCode::CONFLICT, "comment_not_reportable")
+            }
+            CommentError::Repository(crate::datasource::RepositoryError::SelfReport) => {
+                (StatusCode::FORBIDDEN, "self_report")
+            }
+            CommentError::Repository(
+                crate::datasource::RepositoryError::ReportIdempotencyConflict,
+            ) => (StatusCode::CONFLICT, "report_idempotency_conflict"),
+            CommentError::Repository(crate::datasource::RepositoryError::ReportNotFound(_)) => {
+                (StatusCode::NOT_FOUND, "comment_report_not_found")
+            }
+            CommentError::Repository(crate::datasource::RepositoryError::ReportConflict) => {
+                (StatusCode::CONFLICT, "comment_report_conflict")
+            }
+            CommentError::Repository(
+                crate::datasource::RepositoryError::AppealIdempotencyConflict,
+            ) => (StatusCode::CONFLICT, "appeal_idempotency_conflict"),
+            CommentError::Repository(crate::datasource::RepositoryError::AppealNotFound(_)) => {
+                (StatusCode::NOT_FOUND, "comment_appeal_not_found")
+            }
+            CommentError::Repository(crate::datasource::RepositoryError::AppealConflict) => {
+                (StatusCode::CONFLICT, "comment_appeal_conflict")
+            }
+            CommentError::Repository(crate::datasource::RepositoryError::ActionConflict) => {
+                (StatusCode::CONFLICT, "comment_action_conflict")
             }
             CommentError::Repository(crate::datasource::RepositoryError::Database(_)) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "storage_error")

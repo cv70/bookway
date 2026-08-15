@@ -1,10 +1,9 @@
 mod grpc;
 mod http;
-
-#[path = "pb/bookway.bbs.link.rs"]
-pub mod pb;
+pub use bookway_bbs_link_api::pb;
 
 pub(crate) use grpc::serve as serve_grpc;
 pub(crate) use http::serve as serve_http;
 
-pub(crate) use bookway_api::{ContentDto, ContentPageDto, ContentQueryRequest};
+#[allow(unused_imports)]
+pub(crate) use bookway_bbs_link_api::*;

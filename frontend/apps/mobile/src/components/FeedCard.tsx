@@ -26,16 +26,28 @@ export function FeedCard({
   joined?: boolean;
   joining?: boolean;
   joinCount?: number;
-  onLike?: (postId: string) => void;
-  onBookmark?: (postId: string) => void;
-  onHide?: (postId: string) => void;
-  onJoin?: (post: FeedItem['post']) => void;
+  onLike?: (postId: string, context?: FeedItem['recommendation_context']) => void;
+  onBookmark?: (postId: string, context?: FeedItem['recommendation_context']) => void;
+  onHide?: (postId: string, context?: FeedItem['recommendation_context']) => void;
+  onJoin?: (post: FeedItem['post'], context?: FeedItem['recommendation_context']) => void;
   onOpen?: (item: FeedItem) => void;
 }) {
   const { post } = item;
+  const canJoinRoute = post.is_route ?? Boolean(post.route_title.trim());
+  const attribution = item.recommendation_context;
+  const impressionComponent = attribution?.surface === 'search' ? 'search-result-card' : 'feed-card';
   useEffect(() => {
-    eventReporter.impression(post.id, 'feed-card');
-  }, [post.id]);
+    const attributionSource = attribution?.request_id
+      ? attribution.surface === 'search' ? 'search' : 'recommendation'
+      : undefined;
+    eventReporter.impression(
+      post.id,
+      impressionComponent,
+      attribution?.position,
+      attribution?.request_id,
+      attributionSource,
+    );
+  }, [attribution?.position, attribution?.request_id, attribution?.surface, impressionComponent, post.id]);
   return (
     <View style={styles.card}>
       <View style={styles.authorRow}>
@@ -54,11 +66,11 @@ export function FeedCard({
         <View style={styles.tags}>
           {post.tags.map((tag) => <Text key={tag} style={styles.tag}>#{tag}</Text>)}
         </View>
-        <Pressable
+        {canJoinRoute ? <Pressable
           accessibilityLabel={joining ? '正在加入路线' : joined ? '已加入路线' : '加入路线'}
           accessibilityRole="button"
           disabled={joined || joining}
-          onPress={() => onJoin?.(post)}
+          onPress={() => onJoin?.(post, attribution)}
           style={({ pressed }) => [styles.route, pressed && styles.pressed, joined && styles.routeJoined]}
         >
           <View style={styles.routeIcon}><Route color={colors.evergreen} size={18} /></View>
@@ -71,12 +83,12 @@ export function FeedCard({
             </View>
           </View>
           <Text style={styles.join}>{joining ? '加入中' : joined ? '已加入' : '加入'}</Text>
-        </Pressable>
+        </Pressable> : null}
         <View style={styles.actions}>
           <Pressable
             accessibilityLabel="喜欢"
             hitSlop={8}
-            onPress={() => onLike?.(post.id)}
+            onPress={() => onLike?.(post.id, attribution)}
             style={styles.action}
           >
             <Heart color={liked ? colors.coral : colors.muted} fill={liked ? colors.coral : 'transparent'} size={20} />
@@ -86,7 +98,7 @@ export function FeedCard({
             accessibilityLabel="减少此类内容"
             accessibilityRole="button"
             hitSlop={8}
-            onPress={() => onHide?.(post.id)}
+            onPress={() => onHide?.(post.id, attribution)}
             style={styles.action}
           >
             <EyeOff color={colors.muted} size={20} />
@@ -95,7 +107,7 @@ export function FeedCard({
             accessibilityLabel={bookmarked ? '取消收藏' : '收藏'}
             accessibilityRole="button"
             hitSlop={8}
-            onPress={() => onBookmark?.(post.id)}
+            onPress={() => onBookmark?.(post.id, attribution)}
             style={styles.action}
           >
             <Bookmark color={bookmarked ? colors.gold : colors.muted} fill={bookmarked ? colors.gold : 'transparent'} size={20} />

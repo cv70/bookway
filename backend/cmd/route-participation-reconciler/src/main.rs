@@ -1,7 +1,6 @@
 use std::{env, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use bookway_api::SetRouteParticipationRequest;
 use futures::{StreamExt, stream};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -23,8 +22,6 @@ enum ReconcileError {
 
 #[derive(Debug, Error)]
 enum TargetError {
-    #[error("request serialization failed: {0}")]
-    Serialization(#[from] serde_json::Error),
     #[error("bbs request failed: {0}")]
     Grpc(#[from] tonic::Status),
     #[error("bbs service authentication failed: {0}")]
@@ -132,13 +129,13 @@ impl IntentRepository for PostgresIntentRepository {
 }
 
 struct BbsGrpcTarget {
-    client: bookway_bbs::api::pb::bbs_client::BbsClient<tonic::transport::Channel>,
+    client: bookway_bbs_api::pb::bbs_client::BbsClient<tonic::transport::Channel>,
 }
 
 impl BbsGrpcTarget {
     async fn connect(address: String) -> Result<Self, tonic::transport::Error> {
         Ok(Self {
-            client: bookway_bbs::api::pb::bbs_client::BbsClient::connect(address).await?,
+            client: bookway_bbs_api::pb::bbs_client::BbsClient::connect(address).await?,
         })
     }
 }
@@ -149,20 +146,18 @@ impl ParticipationTarget for BbsGrpcTarget {
         let mut client = self.client.clone();
         client
             .set_route_participation(bookway_runtime::grpc_service_request(
-                bookway_bbs::api::pb::RouteParticipationRequest {
+                bookway_bbs_api::pb::RouteParticipationRequest {
                     user_id: intent.user_id.clone(),
                     route_id: intent.route_id.clone(),
-                    request_json: serde_json::to_string(&SetRouteParticipationRequest {
-                        active: intent.desired_active,
-                        private_journey_id: intent
-                            .desired_active
-                            .then(|| intent.private_journey_id.clone())
-                            .flatten(),
-                        intent_version: Some(
-                            u64::try_from(intent.version)
-                                .map_err(|_| TargetError::InvalidVersion(intent.version))?,
-                        ),
-                    })?,
+                    active: intent.desired_active,
+                    private_journey_id: intent
+                        .desired_active
+                        .then(|| intent.private_journey_id.clone())
+                        .flatten(),
+                    intent_version: Some(
+                        u64::try_from(intent.version)
+                            .map_err(|_| TargetError::InvalidVersion(intent.version))?,
+                    ),
                 },
             )?)
             .await?;

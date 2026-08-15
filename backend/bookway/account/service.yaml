@@ -1,0 +1,7 @@
+name: bookway-account
+owner: account
+kind: grpc-service
+port: 8094
+healthcheck: grpc
+contracts:
+  - src/api/pb/server.proto

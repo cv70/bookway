@@ -1,9 +1,8 @@
 use std::{env, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use bookway_api::{
-    ContentDto, ContentStatusDto, CreateUserNotificationRequest, NotificationKindDto,
-};
+use bookway_bbs_link_api::pb as bbs_link_pb;
+use bookway_growth_api::pb as growth_pb;
 use futures::{StreamExt, stream};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -81,8 +80,6 @@ enum DispatcherError {
 
 #[derive(Debug, Error)]
 enum TargetError {
-    #[error("response serialization failed: {0}")]
-    Serialization(#[from] serde_json::Error),
     #[error("bbs-link request failed: {0}")]
     BbsLink(tonic::Status),
     #[error("growth request failed: {0}")]
@@ -194,8 +191,8 @@ impl JobRepository for PostgresJobRepository {
 }
 
 struct GrpcNotificationTarget {
-    bbs_link: bookway_bbs_link::api::pb::bbs_link_client::BbsLinkClient<tonic::transport::Channel>,
-    growth: bookway_growth::api::pb::growth_client::GrowthClient<tonic::transport::Channel>,
+    bbs_link: bookway_bbs_link_api::pb::bbs_link_client::BbsLinkClient<tonic::transport::Channel>,
+    growth: bookway_growth_api::pb::growth_client::GrowthClient<tonic::transport::Channel>,
     service_auth_token: Option<MetadataValue<Ascii>>,
 }
 
@@ -206,11 +203,11 @@ impl GrpcNotificationTarget {
         service_auth_token: Option<MetadataValue<Ascii>>,
     ) -> Result<Self, tonic::transport::Error> {
         Ok(Self {
-            bbs_link: bookway_bbs_link::api::pb::bbs_link_client::BbsLinkClient::connect(
+            bbs_link: bookway_bbs_link_api::pb::bbs_link_client::BbsLinkClient::connect(
                 bbs_link_url,
             )
             .await?,
-            growth: bookway_growth::api::pb::growth_client::GrowthClient::connect(growth_url)
+            growth: bookway_growth_api::pb::growth_client::GrowthClient::connect(growth_url)
                 .await?,
             service_auth_token,
         })
@@ -240,7 +237,7 @@ impl NotificationTarget for GrpcNotificationTarget {
             let mut bbs_link = self.bbs_link.clone();
             bbs_link
                 .restore(bbs_link_request(
-                    bookway_bbs_link::api::pb::RestoreRequest {
+                    bookway_bbs_link_api::pb::RestoreRequest {
                         content_id: job.content_id.clone(),
                     },
                     self.service_auth_token.as_ref(),
@@ -249,7 +246,7 @@ impl NotificationTarget for GrpcNotificationTarget {
                 .map_err(TargetError::BbsLink)?;
             let response = match bbs_link
                 .get_public(bbs_link_request(
-                    bookway_bbs_link::api::pb::IdRequest {
+                    bookway_bbs_link_api::pb::IdRequest {
                         id: job.content_id.clone(),
                     },
                     self.service_auth_token.as_ref(),
@@ -264,8 +261,8 @@ impl NotificationTarget for GrpcNotificationTarget {
                 }
                 Err(status) => return Err(TargetError::BbsLink(status)),
             };
-            let content: ContentDto = serde_json::from_str(&response.response_json)?;
-            if content.status != ContentStatusDto::Published {
+            let content = response;
+            if content.status != bbs_link_pb::ContentStatus::Published as i32 {
                 return Err(TargetError::ContentNotPublic(job.content_id.clone()));
             }
         }
@@ -273,20 +270,18 @@ impl NotificationTarget for GrpcNotificationTarget {
         let request = notification_request(job);
         let mut growth = self.growth.clone();
         growth
-            .create_notification(bookway_growth::api::pb::CreateNotificationRequest {
-                user_id: job.user_id.clone(),
-                request_json: serde_json::to_string(&request)?,
-            })
+            .create_notification(request)
             .await
             .map_err(TargetError::Growth)?;
         Ok(DeliveryDisposition::Delivered)
     }
 }
 
-fn notification_request(job: &AppealNotificationJob) -> CreateUserNotificationRequest {
+fn notification_request(job: &AppealNotificationJob) -> growth_pb::CreateNotificationRequest {
     let restored = job.action == ContentAction::RestoreContent;
-    CreateUserNotificationRequest {
-        kind: NotificationKindDto::Community,
+    growth_pb::CreateNotificationRequest {
+        user_id: job.user_id.clone(),
+        kind: growth_pb::NotificationKind::Community as i32,
         source_id: format!(
             "content-appeal:{}:{}",
             job.appeal_id,
@@ -306,12 +301,17 @@ fn notification_request(job: &AppealNotificationJob) -> CreateUserNotificationRe
         } else {
             job.resolution.clone()
         },
-        data: serde_json::json!({
-            "appeal_id": job.appeal_id,
-            "post_id": job.content_id,
-            "appeal_status": job.decision_status.as_str(),
-            "content_restored": restored,
-        }),
+        data: [
+            ("appeal_id".to_string(), job.appeal_id.clone()),
+            ("post_id".to_string(), job.content_id.clone()),
+            (
+                "appeal_status".to_string(),
+                job.decision_status.as_str().to_string(),
+            ),
+            ("content_restored".to_string(), restored.to_string()),
+        ]
+        .into_iter()
+        .collect(),
     }
 }
 
@@ -610,16 +610,16 @@ mod tests {
         let request = notification_request(&job(ContentAction::RestoreContent));
 
         assert_eq!(request.source_id, "content-appeal:appeal-1:resolved");
-        assert_eq!(request.kind, NotificationKindDto::Community);
+        assert_eq!(request.kind, growth_pb::NotificationKind::Community as i32);
         assert_eq!(request.data["appeal_id"], "appeal-1");
-        assert_eq!(request.data["content_restored"], true);
+        assert_eq!(request.data["content_restored"], "true");
     }
 
     #[test]
     fn restore_request_carries_the_worker_service_token() {
         let token: MetadataValue<Ascii> = "dispatcher-token".try_into().expect("valid token");
         let request = bbs_link_request(
-            bookway_bbs_link::api::pb::RestoreRequest {
+            bookway_bbs_link_api::pb::RestoreRequest {
                 content_id: "content-1".to_string(),
             },
             Some(&token),

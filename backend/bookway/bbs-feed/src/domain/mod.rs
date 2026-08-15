@@ -2,4 +2,4 @@
 mod domain;
 mod feed;
 
-pub(crate) use domain::{BbsFeedError, Domain};
+pub(crate) use domain::Domain;

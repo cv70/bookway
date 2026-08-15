@@ -1,3 +1,5 @@
+import { useEventListener } from 'expo';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import { Bookmark, EyeOff, Heart, MessageCircle, Route, Send, ShieldAlert, UserPlus, X } from 'lucide-react-native';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -14,14 +16,16 @@ import {
 } from 'react-native';
 
 import { colors } from '../theme';
-import { Comment, CommunityPost, ReportReason } from '../types';
+import { Comment, CommunityPost, ContentDetail, ContentMedia, ReportReason, RouteTemplateAction } from '../types';
 import { DomainBadge } from './DomainBadge';
 
 type Props = {
   post?: CommunityPost;
+  content?: ContentDetail;
   visible: boolean;
   liked: boolean;
   bookmarked: boolean;
+  capturedKnowledge: boolean;
   joined: boolean;
   joining: boolean;
   joinCount?: number;
@@ -33,10 +37,12 @@ type Props = {
   onClose: () => void;
   onLike: (postId: string) => void;
   onBookmark: (postId: string) => void;
+  onCaptureKnowledge: (postId: string) => Promise<void>;
   onJoin: (post: CommunityPost) => void;
   onHide: (postId: string) => void;
   onReport: (postId: string, reason: ReportReason) => Promise<void>;
   onFollow: (post: CommunityPost) => void;
+  onOpenAuthor: (post: CommunityPost) => void;
   onComment: (postId: string, body: string, parentId?: string) => Promise<Comment>;
   onDeleteComment: (postId: string, commentId: string) => Promise<void>;
   onLoadMoreComments: (postId: string) => Promise<void>;
@@ -44,9 +50,11 @@ type Props = {
 
 export function PostDetailModal({
   post,
+  content,
   visible,
   liked,
   bookmarked,
+  capturedKnowledge,
   joined,
   joining,
   joinCount,
@@ -58,10 +66,12 @@ export function PostDetailModal({
   onClose,
   onLike,
   onBookmark,
+  onCaptureKnowledge,
   onJoin,
   onHide,
   onReport,
   onFollow,
+  onOpenAuthor,
   onComment,
   onDeleteComment,
   onLoadMoreComments,
@@ -77,6 +87,8 @@ export function PostDetailModal({
   const [reportError, setReportError] = useState(false);
   const [reported, setReported] = useState(false);
   const [deletingCommentId, setDeletingCommentId] = useState<string>();
+  const [capturingKnowledge, setCapturingKnowledge] = useState(false);
+  const [captureKnowledgeError, setCaptureKnowledgeError] = useState(false);
   const commentsById = useMemo(
     () => new Map(comments.map((item) => [item.id, item])),
     [comments],
@@ -94,8 +106,23 @@ export function PostDetailModal({
     setReportError(false);
     setReported(false);
     setDeletingCommentId(undefined);
+    setCapturingKnowledge(false);
+    setCaptureKnowledgeError(false);
   }, [post?.id, visible]);
   if (!post) return null;
+  const media = content?.media ?? [];
+  const hasMediaImage = media.some((item) => item.kind.toLowerCase() === 'image' && item.url.trim());
+  const topics = content?.topics?.filter((topic) => topic.trim()) ?? [];
+  const template = content?.route_template;
+  const templateStages = template?.stages ?? [];
+  const templateActions = template?.actions ?? [];
+  const unassignedTemplateActions = templateActions.filter((action) => !Number.isInteger(action.stage_index)
+    || action.stage_index === undefined
+    || action.stage_index < 0
+    || action.stage_index >= templateStages.length);
+  const hasRoute = post.is_route ?? Boolean(post.route_title.trim() || template);
+  const routeTitle = post.route_title.trim() || post.title;
+  const routeDuration = post.route_duration.trim();
   const submitComment = async () => {
     if (!comment.trim() || commentSubmitting) return;
     setCommentSubmitting(true);
@@ -158,6 +185,18 @@ export function PostDetailModal({
       { text: '删除', style: 'destructive', onPress: () => void deleteComment(item) },
     ]);
   };
+  const captureKnowledge = async () => {
+    if (capturedKnowledge || capturingKnowledge) return;
+    setCapturingKnowledge(true);
+    setCaptureKnowledgeError(false);
+    try {
+      await onCaptureKnowledge(post.id);
+    } catch {
+      setCaptureKnowledgeError(true);
+    } finally {
+      setCapturingKnowledge(false);
+    }
+  };
 
   return (
     <Modal animationType="slide" onRequestClose={onClose} visible={visible}>
@@ -169,20 +208,57 @@ export function PostDetailModal({
         </View>
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <View style={styles.authorRow}>
+            <Pressable accessibilityLabel={`查看创作者${post.author_name}`} onPress={() => onOpenAuthor(post)} style={styles.authorProfileTarget}>
             <Image source={{ uri: post.author_avatar_url }} style={styles.avatar as ImageStyle} />
             <View style={styles.authorCopy}><Text style={styles.author}>{post.author_name}</Text><Text style={styles.caption}>真实行动记录</Text></View>
+            </Pressable>
             <Pressable onPress={() => onFollow(post)} style={({ pressed }) => [styles.follow, following && styles.following, pressed && styles.pressed]}><UserPlus color={following ? colors.muted : colors.evergreen} size={16} /><Text style={[styles.followText, following && styles.followingText]}>{following ? '已关注' : '关注'}</Text></Pressable>
           </View>
           <View style={styles.domain}><DomainBadge domain={post.domain} /></View>
           <Text style={styles.title}>{post.title}</Text>
           <Text style={styles.summary}>{post.summary}</Text>
-          <Image source={{ uri: post.cover_url }} style={styles.cover as ImageStyle} />
+          {!hasMediaImage && post.cover_url.trim() ? <Image source={{ uri: post.cover_url }} style={styles.cover as ImageStyle} /> : null}
+          {content?.body.trim() ? <Text style={styles.detailBody}>{content.body.trim()}</Text> : null}
+          {media.length ? <View style={styles.mediaList}>{media.map((item) => {
+            const kind = item.kind.toLowerCase();
+            if (kind === 'image' && item.url.trim()) {
+              return <Image key={item.id} source={{ uri: item.url }} style={[styles.mediaImage as ImageStyle, { aspectRatio: mediaAspectRatio(item.width, item.height) }]} />;
+            }
+            if (kind === 'video') return <ContentVideo item={item} key={item.id} />;
+            return null;
+          })}</View> : null}
           <View style={styles.tags}>{post.tags.map((tag) => <Text key={tag} style={styles.tag}>#{tag}</Text>)}</View>
-          <Pressable disabled={joined || joining} onPress={() => onJoin(post)} style={({ pressed }) => [styles.route, joined && styles.routeJoined, pressed && styles.pressed]}>
+          {topics.length ? <View style={styles.topics}><Text style={styles.topicsLabel}>相关话题</Text>{topics.map((topic) => <Text key={topic} style={styles.topic}>#{topic}</Text>)}</View> : null}
+          {template ? <View style={styles.template}>
+            <Text style={styles.templateTitle}>路线方法</Text>
+            {template.intent.trim() ? <TemplateField label="这条路线想达成什么" value={template.intent} /> : null}
+            {template.completion_criteria.trim() ? <TemplateField label="完成标准" value={template.completion_criteria} /> : null}
+            {templateStages.length ? <View style={styles.templateSection}><Text style={styles.templateSectionTitle}>阶段安排</Text>{templateStages.map((stage, stageIndex) => {
+              const stageActions = templateActions.filter((action) => action.stage_index === stageIndex);
+              return <View key={`${stage.title}-${stageIndex}`} style={styles.stageCard}>
+                <Text style={styles.stageTitle}>阶段 {stageIndex + 1} · {stage.title || '未命名阶段'}</Text>
+                {stage.detail.trim() ? <Text style={styles.stageDetail}>{stage.detail}</Text> : null}
+                {stage.completion_criteria.trim() ? <Text style={styles.stageCriteria}>完成：{stage.completion_criteria}</Text> : null}
+                {stageActions.map((action, actionIndex) => <RouteTemplateActionCard action={action} key={`${action.title}-${actionIndex}`} />)}
+              </View>;
+            })}</View> : null}
+            {unassignedTemplateActions.length ? <View style={styles.templateSection}><Text style={styles.templateSectionTitle}>{templateStages.length ? '其他行动' : '行动安排'}</Text>{unassignedTemplateActions.map((action, actionIndex) => <RouteTemplateActionCard action={action} key={`${action.title}-${actionIndex}`} />)}</View> : null}
+          </View> : null}
+          {hasRoute ? <Pressable disabled={joined || joining} onPress={() => onJoin(post)} style={({ pressed }) => [styles.route, joined && styles.routeJoined, pressed && styles.pressed]}>
             <Route color={colors.evergreen} size={20} />
-            <View style={styles.routeCopy}><Text numberOfLines={1} style={styles.routeTitle}>{post.route_title}</Text><Text style={styles.routeMeta}>{post.route_duration} · {(joinCount ?? post.join_count).toLocaleString()} 人加入</Text></View>
+            <View style={styles.routeCopy}><Text numberOfLines={1} style={styles.routeTitle}>{routeTitle}</Text><Text style={styles.routeMeta}>{routeDuration ? `${routeDuration} · ` : ''}{(joinCount ?? post.join_count).toLocaleString()} 人加入</Text></View>
             <Text style={styles.join}>{joining ? '加入中' : joined ? '已加入' : '加入路线'}</Text>
-          </Pressable>
+          </Pressable> : null}
+          <View style={styles.knowledgeCapture}>
+            <View style={styles.knowledgeCaptureCopy}>
+              <View style={styles.knowledgeCaptureTitleRow}><Bookmark color={capturedKnowledge ? colors.evergreen : colors.gold} fill={capturedKnowledge ? colors.evergreen : 'transparent'} size={18} /><Text style={styles.knowledgeCaptureTitle}>{capturedKnowledge ? '已收进知识库' : '把这条灵感收进知识库'}</Text></View>
+              <Text style={styles.knowledgeCaptureDetail}>{capturedKnowledge ? '在“资源与知识库”的收集箱里，随时把它变成行动计划。' : '只保存标题、摘要和来源；再次打开原内容时仍会校验可见性。'}</Text>
+              {captureKnowledgeError ? <Text accessibilityLiveRegion="polite" style={styles.knowledgeCaptureError}>收集失败，请检查网络后重试</Text> : null}
+            </View>
+            <Pressable accessibilityLabel="收进知识库" disabled={capturedKnowledge || capturingKnowledge} onPress={() => void captureKnowledge()} style={({ pressed }) => [styles.knowledgeCaptureButton, (capturedKnowledge || capturingKnowledge) && styles.knowledgeCaptureButtonDone, pressed && !capturedKnowledge && !capturingKnowledge && styles.pressed]}>
+              <Text style={[styles.knowledgeCaptureButtonText, (capturedKnowledge || capturingKnowledge) && styles.knowledgeCaptureButtonTextDone]}>{capturingKnowledge ? '收集中' : capturedKnowledge ? '已收进' : '收进'}</Text>
+            </Pressable>
+          </View>
           <View style={styles.interactions}>
             <Pressable accessibilityLabel="喜欢" onPress={() => onLike(post.id)} style={styles.interaction}><Heart color={liked ? colors.coral : colors.muted} fill={liked ? colors.coral : 'transparent'} size={20} /><Text style={styles.interactionText}>{post.like_count.toLocaleString()}</Text></Pressable>
             <Pressable accessibilityLabel="收藏" onPress={() => onBookmark(post.id)} style={styles.interaction}><Bookmark color={bookmarked ? colors.gold : colors.muted} fill={bookmarked ? colors.gold : 'transparent'} size={20} /><Text style={styles.interactionText}>{bookmarked ? '已收藏' : '收藏'}</Text></Pressable>
@@ -223,6 +299,66 @@ const reportReasons: Array<{ reason: ReportReason; label: string }> = [
   { reason: 'other', label: '其他问题' },
 ];
 
+function TemplateField({ label, value }: { label: string; value: string }) {
+  return <View style={styles.templateField}><Text style={styles.templateFieldLabel}>{label}</Text><Text style={styles.templateFieldValue}>{value}</Text></View>;
+}
+
+function RouteTemplateActionCard({ action }: { action: RouteTemplateAction }) {
+  const duration = action.estimated_minutes > 0 ? `约 ${action.estimated_minutes} 分钟` : '用时自定';
+  // Templates describe a reusable method, never the author's calendar.
+  const schedule = '按自己的节奏安排';
+  return <View style={styles.templateAction}>
+    <Text style={styles.templateActionTitle}>{action.title || '行动'}</Text>
+    {action.detail.trim() ? <Text style={styles.templateActionDetail}>{action.detail}</Text> : null}
+    <Text style={styles.templateActionMeta}>{duration} · {schedule}</Text>
+  </View>;
+}
+
+function ContentVideo({ item }: { item: ContentMedia }) {
+  const url = item.url.trim();
+  const [unavailable, setUnavailable] = useState(!url);
+  const player = useVideoPlayer(url ? { uri: url, useCaching: true } : null);
+
+  useEffect(() => {
+    setUnavailable(!url);
+  }, [url]);
+  useEventListener(player, 'statusChange', ({ status }) => {
+    if (status === 'error') setUnavailable(true);
+  });
+
+  const retry = () => {
+    if (!url) return;
+    setUnavailable(false);
+    void player.replaceAsync({ uri: url, useCaching: true }).catch(() => setUnavailable(true));
+  };
+
+  if (unavailable) {
+    return <View accessibilityLabel="视频暂时无法播放" style={styles.videoUnavailable}><Text style={styles.videoMediaTitle}>视频暂时无法播放</Text><Text style={styles.videoMediaMeta}>{item.duration_ms ? `时长 ${formatDuration(item.duration_ms)}，请稍后重试` : '请稍后重试'}</Text>{url ? <Pressable accessibilityLabel="重试播放视频" onPress={retry} style={({ pressed }) => [styles.videoRetry, pressed && styles.pressed]}><Text style={styles.videoRetryText}>重试播放</Text></Pressable> : null}</View>;
+  }
+
+  return <View accessibilityLabel="视频素材" style={styles.videoMedia}>
+    <VideoView
+      contentFit="contain"
+      fullscreenOptions={{ enable: true }}
+      nativeControls
+      player={player}
+      playsInline
+      style={[styles.videoPlayer, { aspectRatio: mediaAspectRatio(item.width, item.height) }]}
+    />
+    {item.duration_ms ? <Text style={styles.videoMediaMeta}>时长 {formatDuration(item.duration_ms)}</Text> : null}
+  </View>;
+}
+
+function mediaAspectRatio(width: number, height: number) {
+  return width > 0 && height > 0 ? width / height : 4 / 3;
+}
+
+function formatDuration(durationMs: number) {
+  const seconds = Math.max(1, Math.round(durationMs / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes} 分钟` : `${seconds} 秒`;
+}
+
 function formatDate(value: string) {
   const date = /^\d+$/.test(value) ? new Date(Number(value)) : new Date(value);
   return Number.isNaN(date.getTime()) ? '刚刚' : `${date.getMonth() + 1} 月 ${date.getDate()} 日`;
@@ -236,6 +372,7 @@ const styles = StyleSheet.create({
   content: { paddingBottom: 36 },
   authorRow: { paddingHorizontal: 20, paddingTop: 18, flexDirection: 'row', alignItems: 'center', gap: 10 },
   avatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.line },
+  authorProfileTarget: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 10 },
   authorCopy: { flex: 1, minWidth: 0 },
   author: { color: colors.ink, fontSize: 14, fontWeight: '700', letterSpacing: 0 },
   caption: { color: colors.faint, fontSize: 11, marginTop: 2, letterSpacing: 0 },
@@ -247,14 +384,52 @@ const styles = StyleSheet.create({
   title: { paddingHorizontal: 20, color: colors.ink, fontSize: 25, lineHeight: 34, fontWeight: '700', marginTop: 12, letterSpacing: 0 },
   summary: { paddingHorizontal: 20, color: colors.muted, fontSize: 14, lineHeight: 23, marginTop: 8, letterSpacing: 0 },
   cover: { width: '100%', aspectRatio: 4 / 3, marginTop: 18, backgroundColor: colors.line },
+  detailBody: { paddingHorizontal: 20, color: colors.ink, fontSize: 15, lineHeight: 25, marginTop: 18, letterSpacing: 0 },
+  mediaList: { marginTop: 14, gap: 10 },
+  mediaImage: { width: '100%', backgroundColor: colors.line },
+  videoMedia: { marginHorizontal: 20, overflow: 'hidden', borderRadius: 7, backgroundColor: colors.ink },
+  videoPlayer: { width: '100%', backgroundColor: colors.ink },
+  videoUnavailable: { minHeight: 96, marginHorizontal: 20, padding: 16, justifyContent: 'center', borderRadius: 7, backgroundColor: colors.ink },
+  videoMediaTitle: { color: colors.surface, fontSize: 14, fontWeight: '700', letterSpacing: 0 },
+  videoMediaMeta: { paddingHorizontal: 12, paddingVertical: 9, color: colors.line, fontSize: 12, letterSpacing: 0 },
+  videoRetry: { alignSelf: 'flex-start', marginHorizontal: 12, marginBottom: 10, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 5, backgroundColor: colors.surface },
+  videoRetryText: { color: colors.evergreen, fontSize: 12, fontWeight: '700', letterSpacing: 0 },
   tags: { paddingHorizontal: 20, flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 12 },
   tag: { color: colors.blue, fontSize: 12, fontWeight: '600', letterSpacing: 0 },
+  topics: { marginHorizontal: 20, marginTop: 15, paddingTop: 13, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 9, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
+  topicsLabel: { color: colors.faint, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
+  topic: { color: colors.evergreen, fontSize: 12, fontWeight: '600', letterSpacing: 0 },
+  template: { marginTop: 18, paddingVertical: 17, backgroundColor: colors.evergreenSoft, borderTopWidth: 1, borderBottomWidth: 1, borderColor: colors.line },
+  templateTitle: { paddingHorizontal: 20, color: colors.ink, fontSize: 17, fontWeight: '700', letterSpacing: 0 },
+  templateField: { paddingHorizontal: 20, marginTop: 14 },
+  templateFieldLabel: { color: colors.evergreen, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
+  templateFieldValue: { color: colors.ink, fontSize: 14, lineHeight: 22, marginTop: 4, letterSpacing: 0 },
+  templateSection: { marginTop: 18, paddingHorizontal: 20, gap: 10 },
+  templateSectionTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  stageCard: { padding: 13, borderRadius: 7, gap: 6, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+  stageTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  stageDetail: { color: colors.muted, fontSize: 13, lineHeight: 20, letterSpacing: 0 },
+  stageCriteria: { color: colors.evergreen, fontSize: 12, lineHeight: 19, letterSpacing: 0 },
+  templateAction: { marginTop: 5, padding: 11, borderRadius: 5, backgroundColor: colors.background },
+  templateActionTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  templateActionDetail: { color: colors.muted, fontSize: 12, lineHeight: 19, marginTop: 4, letterSpacing: 0 },
+  templateActionMeta: { color: colors.faint, fontSize: 11, marginTop: 5, letterSpacing: 0 },
   route: { minHeight: 68, marginHorizontal: 20, marginTop: 17, padding: 12, borderRadius: 7, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
   routeJoined: { backgroundColor: colors.evergreenSoft },
   routeCopy: { flex: 1, minWidth: 0 },
   routeTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
   routeMeta: { color: colors.faint, fontSize: 11, marginTop: 3, letterSpacing: 0 },
   join: { color: colors.evergreen, fontSize: 12, fontWeight: '700', letterSpacing: 0 },
+  knowledgeCapture: { minHeight: 88, marginHorizontal: 20, marginTop: 15, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 7, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+  knowledgeCaptureCopy: { flex: 1, minWidth: 0 },
+  knowledgeCaptureTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  knowledgeCaptureTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
+  knowledgeCaptureDetail: { color: colors.muted, fontSize: 11, lineHeight: 17, marginTop: 6, letterSpacing: 0 },
+  knowledgeCaptureError: { color: colors.coral, fontSize: 11, lineHeight: 17, marginTop: 5, letterSpacing: 0 },
+  knowledgeCaptureButton: { minWidth: 52, height: 34, paddingHorizontal: 10, alignItems: 'center', justifyContent: 'center', borderRadius: 5, backgroundColor: colors.evergreen },
+  knowledgeCaptureButtonDone: { backgroundColor: colors.evergreenSoft },
+  knowledgeCaptureButtonText: { color: colors.surface, fontSize: 12, fontWeight: '700', letterSpacing: 0 },
+  knowledgeCaptureButtonTextDone: { color: colors.evergreen },
   interactions: { minHeight: 58, paddingHorizontal: 20, paddingVertical: 10, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 18 },
   interaction: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   interactionText: { color: colors.muted, fontSize: 12, letterSpacing: 0 },

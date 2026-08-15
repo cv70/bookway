@@ -1,0 +1,22 @@
+[package]
+name = "bookway-recommend-main-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bookway-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+prost.workspace = true
+tonic.workspace = true
+bookway-bbs-link-api.workspace = true
+bookway-bbs-api.workspace = true
+bookway-commonlikestatus-api.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[lints]
+workspace = true

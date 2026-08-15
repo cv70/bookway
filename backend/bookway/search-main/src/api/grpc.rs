@@ -2,8 +2,7 @@
 
 use super::pb::{self, search_main_server::SearchMain};
 use crate::domain::Domain;
-use bookway_api::{SearchQueryRequest, SuggestionQueryRequest};
-use serde::Serialize;
+use bookway_bbs_search_api::pb as search_pb;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
@@ -15,32 +14,45 @@ struct GrpcServer {
 impl SearchMain for GrpcServer {
     async fn search(
         &self,
-        request: Request<pb::SearchRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let query: SearchQueryRequest = from_json(&request.into_inner().request_json)?;
-        json_response(
-            &self
-                .domain
-                .service
-                .search(query)
+        request: Request<search_pb::SearchRequest>,
+    ) -> Result<Response<search_pb::SearchResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .search(request.into_inner())
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn suggestions(
         &self,
-        request: Request<pb::SuggestionsRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = suggestion_request(request.into_inner())?;
-        json_response(
-            &self
-                .domain
-                .service
-                .suggestions(request)
+        request: Request<search_pb::SuggestionsRequest>,
+    ) -> Result<Response<search_pb::SuggestionsResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .suggestions(request.into_inner())
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
+    }
+
+    async fn validate_attributions(
+        &self,
+        request: Request<pb::ValidateSearchAttributionsRequest>,
+    ) -> Result<Response<pb::ValidateSearchAttributionsResponse>, Status> {
+        let response = self
+            .domain
+            .validate_attributions(request.into_inner())
+            .await
+            .map_err(|error| match error {
+                crate::datasource::SearchExposureError::PositionOutOfRange => {
+                    Status::invalid_argument(error.to_string())
+                }
+                crate::datasource::SearchExposureError::Database(_) => {
+                    Status::unavailable(error.to_string())
+                }
+            })?;
+        Ok(Response::new(response))
     }
 }
 
@@ -51,25 +63,14 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .await;
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(pb::search_main_server::SearchMainServer::new(GrpcServer {
-            domain: domain.clone(),
-        }))
+        .add_service(pb::search_main_server::SearchMainServer::with_interceptor(
+            GrpcServer {
+                domain: domain.clone(),
+            },
+            bookway_runtime::grpc_service_auth_interceptor,
+        ))
         .serve(domain.config.listen_addr)
         .await
-}
-
-fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, Status> {
-    serde_json::from_str(value).map_err(|error| Status::invalid_argument(error.to_string()))
-}
-
-fn suggestion_request(request: pb::SuggestionsRequest) -> Result<SuggestionQueryRequest, Status> {
-    if request.request_json.trim().is_empty() {
-        return Ok(SuggestionQueryRequest {
-            q: request.query,
-            ..Default::default()
-        });
-    }
-    from_json(&request.request_json)
 }
 
 fn internal_error(error: crate::domain::SearchMainError) -> Status {
@@ -83,16 +84,12 @@ fn internal_error(error: crate::domain::SearchMainError) -> Status {
             Status::failed_precondition(error.to_string())
         }
         crate::domain::SearchMainError::Session(error) => Status::unavailable(error.to_string()),
-        crate::domain::SearchMainError::Upstream(
-            crate::datasource::SearchClientError::Upstream { code, message },
-        ) => Status::new(code, message),
-        crate::domain::SearchMainError::Upstream(error) => Status::unavailable(error.to_string()),
+        crate::domain::SearchMainError::Upstream { code, message }
+        | crate::domain::SearchMainError::ContentUpstream { code, message } => {
+            Status::new(code, message)
+        }
+        crate::domain::SearchMainError::InvalidContentSummary => {
+            Status::unavailable(error.to_string())
+        }
     }
-}
-
-fn json_response<T: Serialize>(value: &T) -> Result<Response<pb::JsonResponse>, Status> {
-    Ok(Response::new(pb::JsonResponse {
-        response_json: serde_json::to_string(value)
-            .map_err(|error| Status::internal(error.to_string()))?,
-    }))
 }

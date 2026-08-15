@@ -24,19 +24,31 @@ impl FeatureRepository {
         };
         // Keep feature freshness bounded while deriving feedback features
         // from the canonical event log. The event types are intentionally
-        // weighted so hides reduce exploration and positive actions increase
-        // affinity without letting a single event dominate.
-        let feedback = sqlx::query_as::<_, (i64, i64, i64, i64)>(
-            "SELECT COUNT(*) FILTER (WHERE event_type IN ('like','bookmark','share','complete')), COUNT(*) FILTER (WHERE event_type = 'hide'), COUNT(*) FILTER (WHERE event_type IN ('impression','view')), COUNT(*) FROM user_events WHERE user_id=$1 AND occurred_at > now() - interval '30 days'",
+        // weighted so a repeat dismissal does not look like topic rejection,
+        // while relevance and safety feedback can meaningfully reduce exploration.
+        let feedback = sqlx::query_as::<_, (i64, f64, i64, i64)>(
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE event_type IN ('like', 'bookmark', 'save_knowledge', 'share', 'complete')),
+                COALESCE(SUM(CASE
+                    WHEN event_type = 'hide' AND negative_feedback_reason = 'already_seen' THEN 0.25
+                    WHEN event_type IN ('hide', 'report') THEN 1.0
+                    ELSE 0.0
+                END), 0)::double precision,
+                COUNT(*) FILTER (WHERE event_type IN ('impression', 'view')),
+                COUNT(*)
+            FROM user_events
+            WHERE user_id = $1 AND occurred_at > now() - interval '30 days'
+            "#,
         )
         .bind(user_id)
         .fetch_optional(pool)
         .await
         .ok()
         .flatten()
-        .unwrap_or((0, 0, 0, 0));
+        .unwrap_or((0, 0.0, 0, 0));
         let positive = feedback.0 as f64;
-        let negative = feedback.1 as f64;
+        let negative = feedback.1;
         let impressions = feedback.2 as f64;
         let total = feedback.3 as f64;
         let mut derived = HashMap::from([
@@ -89,12 +101,16 @@ impl FeatureRepository {
                     CASE event.event_type
                         WHEN 'join_route' THEN 5.0
                         WHEN 'complete' THEN 5.0
+                        WHEN 'save_knowledge' THEN 4.0
                         WHEN 'bookmark' THEN 3.0
                         WHEN 'share' THEN 2.5
                         WHEN 'like' THEN 2.0
                         WHEN 'click' THEN 0.6
                         WHEN 'view' THEN 0.4
-                        WHEN 'hide' THEN -5.0
+                        WHEN 'hide' THEN CASE
+                            WHEN event.negative_feedback_reason IN ('already_seen', 'low_quality') THEN 0.0
+                            ELSE -5.0
+                        END
                         WHEN 'report' THEN -8.0
                         ELSE 0.0
                     END
@@ -157,27 +173,49 @@ impl FeatureRepository {
                     CASE event.event_type
                         WHEN 'join_route' THEN 5.0
                         WHEN 'complete' THEN 5.0
+                        WHEN 'save_knowledge' THEN 4.0
                         WHEN 'bookmark' THEN 3.0
                         WHEN 'share' THEN 2.5
                         WHEN 'like' THEN 2.0
                         WHEN 'click' THEN 0.6
                         WHEN 'view' THEN 0.4
-                        WHEN 'hide' THEN -5.0
+                        WHEN 'hide' THEN CASE
+                            WHEN event.negative_feedback_reason IN ('already_seen', 'low_quality') THEN 0.0
+                            ELSE -5.0
+                        END
                         WHEN 'report' THEN -8.0
                         ELSE 0.0
-                    END AS weight
+                    END AS domain_weight,
+                    CASE event.event_type
+                        WHEN 'join_route' THEN 5.0
+                        WHEN 'complete' THEN 5.0
+                        WHEN 'save_knowledge' THEN 4.0
+                        WHEN 'bookmark' THEN 3.0
+                        WHEN 'share' THEN 2.5
+                        WHEN 'like' THEN 2.0
+                        WHEN 'click' THEN 0.6
+                        WHEN 'view' THEN 0.4
+                        WHEN 'hide' THEN CASE
+                            WHEN event.negative_feedback_reason = 'already_seen' THEN 0.0
+                            WHEN event.negative_feedback_reason = 'not_relevant' THEN 0.0
+                            WHEN event.negative_feedback_reason = 'low_quality' THEN -4.0
+                            ELSE -5.0
+                        END
+                        WHEN 'report' THEN -8.0
+                        ELSE 0.0
+                    END AS author_weight
                 FROM user_events AS event
                 INNER JOIN content_items AS content ON content.id = event.content_id
                 WHERE event.user_id = $1
                   AND event.occurred_at > now() - interval '90 days'
             ),
             domain_scores AS (
-                SELECT domain, SUM(weight)::double precision AS score
+                SELECT domain, SUM(domain_weight)::double precision AS score
                 FROM history
                 GROUP BY domain
             ),
             author_scores AS (
-                SELECT author_id, SUM(weight)::double precision AS score
+                SELECT author_id, SUM(author_weight)::double precision AS score
                 FROM history
                 GROUP BY author_id
             ),
@@ -193,10 +231,14 @@ impl FeatureRepository {
                         WHERE event_type = 'impression'
                           AND occurred_at > now() - interval '30 days'
                     )::double precision AS impression_count,
-                    COUNT(*) FILTER (
-                        WHERE event_type IN ('hide', 'report')
-                          AND occurred_at > now() - interval '90 days'
-                    )::double precision AS negative_count
+                    SUM(CASE
+                        WHEN event_type = 'hide'
+                             AND negative_feedback_reason = 'already_seen'
+                             AND occurred_at > now() - interval '90 days' THEN 0.25
+                        WHEN event_type IN ('hide', 'report')
+                             AND occurred_at > now() - interval '90 days' THEN 1.0
+                        ELSE 0.0
+                    END)::double precision AS negative_weight
                 FROM user_events
                 WHERE user_id = $1 AND content_id = ANY($2)
                 GROUP BY content_id
@@ -206,7 +248,7 @@ impl FeatureRepository {
                 LEAST(GREATEST(COALESCE(domain.score, 0.0), 0.0) / normalizers.domain_max, 1.0)::double precision,
                 LEAST(GREATEST(COALESCE(author.score, 0.0), 0.0) / normalizers.author_max, 1.0)::double precision,
                 LEAST(COALESCE(feedback.impression_count, 0.0) / 4.0, 1.0)::double precision,
-                LEAST(COALESCE(feedback.negative_count, 0.0), 1.0)::double precision
+                LEAST(COALESCE(feedback.negative_weight, 0.0), 1.0)::double precision
             FROM content_items AS candidate
             CROSS JOIN normalizers
             LEFT JOIN domain_scores AS domain ON domain.domain = candidate.domain

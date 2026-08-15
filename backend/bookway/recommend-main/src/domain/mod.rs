@@ -4,7 +4,7 @@ mod domain;
 pub(crate) mod pipeline;
 
 use self::pipeline::FeedPipeline;
-use super::api::{FeedDto, FeedQueryRequest};
+use super::api::pb;
 
 #[derive(Clone)]
 pub(crate) struct FeedService {
@@ -18,7 +18,7 @@ impl FeedService {
         Self { pipeline }
     }
 
-    pub(crate) async fn recommend(&self, request: FeedQueryRequest) -> FeedDto {
+    pub(crate) async fn recommend(&self, request: pb::FeedRequest) -> pb::FeedResponse {
         self.pipeline.execute(request).await
     }
 }

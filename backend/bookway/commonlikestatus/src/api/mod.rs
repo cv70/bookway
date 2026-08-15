@@ -1,10 +1,9 @@
 mod grpc;
 mod http;
-
-#[path = "pb/bookway.commonlikestatus.rs"]
-pub mod pb;
+pub use bookway_commonlikestatus_api::pb;
 
 pub(crate) use grpc::serve as serve_grpc;
 pub(crate) use http::serve as serve_http;
 
-pub(crate) use bookway_api::{ReactionContextDto, ReactionDto, ReactionTypeDto};
+#[allow(unused_imports)]
+pub(crate) use bookway_commonlikestatus_api::*;

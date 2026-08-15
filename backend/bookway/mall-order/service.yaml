@@ -1,0 +1,10 @@
+name: bookway-mall-order
+owner: commercial-commerce
+kind: grpc-service
+port: 8103
+healthcheck: grpc
+dependencies:
+  - bookway-mall
+  - bookway-mall-inventory
+contracts:
+  - src/api/pb/server.proto

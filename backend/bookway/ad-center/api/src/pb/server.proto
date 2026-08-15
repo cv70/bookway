@@ -1,0 +1,44 @@
+syntax = "proto3";
+package bookway.ad.center;
+
+enum CampaignStatus { CAMPAIGN_STATUS_DRAFT = 0; CAMPAIGN_STATUS_ACTIVE = 1; CAMPAIGN_STATUS_PAUSED = 2; CAMPAIGN_STATUS_ENDED = 3; }
+enum PricingModel { PRICING_MODEL_CPM = 0; PRICING_MODEL_CPC = 1; }
+enum EventType { EVENT_TYPE_IMPRESSION = 0; EVENT_TYPE_CLICK = 1; }
+message StringList { repeated string values = 1; }
+message AdCampaign {
+  string id = 1; string advertiser_id = 2; string name = 3; string placement = 4;
+  string title = 5; string body = 6; string image_url = 7; string landing_url = 8;
+  repeated string target_domains = 9; CampaignStatus status = 10; PricingModel pricing_model = 11;
+  int64 bid_micros = 12; int64 daily_budget_micros = 13; int64 spent_today_micros = 14;
+  uint32 frequency_cap = 15; uint64 impressions = 16; uint64 clicks = 17;
+  optional string starts_at = 18; optional string ends_at = 19; string created_at = 20; string updated_at = 21;
+}
+message CreateCampaignRequest {
+  string advertiser_id = 1; string name = 2; string placement = 3; string title = 4;
+  string body = 5; string image_url = 6; string landing_url = 7; repeated string target_domains = 8;
+  PricingModel pricing_model = 9; int64 bid_micros = 10; int64 daily_budget_micros = 11;
+  uint32 frequency_cap = 12; optional string starts_at = 13; optional string ends_at = 14;
+}
+message UpdateCampaignRequest {
+  string campaign_id = 1; optional CampaignStatus status = 2; optional string name = 3;
+  optional string title = 4; optional string body = 5; optional string image_url = 6;
+  optional string landing_url = 7; optional StringList target_domains = 8;
+  optional int64 bid_micros = 9; optional int64 daily_budget_micros = 10;
+  optional uint32 frequency_cap = 11; optional string starts_at = 12; optional string ends_at = 13;
+}
+message CampaignIdRequest { string campaign_id = 1; }
+message EligibleRequest { string user_id = 1; string placement = 2; string domain = 3; uint32 limit = 4; }
+message CampaignList { repeated AdCampaign items = 1; }
+message RecordEventRequest { string user_id = 1; string event_id = 2; string request_id = 3; string campaign_id = 4; EventType event_type = 5; }
+message RegisterDecisionRequest { string user_id = 1; string request_id = 2; string placement = 3; repeated string campaign_ids = 4; }
+message EventReceipt { string event_id = 1; bool accepted = 2; bool duplicate = 3; }
+message EmptyResponse {}
+
+service AdCenter {
+  rpc CreateCampaign(CreateCampaignRequest) returns (AdCampaign);
+  rpc UpdateCampaign(UpdateCampaignRequest) returns (AdCampaign);
+  rpc Campaign(CampaignIdRequest) returns (AdCampaign);
+  rpc Eligible(EligibleRequest) returns (CampaignList);
+  rpc RegisterDecisions(RegisterDecisionRequest) returns (EmptyResponse);
+  rpc RecordEvent(RecordEventRequest) returns (EventReceipt);
+}

@@ -7,6 +7,7 @@ pub(crate) struct Config {
     pub(crate) listen_addr: SocketAddr,
     pub(crate) grpc_addr: SocketAddr,
     pub(crate) content_audit_grpc_url: Option<String>,
+    pub(crate) media_grpc_url: String,
 }
 
 impl Config {
@@ -17,6 +18,8 @@ impl Config {
             content_audit_grpc_url: std::env::var("CONTENT_AUDIT_GRPC_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
+            media_grpc_url: std::env::var("MEDIA_GRPC_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:18091".to_string()),
         })
     }
 }

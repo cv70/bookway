@@ -1,22 +1,24 @@
 use std::sync::Arc;
 
-use bookway_recommend_rank::api::pb as rank;
-use bookway_recommend_recall::api::pb as recall;
+use bookway_bbs_api::pb::bbs_client::BbsClient;
+use bookway_commonlikestatus_api::pb::common_like_status_client::CommonLikeStatusClient;
+use bookway_recommend_rank_api::pb as rank;
+use bookway_recommend_recall_api::pb as recall;
 
 use super::FeedService;
 use crate::{
+    api::pb,
     conf::Config,
     datasource::{
-        GrpcBbsContextDataSource, GrpcLikeStatusDataSource, MemoryExposureDataSource,
-        PostgresExposureDataSource, SharedBbsContextDataSource, SharedExposureDataSource,
-        SharedLikeStatusDataSource,
+        ExposureAttribution, ExposureError, MemoryExposureDataSource, PostgresExposureDataSource,
+        SharedExposureDataSource,
     },
     domain::pipeline::{
         AuthorDiversityScorer, DefaultQueryHydrator, DiversitySelector, ExposureSideEffect,
         FeedPipeline, FeedPipelineComponents, FollowingOnlyFilter, IntentScorer, QualityScorer,
         ReactionContextHydrator, RecommendRanker, RecommendRecallSource, RouteContextHydrator,
-        SafetyFilter, SeenFilter, ServedHistoryFilter, ServedHistoryHydrator,
-        SocialContextHydrator, SocialProofHydrator,
+        SafetyFilter, SeenFilter, ServedHistoryHydrator, SocialContextHydrator,
+        SocialProofHydrator,
     },
 };
 
@@ -24,20 +26,17 @@ use crate::{
 pub struct Domain {
     pub(crate) config: Config,
     pub(crate) feed: FeedService,
+    exposures: SharedExposureDataSource,
 }
 
 impl Domain {
     pub async fn new(config: Config) -> Result<Self, bookway_data::DataError> {
-        let bbs: SharedBbsContextDataSource = Arc::new(
-            GrpcBbsContextDataSource::connect(config.bbs_url.clone())
-                .await
-                .map_err(|error| setting_error("BBS_GRPC_URL", error))?,
-        );
-        let like_status: SharedLikeStatusDataSource = Arc::new(
-            GrpcLikeStatusDataSource::connect(config.like_status_url.clone())
-                .await
-                .map_err(|error| setting_error("LIKE_STATUS_GRPC_URL", error))?,
-        );
+        let bbs = BbsClient::connect(config.bbs_url.clone())
+            .await
+            .map_err(|error| setting_error("BBS_GRPC_URL", error))?;
+        let like_status = CommonLikeStatusClient::connect(config.like_status_url.clone())
+            .await
+            .map_err(|error| setting_error("LIKE_STATUS_GRPC_URL", error))?;
         let exposures: SharedExposureDataSource = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => Arc::new(MemoryExposureDataSource::default()),
             bookway_data::StorageMode::Postgres => Arc::new(PostgresExposureDataSource::new(
@@ -59,7 +58,7 @@ impl Domain {
             .map_err(|error| setting_error("RECOMMEND_RECALL_GRPC_URL", error))?,
         );
         let feature_client =
-            bookway_feature_main::api::pb::feature_main_client::FeatureMainClient::connect(
+            bookway_feature_main_api::pb::feature_main_client::FeatureMainClient::connect(
                 config.feature_main_url.clone(),
             )
             .await
@@ -69,17 +68,17 @@ impl Domain {
             sources: vec![Arc::new(RecommendRecallSource::new(
                 recall_client.clone(),
                 feature_client.clone(),
+                bbs.clone(),
             ))],
             hydrators: vec![
                 Arc::new(ServedHistoryHydrator::new(exposures.clone())),
                 Arc::new(SocialContextHydrator::new(bbs.clone())),
-                Arc::new(RouteContextHydrator::new(bbs.clone())),
-                Arc::new(ReactionContextHydrator::new(like_status.clone())),
+                Arc::new(RouteContextHydrator::new(bbs)),
+                Arc::new(ReactionContextHydrator::new(like_status)),
                 Arc::new(SocialProofHydrator),
             ],
             filters: vec![
                 Arc::new(SeenFilter),
-                Arc::new(ServedHistoryFilter),
                 Arc::new(SafetyFilter),
                 Arc::new(FollowingOnlyFilter),
             ],
@@ -99,14 +98,33 @@ impl Domain {
         Ok(Self {
             config,
             feed: super::FeedService::new(pipeline),
+            exposures,
         })
     }
 
-    pub(crate) async fn recommend(
-        &self,
-        request: crate::api::FeedQueryRequest,
-    ) -> crate::api::FeedDto {
+    pub(crate) async fn recommend(&self, request: pb::FeedRequest) -> pb::FeedResponse {
         self.feed.recommend(request).await
+    }
+
+    pub(crate) async fn validate_attributions(
+        &self,
+        request: pb::ValidateAttributionsRequest,
+    ) -> Result<pb::ValidateAttributionsResponse, ExposureError> {
+        let attributions = request
+            .attributions
+            .into_iter()
+            .map(|attribution| ExposureAttribution {
+                request_id: attribution.request_id,
+                session_id: attribution.session_id,
+                content_id: attribution.content_id,
+                position: attribution.position,
+            })
+            .collect::<Vec<_>>();
+        let valid = self
+            .exposures
+            .validate_attributions(&request.user_id, &attributions)
+            .await?;
+        Ok(pb::ValidateAttributionsResponse { valid })
     }
 }
 

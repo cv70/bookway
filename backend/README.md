@@ -9,34 +9,59 @@
 | 服务 | 默认端口 | 所有权 | 主要职责 |
 | --- | ---: | --- | --- |
 | `gateway` | `8080` | platform | App 唯一入口、聚合和错误转换 |
+| `account` | `8094` | account | 用户公开资料和资料更新 |
 | `growth` | `8081` | growth | 私人路线、行动留痕、回望、资源知识库与陪伴简报 |
 | `bbs` | `8082` | bbs | 关注、拉黑、静音、公共路线参与和社交图谱 |
+| `bbs-creator` | `8105` | community-creator | 创作者定位、专长、精选内容和公开经营档案 |
+| `bbs-message` | `8106` | community-message | 一对一私信、会话、已读、举报、发送限制与通知 Outbox |
 | `recommend-main` | `8083` | recommendation | 多路召回、补全、过滤、排序和曝光 |
 | `bbs-link` | `8084` | bbs-content | 内容事实、版本和发布状态 |
 | `bbs-search` | `8085` | bbs-search | 内容、路线、用户、主题检索与联想 |
-| `comment` | `8086` | comment | 评论正文、父子关系和审核状态 |
+| `comment` | `8086` | comment | 评论正文、父子关系、审核、举报与申诉状态 |
 | `commonlikestatus` | `8087` | interaction | 点赞、收藏、计数和批量互动状态 |
 | `bbs-feed` | `8088` | bbs-feed | Feed 产品策略、请求规范化和交付 |
 | `user-event` | `8089` | data-platform | 曝光、点击等用户行为批量接收 |
 | `search-main` | `8090` | search | 查询规范化、搜索编排和降级边界 |
 | `media` | `8091` | platform | 对象 key、上传会话、媒体元数据和 CDN |
 | `content-audit` | `8092` | trust-safety | 文本审核、风险决策和人工复审入口 |
+| `feedback` | `8104` | product-experience | 用户产品反馈、状态跟踪和受限人工处理队列 |
 | `feature-main` | `8093` | recommendation | 实时/离线特征统一读取与缓存 |
 | `recommend-recall` | `8095` | recommendation | 候选召回、去重和已看过滤 |
 | `recommend-rank` | `8096` | recommendation | 模型排序、版本、实验桶与启发式降级 |
+| `ad-center` | `8097` | commercial-advertising | 广告活动、预算、投放凭证与事件账本 |
+| `ad-recall` | `8098` | commercial-advertising | 活动召回、定向与频次约束 |
+| `ad-rank` | `8099` | commercial-advertising | 广告候选的版本化排序 |
+| `ad-main` | `8100` | commercial-advertising | 广告决策编排与事件入口 |
+| `mall` | `8101` | commercial-commerce | 商品、SKU、售价与售卖状态 |
+| `mall-inventory` | `8102` | commercial-commerce | 可用库存与可恢复的订单预占 |
+| `mall-order` | `8103` | commercial-commerce | 订单快照、支付状态与库存 Saga |
 | `route-participation-reconciler` | - | growth | 将版本化路线参与意图最终收敛到 BBS |
 | `reminder-dispatcher` | - | growth | 按偏好与静默时段生成去重的提醒 Outbox 命令 |
+| `push-delivery-dispatcher` | - | growth | 租约化发送行动提醒、退避重试并撤销失效设备 |
+| `community-notification-dispatcher` | - | gateway | 租约化投递点赞、评论和关注的社区收件箱通知 |
+| `direct-message-notification-dispatcher` | - | community-message | 租约化投递无正文私信导航通知到收件箱 |
 | `appeal-notification-dispatcher` | - | trust-safety | 可靠恢复获准内容并投递终态结果到作者私有收件箱 |
 | `content-report-restriction-dispatcher` | - | trust-safety | 可靠执行接受举报后的内容下架 |
+| `mall-order-expirer` | - | commercial-commerce | 批量过期未支付订单并补偿释放预占库存 |
+| `mall-inventory-sweeper` | - | commercial-commerce | 独立回收超时库存预占 |
 
 ```text
 mobile ──HTTPS──> gateway ─┬──> growth
+                           ├──> account
                            ├──> bbs-link
                            ├──> bbs
+                           ├──> bbs-creator
+                           ├──> bbs-message ──────> bbs
+                           │         └────────────> Growth inbox
                            ├──> comment
                            ├──> commonlikestatus
                            ├──> user-event
                            ├──> media ────────────> S3/MinIO + CDN
+                           ├──> ad-main ──────────> ad-recall ──> ad-center
+                           │                            └──────> ad-rank
+                           ├──> mall
+                           └──> mall-order ───────> mall-inventory
+                           ├──> feedback
                            ├──> search-main ───────> bbs-search ──> bbs-link
                            └──> bbs-feed ─────────> recommend-main ─┬──> bbs-link
                                                                   ├──> bbs
@@ -44,7 +69,7 @@ mobile ──HTTPS──> gateway ─┬──> growth
                                                                   └──> feature-main ──> recommend-rank
 ```
 
-数据所有权严格分离：`bbs-link` 持有内容事实，`bbs` 持有关系，`comment` 持有评论，`commonlikestatus` 持有互动状态，`user-event` 持有行为接收幂等状态，`recommend-main` 只负责在线推荐决策，`bbs-feed` 负责 Feed 交付，`search-main` 负责搜索产品编排，`bbs-search` 只负责检索和索引访问。
+数据所有权严格分离：`account` 持有公开资料，`bbs-link` 持有内容事实，`bbs` 持有关系，`bbs-creator` 持有创作者经营档案，`bbs-message` 持有会话、消息、私信意愿、举报、发送限制与本地通知 Outbox，`comment` 持有评论、评论举报和评论申诉，`commonlikestatus` 持有互动状态，`user-event` 持有行为接收幂等状态，`recommend-main` 只负责在线推荐决策，`bbs-feed` 负责 Feed 交付，`search-main` 负责搜索产品编排，`bbs-search` 只负责检索和索引访问，`feedback` 持有用户提交的产品反馈与处理状态。广告活动、预算和可验证投放凭证由 `ad-center` 持有，`ad-main` 只编排投放；商品目录、库存和订单分别由 `mall`、`mall-inventory`、`mall-order` 持有。Gateway 只持有跨服务互动中已解析接收者的社区通知投递工作项，不复制点赞、评论或关注事实。`bbs-message` 在写入前直接调用 BBS 生成 Client 检查双方的 block 边，不复制关系数据。`mall-order-expirer` 和 `mall-inventory-sweeper` 只通过受服务令牌保护的内部 gRPC 执行过期补偿，不持有业务事实。JWT 与其他认证凭证不属于 `account` 的数据所有权。
 
 ## 目录约定
 
@@ -52,8 +77,11 @@ mobile ──HTTPS──> gateway ─┬──> growth
 backend/
 ├── bookway/
 │   ├── gateway/
+│   ├── account/
 │   ├── growth/
 │   ├── bbs/
+│   ├── bbs-creator/
+│   ├── bbs-message/
 │   ├── recommend-main/
 │   ├── bbs-link/
 │   ├── bbs-search/
@@ -64,6 +92,7 @@ backend/
 │   ├── search-main/
 │   ├── media/
 │   ├── content-audit/
+│   ├── feedback/
 │   ├── feature-main/
 │   ├── recommend-recall/
 │   └── recommend-rank/
@@ -82,6 +111,8 @@ backend/
 │   ├── outbox-relay/
 │   ├── appeal-notification-dispatcher/
 │   ├── content-report-restriction-dispatcher/
+│   ├── mall-order-expirer/
+│   ├── mall-inventory-sweeper/
 │   ├── reminder-dispatcher/
 │   ├── route-participation-reconciler/
 │   └── search-indexer/
@@ -111,23 +142,23 @@ Query Hydrator
 -> 质量/新鲜度内容召回（并行）
 -> BBS 关系补全
 -> commonlikestatus 互动状态补全
--> 去重、已看、安全过滤
+-> 去重、客户端已看、安全过滤
 -> 质量、意图、作者多样性打分
--> 多样性 Selector
--> 异步曝光副作用
+-> 多样性 Selector（优先未曝光、受控回补）
+-> 持久化曝光
 ```
 
-候选源失败或补全失败时保留可用结果，并将 `FeedMeta.degraded` 置为 `true`。响应包含 `request_id`、`pipeline_id`、游标、阶段统计、真实 `author_id`、模型版本和实验桶。在线链路已调用 `feature-main` 和 `recommend-rank`；用户 `hide` 负反馈会持久化并在下一次推荐中硬过滤，多样性 Selector 对作者、领域和标签使用局部窗口约束，并在窄候选池中逐级放宽以避免饿死。`surface=following` 在社交上下文补全后只保留已关注作者，且已看历史按 surface 隔离。当前模型实现是可解释、可版本化的启发式 Ranker，远程排序不可用时保留流水线基础分并显式标记降级。训练平台、外部推理引擎和可回放评测仍属于后续容量阶段。
+候选源失败或补全失败时保留可用结果，并将 `FeedMeta.degraded` 置为 `true`。响应包含 `request_id`、`pipeline_id`、游标、阶段统计、真实 `author_id`、模型版本和实验桶。曝光在返回 Feed 前持久化，因此 `user-event` 能按可信用户、会话、请求、内容和零基位置批量核验归因；校验不可用时保留用户反馈但清除归因字段，伪造归因被拒绝。在线链路已调用 `feature-main` 和 `recommend-rank`；用户 `hide` 负反馈会持久化并在下一次推荐中硬过滤，多样性 Selector 对作者、领域和标签使用局部窗口约束，并在窄候选池中逐级放宽以避免饿死。服务端近期曝光只作为“优先未曝光”的软约束，候选不足时才受控回补并在原因中说明，避免 Feed 中断；客户端 `seen` 仍按 surface 隔离且硬过滤。`surface=following` 从社交上下文约束召回为已关注作者，并让 cursor 绑定规范化关注集合；关系变动时从当前集合的第一页重启，绝不复用旧集合的 offset。当前模型实现是可解释、可版本化的启发式 Ranker，远程排序不可用时保留流水线基础分并显式标记降级。`bookway-recommendation-evaluator` 能对固定时间窗内的可信曝光归因生成可回放的观察性评测快照；训练平台、外部推理引擎、反事实实验和自动模型发布仍属于后续容量阶段。
 
 ## Feed 与推荐链路
 
-Gateway 只请求 `bbs-feed`。`bbs-feed` 负责客户端 surface、分页上限和产品降级边界，再调用 `recommend-main` 完成候选流水线。关注流是显式的 `following` surface，由 `bbs` 社交图补全后过滤候选；Gateway 另提供 `/v1/social/context` 恢复客户端关系状态。路线参与通过 `/v1/route-participations` 恢复，并由 `/v1/routes/{route_id}/participation` 幂等写入；客户端加入使用 `/v1/routes/{route_id}/join`。Growth 在创建 Journey 的同一事务中写入版本化参与意图，Gateway 同步调用 BBS 作为低延迟快路径，`route-participation-reconciler` 使用数据库租约、并发批处理和无限退避补偿失败写入。BBS 持久化最后应用版本并原子拒绝旧命令，因此加入、退出和重新加入在超时、乱序及 Worker 崩溃后仍以最新用户意图为准。热门路线写入只串行同一用户的同一路线命令，活跃人数由 64 个事务计数分片维护；推荐与搜索以批量 BBS 上下文聚合分片，不逐候选发 RPC，也不扫描热门路线的完整参与事实。
+Gateway 只请求 `bbs-feed`。`bbs-feed` 负责客户端 surface、分页上限和产品降级边界，再调用 `recommend-main` 完成候选流水线。关注流是显式的 `following` surface，由 `bbs` 社交图约束候选召回并由 BBS Link 按最新顺序返回；Gateway 另提供 `/v1/social/context` 恢复客户端关系状态。路线参与通过 `/v1/route-participations` 恢复，并由 `/v1/routes/{route_id}/participation` 幂等写入；客户端加入使用 `/v1/routes/{route_id}/join`。Growth 在创建 Journey 的同一事务中写入版本化参与意图，Gateway 同步调用 BBS 作为低延迟快路径，`route-participation-reconciler` 使用数据库租约、并发批处理和无限退避补偿失败写入。BBS 持久化最后应用版本并原子拒绝旧命令，因此加入、退出和重新加入在超时、乱序及 Worker 崩溃后仍以最新用户意图为准。热门路线写入只串行同一用户的同一路线命令，活跃人数由 64 个事务计数分片维护；推荐与搜索以批量 BBS 上下文聚合分片，不逐候选发 RPC，也不扫描热门路线的完整参与事实。
 
 ## 成长陪伴链路
 
 Gateway 的 `GET /v1/companion?date=YYYY-MM-DD&timezone=Asia/Shanghai` 代理 Growth 的只读陪伴简报；`GET /v1/today` 接受相同的本地日期上下文。它只查看用户自己的进行中路线、今日行动和回望快照，按状态返回 `start_small`、`keep_going`、`celebrate` 或 `plan_next`，并提供选择该行动的原因与反思问题。建议需要用户主动打开行动后才会进入既有操作流程；请求本身不会完成、跳过、改期或修改预计时长。
 
-行动契约包含展示用 `scheduled_label`、带显式 UTC 偏移量的 RFC 3339 `scheduled_for` 和 IANA `scheduled_timezone`。PostgreSQL 使用本地日期索引今日清单，并独立存储精确瞬间与时区；陪伴策略因此可为明确安排但已过期的行动建议恢复入口。旧行动不会被补造成伪精确时间，也不会被误判为逾期；提醒窗口、静默时段、去重投递与用户通知收件箱已实现，自动改期和实际推送 provider 消费仍需后续实现。
+行动契约包含展示用 `scheduled_label`、带显式 UTC 偏移量的 RFC 3339 `scheduled_for` 和 IANA `scheduled_timezone`。PostgreSQL 使用本地日期索引今日清单，并独立存储精确瞬间与时区；陪伴策略因此可为明确安排但已过期的行动建议恢复入口。旧行动不会被补造成伪精确时间，也不会被误判为逾期；提醒窗口、静默时段、去重投递、用户通知收件箱与 Provider 投递 Worker 已形成闭环。用户改期、完成、跳过、禁用提醒或注销设备都会取消未发送投递；Worker 发送前再次验证行动版本与设备状态，Provider 以稳定 delivery ID 去重。
 
 ## 搜索链路
 
@@ -137,7 +168,7 @@ Gateway 只请求 `search-main`，由它规范化参数和编排底层 `bbs-sear
 内部搜索由 `search-main` 的 gRPC `search` 和 `suggestions` 方法提供。
 ```
 
-设置 `OPENSEARCH_URL` 后，`bbs-search` 使用 OpenSearch 多字段召回并在索引不可用时降级到 `bbs-link`；`bookway-search-indexer` 创建版本化 CJK 索引并同步公开内容。`search-main` 仍承担 `query rewrite -> recall -> pre-rank -> rank -> rerank` 的产品编排边界。
+设置 `OPENSEARCH_URL` 后，`bbs-search` 通过 `OPENSEARCH_READ_ALIAS` 使用 OpenSearch 多字段召回并在索引不可用时降级到 `bbs-link`；`bookway-search-indexer` 以内容版本写入 `OPENSEARCH_WRITE_INDEX` 指定的物理 CJK 索引，拒绝把别名当成写目标，并能在重建期间双写 `OPENSEARCH_SHADOW_WRITE_INDEX`。`bookway-search-index-rebuild` 使用可恢复的 keyset Bulk 重建补齐历史内容，`bookway-search-index-reconcile` 只读比对物理索引的逐内容可见性/版本和总数，完整扫描的 `healthy=true` 才可作为发布前完整性证据；`bookway-search-index-alias-switch` 随后原子发布读别名，保留旧索引以便回滚；`bookway-search-index-outbox-recovery` 默认输出并审计死信状态，只有具名、注明原因的恢复运行才会重排死信。已有 PIT 继续使用旧快照，新 PIT 使用新别名。`search-main` 承担 `query rewrite -> recall -> pre-rank -> rank -> rerank` 的产品编排边界：改写词典使用原子活动版本指针热切换，身份/话题查询不扩展，每个曝光保留改写版本而不保存查询明文；`bookway-search-evaluator` 以可信归因回放版本级观察性质量，不能自动推广词典。
 
 搜索游标采用 `v2 + 查询/类型指纹 + 短期会话 ID`，不同查询或结果类型之间不可复用，且客户端游标大小受限。会话在服务端保存未消费的混合结果、去重键和源游标；OpenSearch 主路径以 5 分钟 PIT 和 `_score` / 内容 ID 的 `search_after` 续页，不再截断为固定候选集。PIT 或会话过期时返回可识别的前置条件错误，客户端应从第一页重新搜索；索引首次请求不可用时仍会降级到 `bbs-link`。联想词按近 90 天真实查询统计、命中内容和冷启动词合并去重。
 
@@ -145,12 +176,12 @@ Gateway 只请求 `search-main`，由它规范化参数和编排底层 `bbs-sear
 
 - `bbs-link`：草稿、审核中、已发布、受限、删除状态；作者归属、版本号和 `Idempotency-Key` 请求指纹。
 - `bbs`：关注、拉黑、静音和公共路线参与；拉黑清理关注并阻止冲突关注，路线参与支持退出、重入、私人 Journey 关联和按路线批量计数。
-- `comment`：空评论/超长评论/跨帖父评论校验，支持回复、写入幂等和 `(created_at, id)` 稳定游标分页；新评论先待审，只有 `content-audit` 通过后才会进入公开列表，审核故障 fail-closed。
+- `comment`：空评论/超长评论/跨帖父评论校验，支持回复、写入幂等和 `(created_at, id)` 稳定游标分页；新评论先待审，只有 `content-audit` 通过后才会进入公开列表，审核故障 fail-closed。举报仅针对当前可见的公开评论，作者可对受限评论申诉；`restrict_comment` 与 `restore_comment` 在审核事务内直接改变评论状态。
 - `commonlikestatus`：点赞、收藏与 `hide` 负反馈的幂等集合、计数和批量互动上下文；隐藏内容供推荐在线硬过滤。
 - Gateway：互动写入前调用内容服务校验内容存在且公开；审核员 JWT 角色受限地开放举报队列和处置入口。
 - `content-audit`：接收按用户和幂等键去重的内容举报与作者申诉；内部人工队列支持稳定游标、认领、结案说明、不可覆盖的终态决定，以及持久化的 `restrict_content` / `restore_content` 动作；终态决定与对应的下架、恢复或通知任务同事务提交。
-- `growth`：持有私人资源知识库、阅读进度、书签、路线关联、检索条件、只读陪伴简报和提醒偏好/设备注册；创建使用用户级 `Idempotency-Key`，所有关联路线均校验归属。
-- `user-event`：最多 100 条批量事件、UUID 与时间校验、`event_id` 幂等；事件和 Outbox 同事务写入，`bookway-outbox-relay` 负责 Kafka 重试、指数退避与死信。
+- `growth`：持有私人资源知识库、阅读进度、书签、路线关联、检索条件、只读陪伴简报和提醒偏好/设备注册；一条资源可原子转换为带首项行动的私人 Journey，资源关联本身是转换幂等边界；创建使用用户级 `Idempotency-Key`，所有关联路线均校验归属。
+- `user-event`：最多 100 条批量事件、UUID 与时间校验、`event_id` 幂等；带推荐或搜索请求的事件按来源分别经 Recommend Main / Search Main 批量核验，无法核验的临时降级为无归因反馈；事件和 Outbox 同事务写入，`bookway-outbox-relay` 负责 Kafka 重试、指数退避与死信。
 
 配置 `CONTENT_AUDIT_GRPC_URL` 后，发布会先进入 `content-audit`，再转换为公开、复审或受限状态；每个内容版本保留风险分数、原因和 provider。举报和申诉的人工决定在 PostgreSQL 中保存审核员、说明与动作；通过已验证 JWT 角色的 `resolved + restrict_content` / `resolved + restore_content` 决定会使用内部服务令牌幂等地改变公开状态。终态举报与 `content_report_restriction_jobs` 在同一审核事务中提交，`bookway-content-report-restriction-dispatcher` 以租约、退避与服务令牌可靠重放下架，直到 `bbs-link.get_public` 不再可读。终态申诉与 `content_appeal_notification_jobs` 也在一个审核事务中提交，`bookway-appeal-notification-dispatcher` 可靠重放获准恢复，再以幂等来源键投递 Growth 收件箱；恢复公开只会在 `bbs-link.get_public` 已确认公开后通知作者。申诉 SLA、双人复核和多媒体审核仍需继续扩展。
 
@@ -189,6 +220,13 @@ Gateway 只请求 `search-main`，由它规范化参数和编排底层 `bbs-sear
 | `0025_content_appeal_owner_lookup.sql` | trust-safety | 作者私有申诉历史的游标查询索引 |
 | `0026_content_appeal_notification_jobs.sql` | trust-safety | 终态申诉的可靠收件箱投递任务 |
 | `0027_content_report_restriction_jobs.sql` | trust-safety | 接受举报后的可靠内容下架任务 |
+| `0029_comment_reply_depth.sql` | comment | 评论回复层级限制 |
+| `0030_account.sql` | account | 账户公开资料 |
+| `0031_commercialization.sql` | advertising / commerce | 广告活动/预算/事件、商品/SKU、库存预占和订单状态 |
+| `0054_bbs_creator_message.sql` | community-creator / community-message | 创作者经营档案、一对一会话、私信、未读状态与私信意愿 |
+| `0055_bbs_message_moderation.sql` | community-message | 私信举报审核队列、举报幂等键与发送者限制 |
+| `0056_bbs_message_notification_delivery.sql` | community-message | 私信与通知任务的同事务 Outbox、租约投递索引 |
+| `0057_comment_report_appeal.sql` | comment | 评论举报/申诉队列、幂等键和稳定审核游标索引 |
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -201,10 +239,16 @@ DATABASE_URL=postgres://bookway:bookway-local-only@127.0.0.1:5432/bookway \
 cargo run -p bookway-db-migrate
 cargo run -p bookway-outbox-relay
 cargo run -p bookway-reminder-dispatcher
+cargo run -p bookway-push-delivery-dispatcher
+cargo run -p bookway-community-notification-dispatcher
+cargo run -p bookway-direct-message-notification-dispatcher
 cargo run -p bookway-route-participation-reconciler
 cargo run -p bookway-appeal-notification-dispatcher
 cargo run -p bookway-content-report-restriction-dispatcher
 cargo run -p bookway-search-indexer
+cargo run -p bookway-search-index-outbox-recovery
+cargo run -p bookway-search-index-reconcile
+# See bookway/bbs-search/job/README.md for the shadow-write, rebuild, reconcile, alias-switch rollout.
 ```
 
 ## 本地运行
@@ -216,10 +260,26 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+### Git 提交前契约边界检查
+
+微服务实现 crate 只能作为服务二进制运行；跨服务依赖必须使用对应的
+`bookway-<service>-api` 契约 crate。首次克隆仓库后执行一次：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+提交时会运行 `scripts/check-service-implementation-dependencies.sh`。也可手动执行该脚本；
+GitHub Actions 会运行相同检查，因此 `--no-verify` 不会绕过 CI。
+
 依次启动：
 
 ```bash
 cargo run -p bookway-bbs
+cargo run -p bookway-bbs-creator
+cargo run -p bookway-bbs-message
+cargo run -p bookway-direct-message-notification-dispatcher
+cargo run -p bookway-account
 cargo run -p bookway-bbs-link
 cargo run -p bookway-bbs-search
 cargo run -p bookway-comment
@@ -230,9 +290,17 @@ cargo run -p bookway-user-event
 cargo run -p bookway-search-main
 cargo run -p bookway-media
 cargo run -p bookway-content-audit
+cargo run -p bookway-feedback
 cargo run -p bookway-feature-main
 cargo run -p bookway-recommend-recall
 cargo run -p bookway-recommend-rank
+cargo run -p bookway-ad-center
+cargo run -p bookway-ad-recall
+cargo run -p bookway-ad-rank
+cargo run -p bookway-ad-main
+cargo run -p bookway-mall
+cargo run -p bookway-mall-inventory
+cargo run -p bookway-mall-order
 cargo run -p bookway-growth
 cargo run -p bookway-gateway
 ```
@@ -241,26 +309,40 @@ cargo run -p bookway-gateway
 
 | 服务 | 监听变量 | 上游变量 |
 | --- | --- | --- |
-| gateway | `GATEWAY_ADDR` | `GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`、`COMMENT_GRPC_URL`、`LIKE_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL` |
+| gateway | `GATEWAY_ADDR` | `ACCOUNT_GRPC_URL`、`GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`、`BBS_CREATOR_GRPC_URL`、`BBS_MESSAGE_GRPC_URL`、`COMMENT_GRPC_URL`、`LIKE_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、`FEEDBACK_GRPC_URL` |
+| account | `ACCOUNT_ADDR` | 无 |
 | growth | `GROWTH_ADDR` | 无 |
 | bbs | `BBS_ADDR` | 无 |
+| bbs-creator | `BBS_CREATOR_ADDR`、`BBS_CREATOR_GRPC_ADDR` | PostgreSQL 创作者档案 |
+| bbs-message | `BBS_MESSAGE_ADDR`、`BBS_MESSAGE_GRPC_ADDR` | `BBS_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、PostgreSQL 会话/私信/举报/通知 Outbox；持久化模式下审核缺失即拒绝启动 |
 | recommend-main | `RECOMMEND_MAIN_ADDR` | `BBS_GRPC_URL`、`LIKE_STATUS_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`RECOMMEND_RECALL_GRPC_URL`、`RECOMMEND_RANK_GRPC_URL` |
 | bbs-link | `BBS_LINK_ADDR`、`BBS_LINK_GRPC_ADDR` | `CONTENT_AUDIT_GRPC_URL` |
 | comment | `COMMENT_ADDR`、`COMMENT_GRPC_ADDR` | `CONTENT_AUDIT_GRPC_URL`（持久化模式缺失时评论 fail-closed） |
 | bbs-search | `BBS_SEARCH_ADDR` | `BBS_LINK_GRPC_URL` |
 | commonlikestatus | `LIKE_STATUS_ADDR` | 无（由 Gateway 先校验内容） |
 | bbs-feed | `BBS_FEED_ADDR` | `RECOMMEND_MAIN_GRPC_URL` |
-| user-event | `USER_EVENT_ADDR` | PostgreSQL + Transactional Outbox，由 Relay 发布 Kafka |
+| user-event | `USER_EVENT_ADDR` | `RECOMMEND_MAIN_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、PostgreSQL + Transactional Outbox，由 Relay 发布 Kafka |
 | route-participation-reconciler | 无监听端口 | `DATABASE_URL`、`BBS_GRPC_URL`、`ROUTE_RECONCILE_*` |
 | reminder-dispatcher | 无监听端口 | `DATABASE_URL`、`REMINDER_DISPATCH_BATCH_SIZE`、Outbox Relay |
+| push-delivery-dispatcher | 无监听端口 | `DATABASE_URL`、`PUSH_DELIVERY_GATEWAY_URL`、`PUSH_DELIVERY_*` |
+| community-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`GROWTH_GRPC_URL`、`COMMUNITY_NOTIFICATION_*` |
+| direct-message-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`GROWTH_GRPC_URL`、`DIRECT_MESSAGE_NOTIFICATION_*` |
 | appeal-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`GROWTH_GRPC_URL`、`APPEAL_NOTIFICATION_*` |
 | content-report-restriction-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`REPORT_RESTRICTION_*` |
 | search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL` |
 | media | `MEDIA_ADDR` | `S3_ENDPOINT`、`S3_BUCKET`、`CDN_BASE_URL` |
 | content-audit | `CONTENT_AUDIT_ADDR` | 审核规则与 PostgreSQL |
+| feedback | `FEEDBACK_ADDR` | PostgreSQL；`user_feedback` 状态队列 |
 | feature-main | `FEATURE_MAIN_ADDR` | `REDIS_URL`、PostgreSQL |
-| recommend-recall | `RECOMMEND_RECALL_ADDR` | `BBS_LINK_GRPC_URL` |
+| recommend-recall | `RECOMMEND_RECALL_ADDR` | `BBS_LINK_GRPC_URL`、`RECALL_SOURCE_BLEND`（`balanced-v1` 或 `score-v1`） |
 | recommend-rank | `RECOMMEND_RANK_ADDR` | `RECOMMEND_RANK_MODEL_VERSION` |
+| ad-center | `AD_CENTER_ADDR` | PostgreSQL；活动和投放账本 |
+| ad-recall | `AD_RECALL_ADDR` | `AD_CENTER_GRPC_URL` |
+| ad-rank | `AD_RANK_ADDR` | `AD_RANK_MODEL_VERSION` |
+| ad-main | `AD_MAIN_ADDR` | `AD_CENTER_GRPC_URL`、`AD_RECALL_GRPC_URL`、`AD_RANK_GRPC_URL` |
+| mall | `MALL_ADDR` | PostgreSQL 商品与 SKU 目录 |
+| mall-inventory | `MALL_INVENTORY_ADDR` | PostgreSQL；`MALL_RESERVATION_TTL_SECONDS` |
+| mall-order | `MALL_ORDER_ADDR` | `MALL_GRPC_URL`、`MALL_INVENTORY_GRPC_URL`、`MALL_PAYMENT_TTL_SECONDS` |
 
 全服务共享 `STORAGE_MODE`、`DATABASE_URL`、`SERVICE_AUTH_TOKEN`、`SERVICE_AUTH_REQUIRED`、`AUTH_REQUIRED`、`AUTH_JWT_SECRET`、`HTTP_CONNECT_TIMEOUT_MS` 和 `HTTP_REQUEST_TIMEOUT_MS`。Gateway 的 `CORS_ALLOWED_ORIGINS` 必须列出允许访问 Web API 的精确 `http(s)` Origin，拒绝通配符、路径和自定义 scheme；默认值仅供本机 Expo Web 调试。Redis 连接和命令预算分别由 `REDIS_CONNECT_TIMEOUT_MS`（默认 1000ms）与 `REDIS_COMMAND_TIMEOUT_MS`（默认 100ms）控制，缓存或限流 Redis 故障时会告警并 fail-open。生产环境必须启用两种鉴权：App 的 Bearer JWT 只在 Gateway 解析；非 Gateway 服务的业务端点只接受带服务令牌的内部请求，并信任 Gateway 注入的 `x-user-id`。健康、就绪和指标端点不要求服务令牌。
 
@@ -271,7 +353,7 @@ cargo run -p bookway-gateway
 - SQLx 连接池和按服务所有权拆分的 PostgreSQL Repository，写路径使用事务与幂等键。
 - Redis 全局限流和特征缓存；Redis 故障 fail-open 并记录告警。
 - Transactional Outbox、Kafka/Redpanda Relay、`SKIP LOCKED`、退避和死信状态。
-- OpenSearch CJK 索引、版本化索引名、检索降级和独立重建命令。
+- OpenSearch CJK 物理/影子双写索引、可恢复全量重建、逐版本只读对账、读别名原子发布和检索降级。
 - Gateway 媒体 API、MinIO/S3 预签名直传、对象大小/MIME 完成校验、私有 pending 元数据和 CDN 地址。
 - `feature-main -> recommend-rank` 在线调用，推荐模型失败时保留启发式得分并标记降级。
 - `feature-main` 从近 90 天行为构造领域/作者亲和度、重复曝光疲劳和直接负反馈候选特征；`recommend-rank` 在用户级特征之外执行候选级个性化。
@@ -279,7 +361,8 @@ cargo run -p bookway-gateway
 - 动态搜索联想、查询统计、查询绑定游标，以及行动留痕与服务端周回望聚合。
 - 基于进行中路线、真实行动状态和精确安排时间的只读陪伴简报；建议由用户显式采纳，服务不会隐式改写计划。
 - 用户举报与作者申诉的幂等接入、PostgreSQL 人工队列、稳定续页、审核认领/结案、角色受限的下架与恢复动作；举报下架、获准内容恢复与终态通知均通过事务任务、租约调度与幂等写入可靠收敛。
-- 评论回复、弱网写入幂等、稳定游标分页，以及移动端失败草稿恢复和加载更多。
+- 私信接收者举报、可信审核队列、终态审核保护与持久化发送者限制；普通举报回执不暴露私信正文，原始正文只在受限审核 RPC 中可读。
+- 评论回复、弱网写入幂等、稳定游标分页、移动端失败草稿恢复和加载更多；点赞、评论和关注在 Gateway 已解析接收者后经租约 Worker 与幂等来源键可靠投递社区收件箱。
 - 私人资源知识库、阅读进度与书签持久化，以及基于真实作者 ID 的关注关系和独立关注流。
 - 公共路线参与持久化、跨端加入状态恢复、真实同行人数，以及推荐/搜索的批量上下文补全。
 - 服务端幂等路线加入编排；并发、超时或客户端重启后的重试会复用同一私人 Journey。

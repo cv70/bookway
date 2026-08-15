@@ -1,14 +1,14 @@
 use std::{collections::HashMap, sync::Arc};
 
+use crate::api::pb;
 use async_trait::async_trait;
-use bookway_api::UserEventDto;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AcceptedEvent {
     pub(crate) user_id: String,
-    pub(crate) event: UserEventDto,
+    pub(crate) event: pb::Event,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -32,7 +32,7 @@ pub(crate) type SharedEventRepository = Arc<dyn EventRepository>;
 
 #[derive(Default)]
 pub(crate) struct MemoryEventRepository {
-    events: Mutex<HashMap<String, (String, UserEventDto)>>,
+    events: Mutex<HashMap<String, (String, pb::Event)>>,
 }
 
 #[async_trait]
@@ -73,11 +73,11 @@ impl EventRepository for PostgresEventRepository {
         for accepted in events {
             let event = &accepted.event;
             let inserted = sqlx::query_scalar::<_, String>(
-                "INSERT INTO user_events (event_id,user_id,event_type,session_id,request_id,component_id,content_id,position,occurred_at,source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::text::timestamptz,$10) ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
+                "INSERT INTO user_events (event_id,user_id,event_type,session_id,request_id,component_id,content_id,position,occurred_at,source,negative_feedback_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::text::timestamptz,$10,$11) ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
             )
             .bind(&event.event_id).bind(&accepted.user_id).bind(&event.event_type)
             .bind(&event.session_id).bind(&event.request_id).bind(&event.component_id)
-            .bind(&event.content_id).bind(event.position.and_then(|value| i32::try_from(value).ok())).bind(&event.occurred_at).bind(&event.source)
+            .bind(&event.content_id).bind(event.position.and_then(|value| i32::try_from(value).ok())).bind(&event.occurred_at).bind(&event.source).bind(negative_feedback_reason_label(event.negative_feedback_reason))
             .fetch_optional(&mut *tx).await.map_err(RepositoryError::Database)?;
             if inserted.is_some() {
                 let payload = serde_json::json!({ "user_id": accepted.user_id, "event": event });
@@ -91,5 +91,41 @@ impl EventRepository for PostgresEventRepository {
         }
         tx.commit().await.map_err(RepositoryError::Database)?;
         Ok(result)
+    }
+}
+
+fn negative_feedback_reason_label(value: Option<i32>) -> Option<&'static str> {
+    match pb::NegativeFeedbackReason::try_from(value?).ok()? {
+        pb::NegativeFeedbackReason::NotRelevant => Some("not_relevant"),
+        pb::NegativeFeedbackReason::AlreadySeen => Some("already_seen"),
+        pb::NegativeFeedbackReason::LowQuality => Some("low_quality"),
+        pb::NegativeFeedbackReason::Unspecified => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::negative_feedback_reason_label;
+    use crate::api::pb;
+
+    #[test]
+    fn persists_only_supported_negative_feedback_reason_labels() {
+        assert_eq!(
+            negative_feedback_reason_label(Some(pb::NegativeFeedbackReason::NotRelevant as i32)),
+            Some("not_relevant")
+        );
+        assert_eq!(
+            negative_feedback_reason_label(Some(pb::NegativeFeedbackReason::AlreadySeen as i32)),
+            Some("already_seen")
+        );
+        assert_eq!(
+            negative_feedback_reason_label(Some(pb::NegativeFeedbackReason::LowQuality as i32)),
+            Some("low_quality")
+        );
+        assert_eq!(
+            negative_feedback_reason_label(Some(pb::NegativeFeedbackReason::Unspecified as i32)),
+            None
+        );
+        assert_eq!(negative_feedback_reason_label(Some(99)), None);
     }
 }

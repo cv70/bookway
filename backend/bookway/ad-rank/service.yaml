@@ -1,0 +1,7 @@
+name: bookway-ad-rank
+owner: commercial-advertising
+kind: grpc-service
+port: 8099
+healthcheck: grpc
+contracts:
+  - src/api/pb/server.proto

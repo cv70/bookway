@@ -9,7 +9,7 @@
 - 内部 gRPC：`context`、`visibility_context`、`set_edge`、`list_route_participations`、`route_context`、`set_route_participation`。
 - 外部 HTTP：`PUT /v1/users/{user_id}/follow`，请求体使用 `edge=follow|block|mute` 和 `active`。
 
-拉黑会移除双方已有关注关系；处于拉黑关系的用户不能重新关注；服务拒绝用户对自己建立社交关系。启用 `SERVICE_AUTH_REQUIRED=true` 后，全部业务 gRPC 都必须携带 `x-service-token`，健康检查除外；这使客户端只能经 Gateway 使用可信身份和可见性策略。`visibility_context` 合并当前用户的拉黑/静音对象与拉黑当前用户的作者；推荐、搜索和 Gateway 的直接内容读取/互动据此双向隐藏内容，但不会经客户端社交上下文暴露入站拉黑关系。路线参与命令携带 Growth 意图版本，BBS 在事务内拒绝旧版本，避免延迟加入覆盖较新的退出。
+拉黑会移除双方已有关注关系；处于拉黑关系的用户不能重新关注；服务拒绝空 ID 或用户对自己建立社交关系。每次关系写入都会按无向用户对获取事务 advisory lock，因此并发的关注和拉黑会串行化，拉黑完成后不会再落入新的关注关系。启用 `SERVICE_AUTH_REQUIRED=true` 后，全部业务 gRPC 都必须携带 `x-service-token`，健康检查除外；这使客户端只能经 Gateway 使用可信身份和可见性策略。`visibility_context` 合并当前用户的拉黑/静音对象与拉黑当前用户的作者；推荐、搜索和 Gateway 的直接内容读取/互动据此双向隐藏内容，但不会经客户端社交上下文暴露入站拉黑关系。路线参与命令携带 Growth 意图版本，BBS 在事务内拒绝旧版本，避免延迟加入覆盖较新的退出。
 
 ## 热门路线计数
 

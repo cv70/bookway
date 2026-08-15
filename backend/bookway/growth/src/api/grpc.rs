@@ -1,16 +1,7 @@
 #![allow(clippy::result_large_err)] // tonic::Status is fixed by the transport API.
 
 use super::pb::{self, growth_server::Growth};
-use crate::{
-    api::{
-        CreateActionRequest, CreateGrowthEntryRequest, CreateJourneyRequest,
-        CreateKnowledgeResourceRequest, CreateUserNotificationRequest, KnowledgeQueryRequest,
-        NotificationQueryRequest, RegisterPushDeviceRequest, UpdateActionRequest,
-        UpdateJourneyRequest, UpdateKnowledgeResourceRequest, UpdateReminderPreferencesRequest,
-    },
-    domain::Domain,
-};
-use serde::Serialize;
+use crate::domain::Domain;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
@@ -23,365 +14,373 @@ impl Growth for GrpcServer {
     async fn list_journeys(
         &self,
         request: Request<pb::UserRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let user_id = request.into_inner().user_id;
-        json_response(
-            &self
-                .domain
-                .list_journeys(&user_id)
-                .await
-                .map_err(internal_error)?,
-        )
+    ) -> Result<Response<pb::JourneyList>, Status> {
+        let response = self
+            .domain
+            .list_journeys(&request.into_inner().user_id)
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(pb::JourneyList { items: response }))
     }
 
     async fn create_journey(
         &self,
         request: Request<pb::CreateJourneyRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::Journey>, Status> {
         let request = request.into_inner();
-        let payload: CreateJourneyRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .create_journey(&request.user_id, payload)
+        let user_id = request.user_id.clone();
+        Ok(Response::new(
+            self.domain
+                .create_journey(&user_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn create_route_journey(
         &self,
         request: Request<pb::CreateRouteJourneyRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::Journey>, Status> {
         let request = request.into_inner();
-        let payload: CreateJourneyRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .create_route_journey(&request.user_id, &request.route_id, payload)
+        let journey = request
+            .journey
+            .ok_or_else(|| Status::invalid_argument("journey is required"))?;
+        Ok(Response::new(
+            self.domain
+                .create_route_journey(
+                    &request.user_id,
+                    &request.route_id,
+                    journey,
+                    request.additional_actions,
+                )
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn set_route_participation_intent(
         &self,
         request: Request<pb::SetRouteParticipationIntentRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::RouteParticipationIntent>, Status> {
         let request = request.into_inner();
-        json_response(
-            &self
-                .domain
+        Ok(Response::new(
+            self.domain
                 .set_route_participation_intent(
                     &request.user_id,
                     &request.route_id,
                     request.active,
-                    (!request.private_journey_id.is_empty()).then_some(request.private_journey_id),
+                    request.private_journey_id,
                 )
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn get_journey(
         &self,
         request: Request<pb::JourneyRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::JourneyDetail>, Status> {
         let request = request.into_inner();
-        json_response(
-            &self
-                .domain
+        Ok(Response::new(
+            self.domain
                 .get_journey(&request.user_id, &request.journey_id)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn update_journey(
         &self,
         request: Request<pb::UpdateJourneyRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::Journey>, Status> {
         let request = request.into_inner();
-        let payload: UpdateJourneyRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .update_journey(&request.user_id, &request.journey_id, payload)
+        let user_id = request.user_id.clone();
+        let journey_id = request.journey_id.clone();
+        Ok(Response::new(
+            self.domain
+                .update_journey(&user_id, &journey_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn create_action(
         &self,
         request: Request<pb::CreateActionRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::Action>, Status> {
         let request = request.into_inner();
-        let payload: CreateActionRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .create_action(&request.user_id, payload)
+        let user_id = request.user_id.clone();
+        Ok(Response::new(
+            self.domain
+                .create_action(&user_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn today(
         &self,
         request: Request<pb::ScheduleRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::TodaySummary>, Status> {
         let request = request.into_inner();
-        json_response(
-            &self
-                .domain
+        Ok(Response::new(
+            self.domain
                 .today_for(
                     &request.user_id,
-                    (!request.local_date.is_empty()).then_some(request.local_date.as_str()),
-                    (!request.timezone.is_empty()).then_some(request.timezone.as_str()),
+                    request.local_date.as_deref(),
+                    request.timezone.as_deref(),
                 )
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn complete_action(
         &self,
         request: Request<pb::CompleteActionRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::CompleteActionResponse>, Status> {
         let request = request.into_inner();
-        json_response(
-            &self
-                .domain
+        Ok(Response::new(
+            self.domain
                 .complete_action(&request.user_id, &request.action_id)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn update_action(
         &self,
         request: Request<pb::UpdateActionRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::Action>, Status> {
         let request = request.into_inner();
-        let payload: UpdateActionRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .update_action(&request.user_id, &request.action_id, payload)
+        let user_id = request.user_id.clone();
+        let action_id = request.action_id.clone();
+        Ok(Response::new(
+            self.domain
+                .update_action(&user_id, &action_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn reminder_preferences(
         &self,
         request: Request<pb::UserRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let user_id = request.into_inner().user_id;
-        json_response(
-            &self
-                .domain
-                .reminder_preferences(&user_id)
+    ) -> Result<Response<pb::ReminderPreference>, Status> {
+        Ok(Response::new(
+            self.domain
+                .reminder_preferences(&request.into_inner().user_id)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn update_reminder_preferences(
         &self,
         request: Request<pb::UpdateReminderPreferencesRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::ReminderPreference>, Status> {
         let request = request.into_inner();
-        let payload: UpdateReminderPreferencesRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .update_reminder_preferences(&request.user_id, payload)
+        let user_id = request.user_id.clone();
+        Ok(Response::new(
+            self.domain
+                .update_reminder_preferences(&user_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn register_push_device(
         &self,
         request: Request<pb::RegisterPushDeviceRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::PushDevice>, Status> {
         let request = request.into_inner();
-        let payload: RegisterPushDeviceRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .register_push_device(&request.user_id, payload)
+        let user_id = request.user_id.clone();
+        Ok(Response::new(
+            self.domain
+                .register_push_device(&user_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn revoke_push_device(
         &self,
         request: Request<pb::PushDeviceRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::EmptyResponse>, Status> {
         let request = request.into_inner();
         self.domain
             .revoke_push_device(&request.user_id, &request.device_id)
             .await
             .map_err(internal_error)?;
-        json_response(&serde_json::json!({}))
+        Ok(Response::new(pb::EmptyResponse {}))
     }
 
     async fn list_notifications(
         &self,
         request: Request<pb::NotificationQueryRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::NotificationPage>, Status> {
         let request = request.into_inner();
-        let payload: NotificationQueryRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .list_notifications(&request.user_id, payload)
+        let user_id = request.user_id.clone();
+        Ok(Response::new(
+            self.domain
+                .list_notifications(&user_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
-    }
-
-    async fn mark_notification_read(
-        &self,
-        request: Request<pb::NotificationRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
-        json_response(
-            &self
-                .domain
-                .mark_notification_read(&request.user_id, &request.notification_id)
-                .await
-                .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn create_notification(
         &self,
         request: Request<pb::CreateNotificationRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::UserNotification>, Status> {
         let request = request.into_inner();
-        let payload: CreateUserNotificationRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .create_notification(&request.user_id, payload)
+        let user_id = request.user_id.clone();
+        Ok(Response::new(
+            self.domain
+                .create_notification(&user_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
+    }
+
+    async fn mark_notification_read(
+        &self,
+        request: Request<pb::NotificationRequest>,
+    ) -> Result<Response<pb::UserNotification>, Status> {
+        let request = request.into_inner();
+        Ok(Response::new(
+            self.domain
+                .mark_notification_read(&request.user_id, &request.notification_id)
+                .await
+                .map_err(internal_error)?,
+        ))
     }
 
     async fn list_entries(
         &self,
         request: Request<pb::UserRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let user_id = request.into_inner().user_id;
-        json_response(
-            &self
-                .domain
-                .list_entries(&user_id)
-                .await
-                .map_err(internal_error)?,
-        )
+    ) -> Result<Response<pb::EntryList>, Status> {
+        let entries = self
+            .domain
+            .list_entries(&request.into_inner().user_id)
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(pb::EntryList { items: entries }))
     }
 
     async fn create_entry(
         &self,
         request: Request<pb::CreateEntryRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::GrowthEntry>, Status> {
         let request = request.into_inner();
-        let payload: CreateGrowthEntryRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .create_entry(&request.user_id, payload)
+        let user_id = request.user_id.clone();
+        Ok(Response::new(
+            self.domain
+                .create_entry(&user_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
+    }
+
+    async fn retry_entry_publication(
+        &self,
+        request: Request<pb::RetryEntryPublicationRequest>,
+    ) -> Result<Response<pb::GrowthEntry>, Status> {
+        let request = request.into_inner();
+        Ok(Response::new(
+            self.domain
+                .retry_entry_publication(&request.user_id, &request.entry_id)
+                .await
+                .map_err(internal_error)?,
+        ))
     }
 
     async fn weekly_review(
         &self,
         request: Request<pb::UserRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let user_id = request.into_inner().user_id;
-        json_response(
-            &self
-                .domain
-                .weekly_review(&user_id)
+    ) -> Result<Response<pb::WeeklyReviewSummary>, Status> {
+        Ok(Response::new(
+            self.domain
+                .weekly_review(&request.into_inner().user_id)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn companion(
         &self,
         request: Request<pb::ScheduleRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::CompanionBrief>, Status> {
         let request = request.into_inner();
-        json_response(
-            &self
-                .domain
+        Ok(Response::new(
+            self.domain
                 .companion_brief_for(
                     &request.user_id,
-                    (!request.local_date.is_empty()).then_some(request.local_date.as_str()),
-                    (!request.timezone.is_empty()).then_some(request.timezone.as_str()),
+                    request.local_date.as_deref(),
+                    request.timezone.as_deref(),
                 )
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 
     async fn list_knowledge(
         &self,
         request: Request<pb::KnowledgeQueryRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::KnowledgeList>, Status> {
         let request = request.into_inner();
-        let payload: KnowledgeQueryRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .list_knowledge(&request.user_id, payload)
-                .await
-                .map_err(internal_error)?,
-        )
+        let user_id = request.user_id.clone();
+        let items = self
+            .domain
+            .list_knowledge(&user_id, request)
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(pb::KnowledgeList { items }))
     }
 
     async fn create_knowledge(
         &self,
         request: Request<pb::CreateKnowledgeRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::KnowledgeResource>, Status> {
         let request = request.into_inner();
-        let payload: CreateKnowledgeResourceRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .create_knowledge(
-                    &request.user_id,
-                    payload,
-                    (!request.idempotency_key.is_empty()).then_some(request.idempotency_key),
-                )
+        let user_id = request.user_id.clone();
+        let idempotency_key = request.idempotency_key.clone();
+        Ok(Response::new(
+            self.domain
+                .create_knowledge(&user_id, request, idempotency_key)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
+    }
+
+    async fn start_knowledge_journey(
+        &self,
+        request: Request<pb::StartKnowledgeJourneyRequest>,
+    ) -> Result<Response<pb::KnowledgeJourney>, Status> {
+        let request = request.into_inner();
+        let user_id = request.user_id.clone();
+        let resource_id = request.resource_id.clone();
+        Ok(Response::new(
+            self.domain
+                .start_knowledge_journey(&user_id, &resource_id, request)
+                .await
+                .map_err(internal_error)?,
+        ))
     }
 
     async fn update_knowledge(
         &self,
         request: Request<pb::UpdateKnowledgeRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
+    ) -> Result<Response<pb::KnowledgeResource>, Status> {
         let request = request.into_inner();
-        let payload: UpdateKnowledgeResourceRequest = from_json(&request.request_json)?;
-        json_response(
-            &self
-                .domain
-                .update_knowledge(&request.user_id, &request.resource_id, payload)
+        let user_id = request.user_id.clone();
+        let resource_id = request.resource_id.clone();
+        Ok(Response::new(
+            self.domain
+                .update_knowledge(&user_id, &resource_id, request)
                 .await
                 .map_err(internal_error)?,
-        )
+        ))
     }
 }
 
@@ -398,10 +397,6 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .await
 }
 
-fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, Status> {
-    serde_json::from_str(value).map_err(|error| Status::invalid_argument(error.to_string()))
-}
-
 fn internal_error(error: crate::domain::GrowthError) -> Status {
     match error {
         crate::domain::GrowthError::Validation(message) => Status::invalid_argument(message),
@@ -410,6 +405,7 @@ fn internal_error(error: crate::domain::GrowthError) -> Status {
             | crate::datasource::RepositoryError::ActionNotFound(message)
             | crate::datasource::RepositoryError::NotificationNotFound(message)
             | crate::datasource::RepositoryError::EntryReferenceNotFound(message)
+            | crate::datasource::RepositoryError::EntryNotFound(message)
             | crate::datasource::RepositoryError::KnowledgeNotFound(message)
             | crate::datasource::RepositoryError::KnowledgeReferenceNotFound(message),
         ) => Status::not_found(message),
@@ -421,13 +417,9 @@ fn internal_error(error: crate::domain::GrowthError) -> Status {
         ) => Status::already_exists(format!(
             "notification source {source_id} was already assigned to a different user"
         )),
+        crate::domain::GrowthError::Repository(
+            crate::datasource::RepositoryError::EntryPublicationNotRetryable,
+        ) => Status::failed_precondition("entry publication cannot be retried yet"),
         crate::domain::GrowthError::Repository(error) => Status::internal(error.to_string()),
     }
-}
-
-fn json_response<T: Serialize>(value: &T) -> Result<Response<pb::JsonResponse>, Status> {
-    Ok(Response::new(pb::JsonResponse {
-        response_json: serde_json::to_string(value)
-            .map_err(|error| Status::internal(error.to_string()))?,
-    }))
 }

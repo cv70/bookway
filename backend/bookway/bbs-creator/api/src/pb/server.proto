@@ -1,0 +1,58 @@
+syntax = "proto3";
+package bookway.bbs.creator;
+
+// This profile is the public, action-oriented extension of an account. Account
+// remains the source of avatars and display names; this service owns creator
+// positioning, expertise and the work a creator chooses to feature.
+enum CreatorState {
+  CREATOR_STATE_ACTIVE = 0;
+  CREATOR_STATE_PAUSED = 1;
+}
+
+message CreatorProfile {
+  string user_id = 1;
+  string handle = 2;
+  string headline = 3;
+  string introduction = 4;
+  string cover_url = 5;
+  repeated string specialties = 6;
+  repeated string featured_content_ids = 7;
+  CreatorState state = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message CreatorProfileRequest { string user_id = 1; }
+
+message UpsertCreatorProfileRequest {
+  string user_id = 1;
+  string handle = 2;
+  string headline = 3;
+  string introduction = 4;
+  string cover_url = 5;
+  repeated string specialties = 6;
+  repeated string featured_content_ids = 7;
+  CreatorState state = 8;
+}
+
+message ListCreatorProfilesRequest {
+  repeated string user_ids = 1;
+  optional string query = 2;
+  optional string specialty = 3;
+  optional string cursor = 4;
+  optional uint32 limit = 5;
+  // Gateway derives this from BBS visibility so a blocked or muted creator
+  // cannot re-enter discovery through a public query.
+  repeated string excluded_user_ids = 6;
+}
+
+message CreatorProfilePage {
+  repeated CreatorProfile items = 1;
+  optional string next_cursor = 2;
+}
+
+service BbsCreator {
+  rpc GetProfile(CreatorProfileRequest) returns (CreatorProfile);
+  rpc UpsertProfile(UpsertCreatorProfileRequest) returns (CreatorProfile);
+  rpc ListProfiles(ListCreatorProfilesRequest) returns (CreatorProfilePage);
+}

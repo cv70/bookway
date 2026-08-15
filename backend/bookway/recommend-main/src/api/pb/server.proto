@@ -1,9 +1,0 @@
-syntax = "proto3";
-package bookway.recommend.main;
-
-message FeedRequest { string request_json = 1; }
-message JsonResponse { string response_json = 1; }
-
-service RecommendMain {
-  rpc Feed(FeedRequest) returns (JsonResponse);
-}

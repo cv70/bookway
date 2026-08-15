@@ -1,0 +1,27 @@
+[package]
+name = "bookway-account"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bookway-account-api.workspace = true
+async-trait.workspace = true
+bookway-api.workspace = true
+bookway-data.workspace = true
+bookway-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+prost.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+

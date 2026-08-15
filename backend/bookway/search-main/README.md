@@ -6,12 +6,12 @@
 
 `规范化 -> 精确召回 + 受控同义扩展 -> 混合/去重 -> 轻量重排 -> 稳定分页`
 
-`bbs-search` 继续拥有底层关键词检索、OpenSearch/PIT 与事实源降级、内容可见性过滤，以及每一路召回的私有游标；`bbs-link` 保持内容事实源职责。Gateway 先根据社交关系注入可信查看者和屏蔽作者集合，Search Main 会原样传递给每一个 `bbs-search` 请求，不能由客户端覆盖。
+`bbs-search` 继续拥有底层关键词检索、OpenSearch/PIT 与事实源降级、内容可见性过滤，以及每一路召回的私有游标；其 OpenSearch 命中会先由 `bbs-link` 的紧凑公开摘要批量回读，OpenSearch 因此只提供候选与排序而不成为内容事实源。Gateway 先根据社交关系注入可信查看者和屏蔽作者集合，Search Main 会原样传递给每一个 `bbs-search` 请求，不能由客户端覆盖。
 
 ## 查询与排序策略
 
 - 将空白和常见中英文分隔符规范为 canonical query，限制为 1--100 个字符。
-- 每次搜索都有精确 lexical recall；仅命中受控词典时增加一条扩展 recall，例如 `跑步 -> 慢跑/晨跑/夜跑`、`阅读 -> 读书/书单/主题阅读`。扩展故障只标记 `degraded`，精确召回故障则向上游报错。
+- 每次搜索都有精确 lexical recall；仅命中受控词典时增加一条扩展 recall，例如 `跑步 -> 慢跑/晨跑/夜跑`、`阅读 -> 读书/书单/主题阅读`。`@用户` 和 `#话题` 等身份/主题查询不扩展，最多附加 6 个词并始终保留原始精确召回。扩展故障只标记 `degraded`，精确召回故障则向上游报错。
 - 相同 `(result_type, id)` 的候选会合并，未展示的候选保存在服务端并按标题完整命中、标题词覆盖、`#` 话题/`@` 用户/路线意图和领域匹配做确定性轻量重排。
 - 该层是明确的模型接入点，而不是宣称已经存在 ML 排序模型；后续可在这里加入向量召回、特征、实验和离线评测。
 
@@ -19,17 +19,44 @@
 
 公开游标格式为 `sm1-{fingerprint}-{uuid}`，只包含查询、搜索类型、可信查看者和排序后的排除作者集合的指纹；游标不能跨查询、用户、搜索类型或可见性集合复用。
 
-会话保存各 recall 的 `bbs-search` 私有游标、候选 pending 队列、已见结果和退化状态，TTL 为 5 分钟。它不会把 OpenSearch PIT 或底层 `bbs-search` token 返回给客户端。`0028_search_main_sessions.sql` 提供 PostgreSQL 存储；`STORAGE_MODE=memory` 用于本地演示。旧版 `v3-...` 单路游标会被安全地转为只含精确召回的新会话，下一页起返回 `sm1-...`。
+会话保存各 recall 的 `bbs-search` 私有游标、候选 pending 队列、已见结果和退化状态，TTL 为 5 分钟。它不会把 OpenSearch PIT 或底层 `bbs-search` token 返回给客户端。每次从 pending 队列返回帖子或路线前，Search Main 都会以 1.5 秒预算向 `bbs-link` 批量回读权威公开摘要；已限制、删除或不再公开的 ID 会被丢弃，展示字段会以当前摘要重建，异常或不可信的摘要批次会失败关闭。用户和话题候选不经过内容回读。`0028_search_main_sessions.sql` 提供 PostgreSQL 存储；`STORAGE_MODE=memory` 用于本地演示。旧版 `v3-...` 单路游标会被安全地转为只含精确召回的新会话，下一页起返回 `sm1-...`。
 
 会话过期返回 `FAILED_PRECONDITION`，无效或不匹配游标返回 `INVALID_ARGUMENT`，存储和底层可用性故障返回 `UNAVAILABLE`。
 
+## 查询改写版本
+
+`0040_search_query_rewrite_versions.sql` 将词典从服务内硬编码规则升级为版本化配置。每个版本包含受限 trigger 和扩展词集合；`search_query_rewrite_active` 是一个原子单例指针，运行实例最多每 60 秒刷新一次。新搜索会使用当前活动版本，已创建的分页会话会保留自身的召回词和版本，不会因为切换而重复、漏项或改变后续页。
+
+上线新版本时先以 `draft` 写入规则并做离线召回质量检查，将版本改为 `ready` 后调用：
+
+```sql
+SELECT activate_search_query_rewrite('lifestyle-v2');
+```
+
+该函数拒绝非 `ready` 或无规则版本；回滚只需把活动指针切回上一已验证版本。运行时还会重新规范化、去重、限制 trigger/扩展词长度和总扩展预算；配置读取失败或无效时保留上次有效词典（首次启动回退内置 `builtin-v1`）并标记响应 `degraded=true`。搜索曝光会记录 `query_rewrite_version`，但不会保存查询明文，供之后以可信交互做版本级质量评估。
+
+`job/search-evaluator` 在 PostgreSQL 中运行，固定评估窗口后输出并写入匿名快照：
+
+```bash
+SEARCH_EVAL_START_AT=2026-08-01T00:00:00Z \
+SEARCH_EVAL_CUTOFF_AT=2026-08-08T00:00:00Z \
+cargo run -p bookway-search-evaluator
+```
+
+任务只读取未降级页，并只计入 Search Main 已验证、且服务端 `received_at` 落在每个搜索页标签窗口（默认 168 小时）内的事件。它按改写版本和结果类型计算渲染、点击、查看、高意图、负反馈、净效用与可见 NDCG@5；没有查询文本、用户 ID 或结果 ID 会进入快照。`SEARCH_EVAL_MIN_RENDERED_ITEMS` 默认 500，低于阈值时状态为 `insufficient_data`，不得用于升级或切换词典。为可重复比较，必须固定 `SEARCH_EVAL_START_AT`、`SEARCH_EVAL_CUTOFF_AT` 和 `SEARCH_EVAL_LABEL_WINDOW_HOURS`。它是观察性指标，不提供反事实结论，也不会自动激活版本。
+
+## 搜索归因
+
+每个返回给客户端的结果页都有独立 UUID `request_id`。Search Main 在返回前将可信查看者、客户端会话、查询 hash、结果 ID 和原始零基位置写入 `search_exposures` / `search_exposure_items`；User Event 通过内部 `ValidateAttributions` 批量 RPC 校验搜索点击、点赞、收藏、隐藏、知识收集和路线加入。归因记录在 30 天后失效，写入路径每次至多清理 1,000 个过期页。伪造或过期归因会被拒绝；搜索服务暂时不可用时，User Event 仅保留无归因反馈，避免污染训练和质量指标。
+
 ## 可观测性与边界
 
-完成日志只记录稳定查询 hash、召回变体数、调用数、候选数、耗时和降级状态，不记录搜索明文。每个响应最多向底层取 8 个 recall page，单页最多返回 50 项，避免去重风暴或异常翻页放大下游压力。
+完成日志只记录稳定查询 hash、召回变体数、调用数、候选数、耗时和降级状态，不记录搜索明文。每个 `bbs-search` 搜索或联想 RPC，以及 pending 内容的 `bbs-link` 权威回读，最多使用 1.5 秒预算；精确召回或内容回读超时以 `DEADLINE_EXCEEDED` 失败，扩展召回超时只标记 `degraded` 并保留精确结果。每个响应最多向底层取 8 个 recall page，单页最多返回 50 项，避免去重风暴或异常翻页放大下游压力。
 
 ## 接口与环境变量
 
-- 内部 gRPC：`search`、`suggestions`。
+- 内部 gRPC：`search`、`suggestions`、`validate_attributions`。
 - `SEARCH_MAIN_ADDR`：默认 `127.0.0.1:8090`。
 - `BBS_SEARCH_GRPC_URL`：默认 `http://127.0.0.1:8085`。
+- `BBS_LINK_GRPC_URL`：默认 `http://127.0.0.1:18004`，用于 pending 内容的权威公开回读。
 - `STORAGE_MODE`：`memory` 或生产使用的 `postgres`；后者要求先运行数据库迁移。

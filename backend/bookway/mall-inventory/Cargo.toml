@@ -1,0 +1,26 @@
+[package]
+name = "bookway-mall-inventory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bookway-mall-inventory-api.workspace = true
+async-trait.workspace = true
+bookway-api.workspace = true
+bookway-data.workspace = true
+bookway-runtime.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+
+
+[lints]
+workspace = true

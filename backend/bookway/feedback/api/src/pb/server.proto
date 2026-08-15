@@ -1,0 +1,38 @@
+syntax = "proto3";
+package bookway.feedback;
+
+enum FeedbackCategory { FEEDBACK_CATEGORY_BUG = 0; FEEDBACK_CATEGORY_FEATURE = 1; FEEDBACK_CATEGORY_EXPERIENCE = 2; FEEDBACK_CATEGORY_CONTENT = 3; FEEDBACK_CATEGORY_OTHER = 4; }
+enum FeedbackStatus { FEEDBACK_STATUS_PENDING = 0; FEEDBACK_STATUS_PROCESSING = 1; FEEDBACK_STATUS_RESOLVED = 2; FEEDBACK_STATUS_CLOSED = 3; }
+message FeedbackItem {
+  string id = 1;
+  string user_id = 2;
+  FeedbackCategory category = 3;
+  string content = 4;
+  string contact = 5;
+  string platform = 6;
+  string app_version = 7;
+  FeedbackStatus status = 8;
+  optional string resolution = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+message CreateFeedbackRequest {
+  string user_id = 1;
+  optional string idempotency_key = 2;
+  FeedbackCategory category = 3;
+  string content = 4;
+  string contact = 5;
+  string platform = 6;
+  string app_version = 7;
+}
+message ListOwnFeedbackRequest { string user_id = 1; optional FeedbackStatus status = 2; optional uint32 limit = 3; }
+message ListFeedbackRequest { optional FeedbackStatus status = 1; optional uint32 limit = 2; }
+message FeedbackList { repeated FeedbackItem items = 1; }
+message ReviewFeedbackRequest { string reviewer_id = 1; string feedback_id = 2; FeedbackStatus status = 3; optional string resolution = 4; }
+
+service Feedback {
+  rpc CreateFeedback(CreateFeedbackRequest) returns (FeedbackItem);
+  rpc ListOwnFeedback(ListOwnFeedbackRequest) returns (FeedbackList);
+  rpc ListFeedback(ListFeedbackRequest) returns (FeedbackList);
+  rpc ReviewFeedback(ReviewFeedbackRequest) returns (FeedbackItem);
+}

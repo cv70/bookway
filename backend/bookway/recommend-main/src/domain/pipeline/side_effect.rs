@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use super::PipelineSideEffect;
-use crate::datasource::{Exposure, SharedExposureDataSource};
+use crate::datasource::{Exposure, ExposureError, SharedExposureDataSource};
 
 pub(crate) struct ExposureSideEffect {
     exposures: SharedExposureDataSource,
@@ -15,7 +15,7 @@ impl ExposureSideEffect {
 
 #[async_trait]
 impl PipelineSideEffect for ExposureSideEffect {
-    async fn run(&self, exposure: Exposure) {
-        self.exposures.record(exposure).await;
+    async fn run(&self, exposure: Exposure) -> Result<(), ExposureError> {
+        self.exposures.record(exposure).await
     }
 }

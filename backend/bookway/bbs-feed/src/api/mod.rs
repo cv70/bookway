@@ -1,8 +1,4 @@
 mod grpc;
-
-#[path = "pb/bookway.bbs.feed.rs"]
-pub mod pb;
+pub use bookway_bbs_feed_api::pb;
 
 pub(crate) use grpc::serve;
-
-pub(crate) use bookway_api::{FeedDto, FeedQueryRequest};

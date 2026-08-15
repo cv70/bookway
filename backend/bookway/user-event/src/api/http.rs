@@ -1,3 +1,4 @@
+use crate::api::{ApiResponse, ErrorResponse, HealthResponse};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -5,10 +6,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use bookway_api::{ApiResponse, ErrorResponse, HealthResponse};
 use tower_http::trace::TraceLayer;
 
-use super::{UserEventBatchRequest, UserEventIngestResponse};
+use super::pb;
 use crate::domain::{IngestError, UserEventService};
 
 #[derive(Clone)]
@@ -48,15 +48,14 @@ async fn health() -> Json<HealthResponse> {
 async fn ingest(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<UserEventBatchRequest>,
-) -> Result<Json<ApiResponse<UserEventIngestResponse>>, HttpError> {
-    let user_id = headers
+    Json(mut request): Json<pb::IngestRequest>,
+) -> Result<Json<ApiResponse<pb::IngestResponse>>, HttpError> {
+    request.user_id = headers
         .get("x-user-id")
         .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    Ok(Json(ApiResponse::new(
-        state.events.ingest(user_id, request).await?,
-    )))
+        .unwrap_or_default()
+        .to_string();
+    Ok(Json(ApiResponse::new(state.events.ingest(request).await?)))
 }
 
 struct HttpError(IngestError);

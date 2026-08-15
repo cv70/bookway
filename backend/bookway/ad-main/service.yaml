@@ -1,0 +1,11 @@
+name: bookway-ad-main
+owner: commercial-advertising
+kind: grpc-service
+port: 8100
+healthcheck: grpc
+dependencies:
+  - bookway-ad-center
+  - bookway-ad-recall
+  - bookway-ad-rank
+contracts:
+  - src/api/pb/server.proto

@@ -1,0 +1,46 @@
+syntax = "proto3";
+package bookway.media;
+
+message CreateUploadRequest {
+  string user_id = 1;
+  string mime_type = 2;
+  uint64 size_bytes = 3;
+}
+
+message ResourceRequest { string user_id = 1; string id = 2; }
+
+message UploadResponse {
+  string id = 1;
+  string object_key = 2;
+  string upload_url = 3;
+  string cdn_url = 4;
+  uint32 expires_in_seconds = 5;
+}
+
+message MediaResource {
+  string id = 1;
+  string object_key = 2;
+  string mime_type = 3;
+  uint64 size_bytes = 4;
+  string status = 5;
+  string cdn_url = 6;
+  uint32 width = 7;
+  uint32 height = 8;
+  optional uint64 duration_ms = 9;
+}
+
+// This RPC is intentionally ownership-scoped. Services that attach media to
+// user-authored records must not use Get, which may expose public assets.
+message OwnedReadyMediaRequest {
+  string user_id = 1;
+  repeated string ids = 2;
+}
+
+message OwnedReadyMediaResponse { repeated MediaResource items = 1; }
+
+service Media {
+  rpc CreateUpload(CreateUploadRequest) returns (UploadResponse);
+  rpc CompleteUpload(ResourceRequest) returns (MediaResource);
+  rpc Get(ResourceRequest) returns (MediaResource);
+  rpc GetOwnedReadyBatch(OwnedReadyMediaRequest) returns (OwnedReadyMediaResponse);
+}

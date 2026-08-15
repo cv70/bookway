@@ -20,6 +20,8 @@ pub enum RuntimeError {
     InvalidAddress { key: String, value: String },
     #[error("invalid CORS allowed origins: {value}")]
     InvalidCorsOrigins { value: String },
+    #[error("invalid setting in {key}: {value}")]
+    InvalidSetting { key: String, value: String },
     #[error("failed to bind service: {0}")]
     Bind(#[source] std::io::Error),
     #[error("service failed: {0}")]
@@ -94,8 +96,8 @@ async fn ready(service: &'static str) -> impl IntoResponse {
         "media" => &["DATABASE_URL", "S3_ENDPOINT"],
         "bbs-search" => &["OPENSEARCH_URL"],
         "feature-main" => &["DATABASE_URL", "REDIS_URL"],
-        "bbs" | "bbs-link" | "comment" | "commonlikestatus" | "content-audit" | "growth"
-        | "recommend-main" | "user-event" => &["DATABASE_URL"],
+        "bbs" | "bbs-link" | "comment" | "commonlikestatus" | "content-audit" | "gateway"
+        | "growth" | "recommend-main" | "user-event" => &["DATABASE_URL"],
         _ => &[],
     };
     for key in dependency_keys {

@@ -1,0 +1,25 @@
+syntax = "proto3";
+package bookway.recommend.rank;
+
+import "recommend-recall/api/src/pb/server.proto";
+
+message CandidateFeatures {
+  string content_id = 1;
+  double domain_affinity = 2;
+  double author_affinity = 3;
+  double impression_fatigue = 4;
+  double direct_negative_feedback = 5;
+}
+message RankFeatures {
+  double recent_positive_rate = 1;
+  double user_interest_strength = 2;
+  double negative_feedback_rate = 3;
+  repeated CandidateFeatures candidates = 4;
+}
+message RankRequest {
+  string user_id = 1;
+  RankFeatures features = 2;
+  repeated bookway.recommend.recall.Candidate candidates = 3;
+}
+message RankResponse { repeated bookway.recommend.recall.Candidate candidates = 1; string model_version = 2; string experiment_bucket = 3; bool degraded = 4; }
+service RecommendRank { rpc Rank(RankRequest) returns (RankResponse); }

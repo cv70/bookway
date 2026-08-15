@@ -1,11 +1,11 @@
+use crate::api::{ApiResponse, ErrorResponse, HealthResponse, pb};
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, put},
+    routing::{get, post},
 };
-use bookway_api::{ApiResponse, ErrorResponse, FollowRequest, HealthResponse, SocialContextDto};
 use tower_http::trace::TraceLayer;
 
 use crate::domain::{BbsError, Domain};
@@ -18,15 +18,15 @@ pub(crate) struct AppState {
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/v1/users/{user_id}/follow", put(set_edge))
+        .route("/v1/social/context", get(context))
+        .route("/v1/social/{target_user_id}", post(set_edge))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
 
 pub(crate) async fn serve(domain: Domain) -> Result<(), Box<dyn std::error::Error>> {
     let addr = domain.config.listen_addr;
-    let app = router(AppState { domain });
-    bookway_runtime::serve("bbs", addr, app).await?;
+    bookway_runtime::serve("bbs", addr, router(AppState { domain })).await?;
     Ok(())
 }
 
@@ -38,17 +38,31 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
+async fn context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<pb::SocialContext>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .context(pb::ContextRequest {
+                user_id: user_id(&headers),
+                post_ids: Vec::new(),
+            })
+            .await?,
+    )))
+}
+
 async fn set_edge(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(target_user_id): Path<String>,
-    Json(request): Json<FollowRequest>,
-) -> Result<Json<ApiResponse<SocialContextDto>>, HttpError> {
+    Json(mut request): Json<pb::SetEdgeRequest>,
+) -> Result<Json<ApiResponse<pb::SocialContext>>, HttpError> {
+    request.user_id = user_id(&headers);
+    request.target_user_id = target_user_id;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .set_edge(&user_id(&headers), &target_user_id, request)
-            .await?,
+        state.domain.set_edge(request).await?,
     )))
 }
 
@@ -74,12 +88,9 @@ impl IntoResponse for HttpError {
         let (status, code) = match &self.0 {
             BbsError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
             BbsError::Repository(crate::datasource::RepositoryError::BlockedRelationship) => {
-                (StatusCode::CONFLICT, "social_edge_conflict")
+                (StatusCode::CONFLICT, "blocked_relationship")
             }
-            BbsError::Repository(
-                crate::datasource::RepositoryError::Database(_)
-                | crate::datasource::RepositoryError::Timestamp(_),
-            ) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
+            BbsError::Repository(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
         };
         (status, Json(ErrorResponse::new(code, self.0.to_string()))).into_response()
     }

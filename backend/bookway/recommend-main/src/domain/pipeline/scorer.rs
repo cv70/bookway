@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use super::{Candidate, CandidateScorer, FeedQuery};
-use crate::api::GrowthDomainDto;
 
 pub(crate) struct QualityScorer;
 
@@ -20,12 +19,13 @@ pub(crate) struct IntentScorer;
 impl CandidateScorer for IntentScorer {
     fn score(&self, query: &FeedQuery, candidates: &mut [Candidate]) {
         for candidate in candidates {
-            if query.interests.contains(&candidate.post.domain) {
+            let domain = bookway_bbs_link_api::pb::GrowthDomain::try_from(candidate.post.domain)
+                .unwrap_or(bookway_bbs_link_api::pb::GrowthDomain::Learning);
+            if query.interests.contains(&domain) {
                 candidate.score += 2.5;
-                candidate.reasons.insert(
-                    0,
-                    format!("符合你的{}兴趣", domain_label(candidate.post.domain)),
-                );
+                candidate
+                    .reasons
+                    .insert(0, format!("符合你的{}兴趣", domain_label(domain)));
             }
             if candidate.followed_author {
                 candidate.score += 2.0;
@@ -59,12 +59,12 @@ impl CandidateScorer for AuthorDiversityScorer {
     }
 }
 
-fn domain_label(domain: GrowthDomainDto) -> &'static str {
+fn domain_label(domain: bookway_bbs_link_api::pb::GrowthDomain) -> &'static str {
     match domain {
-        GrowthDomainDto::Learning => "学习",
-        GrowthDomainDto::Movement => "运动",
-        GrowthDomainDto::Wellness => "健康",
-        GrowthDomainDto::Travel => "旅行",
-        GrowthDomainDto::Leisure => "休闲",
+        bookway_bbs_link_api::pb::GrowthDomain::Learning => "学习",
+        bookway_bbs_link_api::pb::GrowthDomain::Movement => "运动",
+        bookway_bbs_link_api::pb::GrowthDomain::Wellness => "健康",
+        bookway_bbs_link_api::pb::GrowthDomain::Travel => "旅行",
+        bookway_bbs_link_api::pb::GrowthDomain::Leisure => "休闲",
     }
 }

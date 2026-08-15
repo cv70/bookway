@@ -3,13 +3,16 @@ pub(crate) mod conf;
 pub(crate) mod datasource;
 pub(crate) mod domain;
 
+use bookway_media_api::pb::media_client::MediaClient;
 use conf::Config;
 use domain::Domain;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("bbs-link");
-    let domain = Domain::new(Config::from_env()?).await?;
+    let config = Config::from_env()?;
+    let media = MediaClient::connect(config.media_grpc_url.clone()).await?;
+    let domain = Domain::new(config, Some(media)).await?;
     tokio::try_join!(api::serve_http(domain.clone()), async {
         api::serve_grpc(domain)
             .await

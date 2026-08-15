@@ -1,0 +1,9 @@
+name: bookway-ad-recall
+owner: commercial-advertising
+kind: grpc-service
+port: 8098
+healthcheck: grpc
+dependencies:
+  - bookway-ad-center
+contracts:
+  - src/api/pb/server.proto

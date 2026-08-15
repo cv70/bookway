@@ -1,13 +1,10 @@
+use crate::api::{ApiResponse, ErrorResponse, HealthResponse, pb};
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-};
-use bookway_api::{
-    ApiResponse, ContentDto, CreateContentRequest, ErrorResponse, HealthResponse,
-    UpdateContentRequest,
 };
 use tower_http::trace::TraceLayer;
 
@@ -48,23 +45,21 @@ async fn health() -> Json<HealthResponse> {
 async fn get_public_content(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<ContentDto>>, HttpError> {
+) -> Result<Json<ApiResponse<pb::Content>>, HttpError> {
     Ok(Json(ApiResponse::new(state.domain.get_public(&id).await?)))
 }
 
 async fn create_content(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateContentRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<ContentDto>>), HttpError> {
-    let key = headers
+    Json(mut request): Json<pb::CreateRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<pb::Content>>), HttpError> {
+    request.user_id = user_id(&headers);
+    request.idempotency_key = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let content = state
-        .domain
-        .create(&user_id(&headers), request, key)
-        .await?;
+    let content = state.domain.create(request).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::new(content))))
 }
 
@@ -72,23 +67,30 @@ async fn update_content(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(request): Json<UpdateContentRequest>,
-) -> Result<Json<ApiResponse<ContentDto>>, HttpError> {
-    Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .update(&user_id(&headers), &id, request)
-            .await?,
-    )))
+    Json(mut request): Json<pb::UpdateRequest>,
+) -> Result<Json<ApiResponse<pb::Content>>, HttpError> {
+    request.user_id = user_id(&headers);
+    request.id = id;
+    Ok(Json(ApiResponse::new(state.domain.update(request).await?)))
 }
 
 async fn publish_content(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<ContentDto>>, HttpError> {
+) -> Result<Json<ApiResponse<pb::Content>>, HttpError> {
     Ok(Json(ApiResponse::new(
-        state.domain.publish(&user_id(&headers), &id).await?,
+        state
+            .domain
+            .publish(pb::PublishRequest {
+                user_id: user_id(&headers),
+                id,
+                idempotency_key: headers
+                    .get("idempotency-key")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
+            })
+            .await?,
     )))
 }
 
@@ -123,12 +125,14 @@ impl IntoResponse for HttpError {
             ContentError::Repository(
                 crate::datasource::RepositoryError::Database(_)
                 | crate::datasource::RepositoryError::Serialization(_)
-                | crate::datasource::RepositoryError::InvalidTimestamp(_),
+                | crate::datasource::RepositoryError::InvalidTimestamp(_)
+                | crate::datasource::RepositoryError::InvalidContent(_),
             ) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
             ContentError::Repository(crate::datasource::RepositoryError::VersionConflict) => {
                 (StatusCode::CONFLICT, "version_conflict")
             }
             ContentError::Audit(_) => (StatusCode::BAD_GATEWAY, "audit_unavailable"),
+            ContentError::Media(_) => (StatusCode::BAD_GATEWAY, "media_unavailable"),
         };
         (status, Json(ErrorResponse::new(code, self.0.to_string()))).into_response()
     }

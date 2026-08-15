@@ -1,0 +1,8 @@
+syntax = "proto3";
+package bookway.ad.main;
+import "ad-center/api/src/pb/server.proto";
+import "ad-rank/api/src/pb/server.proto";
+message DecisionRequest { string user_id = 1; string placement = 2; optional string domain = 3; map<string, string> context = 4; optional uint32 limit = 5; }
+message AdDecision { string request_id = 1; string campaign_id = 2; string placement = 3; string title = 4; string body = 5; string image_url = 6; string landing_url = 7; double score = 8; string model_version = 9; }
+message DecisionResponse { string request_id = 1; repeated AdDecision items = 2; bool degraded = 3; }
+service AdMain { rpc Decide(DecisionRequest) returns (DecisionResponse); rpc ReportEvent(bookway.ad.center.RecordEventRequest) returns (bookway.ad.center.EventReceipt); }

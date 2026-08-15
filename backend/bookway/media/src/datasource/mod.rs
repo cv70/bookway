@@ -5,7 +5,7 @@ use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use super::api::MediaResponse;
+use super::api::pb;
 
 #[derive(Clone)]
 pub(crate) struct NewMedia {
@@ -28,20 +28,27 @@ pub(crate) enum RepositoryError {
 
 #[async_trait]
 pub(crate) trait MediaRepository: Send + Sync {
-    async fn create(&self, media: NewMedia) -> Result<MediaResponse, RepositoryError>;
-    async fn pending(&self, id: &str, owner_id: &str) -> Result<MediaResponse, RepositoryError>;
-    async fn get(&self, id: &str, owner_id: &str) -> Result<MediaResponse, RepositoryError>;
-    async fn mark_ready(&self, id: &str) -> Result<MediaResponse, RepositoryError>;
+    async fn create(&self, media: NewMedia) -> Result<pb::MediaResource, RepositoryError>;
+    async fn pending(&self, id: &str, owner_id: &str)
+    -> Result<pb::MediaResource, RepositoryError>;
+    async fn owned(&self, id: &str, owner_id: &str) -> Result<pb::MediaResource, RepositoryError>;
+    async fn get(&self, id: &str, owner_id: &str) -> Result<pb::MediaResource, RepositoryError>;
+    async fn mark_processing(&self, id: &str) -> Result<pb::MediaResource, RepositoryError>;
+    async fn owned_ready_batch(
+        &self,
+        owner_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<pb::MediaResource>, RepositoryError>;
 }
 pub(crate) type SharedMediaRepository = Arc<dyn MediaRepository>;
 
 #[derive(Default)]
 pub(crate) struct MemoryMediaRepository {
-    assets: RwLock<HashMap<String, (String, MediaResponse)>>,
+    assets: RwLock<HashMap<String, (String, pb::MediaResource)>>,
 }
 #[async_trait]
 impl MediaRepository for MemoryMediaRepository {
-    async fn create(&self, media: NewMedia) -> Result<MediaResponse, RepositoryError> {
+    async fn create(&self, media: NewMedia) -> Result<pb::MediaResource, RepositoryError> {
         let response = to_response(&media, "pending");
         self.assets
             .write()
@@ -49,7 +56,11 @@ impl MediaRepository for MemoryMediaRepository {
             .insert(media.id, (media.owner_id, response.clone()));
         Ok(response)
     }
-    async fn pending(&self, id: &str, owner_id: &str) -> Result<MediaResponse, RepositoryError> {
+    async fn pending(
+        &self,
+        id: &str,
+        owner_id: &str,
+    ) -> Result<pb::MediaResource, RepositoryError> {
         self.assets
             .read()
             .await
@@ -58,7 +69,16 @@ impl MediaRepository for MemoryMediaRepository {
             .map(|(_, media)| media.clone())
             .ok_or(RepositoryError::NotFound)
     }
-    async fn get(&self, id: &str, owner_id: &str) -> Result<MediaResponse, RepositoryError> {
+    async fn owned(&self, id: &str, owner_id: &str) -> Result<pb::MediaResource, RepositoryError> {
+        self.assets
+            .read()
+            .await
+            .get(id)
+            .filter(|(owner, _)| owner == owner_id)
+            .map(|(_, media)| media.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+    async fn get(&self, id: &str, owner_id: &str) -> Result<pb::MediaResource, RepositoryError> {
         self.assets
             .read()
             .await
@@ -67,11 +87,30 @@ impl MediaRepository for MemoryMediaRepository {
             .map(|(_, media)| media.clone())
             .ok_or(RepositoryError::NotFound)
     }
-    async fn mark_ready(&self, id: &str) -> Result<MediaResponse, RepositoryError> {
+    async fn mark_processing(&self, id: &str) -> Result<pb::MediaResource, RepositoryError> {
         let mut assets = self.assets.write().await;
         let (_, media) = assets.get_mut(id).ok_or(RepositoryError::NotFound)?;
+        // Memory storage has no independently running processor. It is the
+        // deterministic local executor for the same already-validated asset.
         media.status = "ready".to_string();
         Ok(media.clone())
+    }
+
+    async fn owned_ready_batch(
+        &self,
+        owner_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<pb::MediaResource>, RepositoryError> {
+        let assets = self.assets.read().await;
+        ids.iter()
+            .map(|id| {
+                assets
+                    .get(id)
+                    .filter(|(owner, media)| owner == owner_id && media.status == "ready")
+                    .map(|(_, media)| media.clone())
+                    .ok_or(RepositoryError::NotFound)
+            })
+            .collect()
     }
 }
 
@@ -85,26 +124,90 @@ impl PostgresMediaRepository {
 }
 #[async_trait]
 impl MediaRepository for PostgresMediaRepository {
-    async fn create(&self, media: NewMedia) -> Result<MediaResponse, RepositoryError> {
+    async fn create(&self, media: NewMedia) -> Result<pb::MediaResource, RepositoryError> {
         sqlx::query("INSERT INTO media_assets (id,owner_id,object_key,bucket,mime_type,size_bytes,cdn_url) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(&media.id).bind(&media.owner_id).bind(&media.object_key).bind(&media.bucket).bind(&media.mime_type).bind(i64::try_from(media.size_bytes).unwrap_or(i64::MAX)).bind(&media.cdn_url).execute(&self.pool).await.map_err(RepositoryError::Database)?;
         Ok(to_response(&media, "pending"))
     }
-    async fn pending(&self, id: &str, owner_id: &str) -> Result<MediaResponse, RepositoryError> {
+    async fn pending(
+        &self,
+        id: &str,
+        owner_id: &str,
+    ) -> Result<pb::MediaResource, RepositoryError> {
         load(&self.pool, id, Some(owner_id), Some("pending")).await
     }
-    async fn get(&self, id: &str, owner_id: &str) -> Result<MediaResponse, RepositoryError> {
+    async fn owned(&self, id: &str, owner_id: &str) -> Result<pb::MediaResource, RepositoryError> {
+        load(&self.pool, id, Some(owner_id), None).await
+    }
+    async fn get(&self, id: &str, owner_id: &str) -> Result<pb::MediaResource, RepositoryError> {
         load_visible(&self.pool, id, owner_id).await
     }
-    async fn mark_ready(&self, id: &str) -> Result<MediaResponse, RepositoryError> {
-        let row = sqlx::query_as::<_, (String, String, i64, String)>("UPDATE media_assets SET status='ready',updated_at=now() WHERE id=$1 RETURNING object_key,mime_type,size_bytes,cdn_url").bind(id).fetch_optional(&self.pool).await.map_err(RepositoryError::Database)?.ok_or(RepositoryError::NotFound)?;
-        Ok(MediaResponse {
-            id: id.to_string(),
-            object_key: row.0,
-            mime_type: row.1,
-            size_bytes: row.2.max(0) as u64,
-            status: "ready".to_string(),
-            cdn_url: row.3,
-        })
+    async fn mark_processing(&self, id: &str) -> Result<pb::MediaResource, RepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(RepositoryError::Database)?;
+        let row = sqlx::query_as::<_, (String, String, i64, String, Option<i32>, Option<i32>, Option<i64>)>(
+            "UPDATE media_assets SET status='processing',updated_at=now() WHERE id=$1 AND status='pending' RETURNING object_key,mime_type,size_bytes,cdn_url,width,height,duration_ms",
+        )
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(RepositoryError::Database)?;
+        let Some(row) = row else {
+            transaction
+                .commit()
+                .await
+                .map_err(RepositoryError::Database)?;
+            return load(&self.pool, id, None, None).await;
+        };
+        sqlx::query(
+            "INSERT INTO media_processing_jobs (asset_id) VALUES ($1) ON CONFLICT (asset_id) DO UPDATE SET status='pending',available_at=now(),locked_at=NULL,lease_id=NULL,last_error=NULL,updated_at=now()",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(RepositoryError::Database)?;
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::Database)?;
+        Ok(media_response(id, row, "processing"))
+    }
+
+    async fn owned_ready_batch(
+        &self,
+        owner_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<pb::MediaResource>, RepositoryError> {
+        let rows = sqlx::query_as::<_, (String, String, String, i64, String, Option<i32>, Option<i32>, Option<i64>)>(
+            "SELECT id,object_key,mime_type,size_bytes,cdn_url,width,height,duration_ms FROM media_assets WHERE owner_id=$1 AND status='ready' AND id = ANY($2) AND status <> 'deleted'",
+        )
+        .bind(owner_id)
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::Database)?;
+        let by_id = rows
+            .into_iter()
+            .map(
+                |(id, object_key, mime_type, size_bytes, cdn_url, width, height, duration_ms)| {
+                    (
+                        id.clone(),
+                        pb::MediaResource {
+                            id,
+                            object_key,
+                            mime_type,
+                            size_bytes: size_bytes.max(0) as u64,
+                            status: "ready".to_string(),
+                            cdn_url,
+                            width: width.unwrap_or_default().max(0) as u32,
+                            height: height.unwrap_or_default().max(0) as u32,
+                            duration_ms: duration_ms.map(|value| value.max(0) as u64),
+                        },
+                    )
+                },
+            )
+            .collect::<HashMap<_, _>>();
+        ids.iter()
+            .map(|id| by_id.get(id).cloned().ok_or(RepositoryError::NotFound))
+            .collect()
     }
 }
 
@@ -113,15 +216,18 @@ async fn load(
     id: &str,
     owner: Option<&str>,
     status: Option<&str>,
-) -> Result<MediaResponse, RepositoryError> {
-    let row = sqlx::query_as::<_, (String, String, i64, String, String)>("SELECT object_key,mime_type,size_bytes,status,cdn_url FROM media_assets WHERE id=$1 AND ($2::text IS NULL OR owner_id=$2) AND ($3::text IS NULL OR status=$3) AND status <> 'deleted'").bind(id).bind(owner).bind(status).fetch_optional(pool).await.map_err(RepositoryError::Database)?.ok_or(RepositoryError::NotFound)?;
-    Ok(MediaResponse {
+) -> Result<pb::MediaResource, RepositoryError> {
+    let row = sqlx::query_as::<_, (String, String, i64, String, String, Option<i32>, Option<i32>, Option<i64>)>("SELECT object_key,mime_type,size_bytes,status,cdn_url,width,height,duration_ms FROM media_assets WHERE id=$1 AND ($2::text IS NULL OR owner_id=$2) AND ($3::text IS NULL OR status=$3) AND status <> 'deleted'").bind(id).bind(owner).bind(status).fetch_optional(pool).await.map_err(RepositoryError::Database)?.ok_or(RepositoryError::NotFound)?;
+    Ok(pb::MediaResource {
         id: id.to_string(),
         object_key: row.0,
         mime_type: row.1,
         size_bytes: row.2.max(0) as u64,
         status: row.3,
         cdn_url: row.4,
+        width: row.5.unwrap_or_default().max(0) as u32,
+        height: row.6.unwrap_or_default().max(0) as u32,
+        duration_ms: row.7.map(|value| value.max(0) as u64),
     })
 }
 
@@ -129,9 +235,21 @@ async fn load_visible(
     pool: &sqlx::PgPool,
     id: &str,
     owner_id: &str,
-) -> Result<MediaResponse, RepositoryError> {
-    let row = sqlx::query_as::<_, (String, String, i64, String, String)>(
-        "SELECT object_key,mime_type,size_bytes,status,cdn_url FROM media_assets WHERE id=$1 AND (owner_id=$2 OR status='ready') AND status <> 'deleted'",
+) -> Result<pb::MediaResource, RepositoryError> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            i64,
+            String,
+            String,
+            Option<i32>,
+            Option<i32>,
+            Option<i64>,
+        ),
+    >(
+        "SELECT object_key,mime_type,size_bytes,status,cdn_url,width,height,duration_ms FROM media_assets WHERE id=$1 AND (owner_id=$2 OR status='ready') AND status <> 'deleted'",
     )
     .bind(id)
     .bind(owner_id)
@@ -139,23 +257,110 @@ async fn load_visible(
     .await
     .map_err(RepositoryError::Database)?
     .ok_or(RepositoryError::NotFound)?;
-    Ok(MediaResponse {
+    Ok(pb::MediaResource {
         id: id.to_string(),
         object_key: row.0,
         mime_type: row.1,
         size_bytes: row.2.max(0) as u64,
         status: row.3,
         cdn_url: row.4,
+        width: row.5.unwrap_or_default().max(0) as u32,
+        height: row.6.unwrap_or_default().max(0) as u32,
+        duration_ms: row.7.map(|value| value.max(0) as u64),
     })
 }
-fn to_response(media: &NewMedia, status: &str) -> MediaResponse {
-    MediaResponse {
+fn to_response(media: &NewMedia, status: &str) -> pb::MediaResource {
+    pb::MediaResource {
         id: media.id.clone(),
         object_key: media.object_key.clone(),
         mime_type: media.mime_type.clone(),
         size_bytes: media.size_bytes,
         status: status.to_string(),
         cdn_url: media.cdn_url.clone(),
+        width: 0,
+        height: 0,
+        duration_ms: None,
+    }
+}
+
+fn media_response(
+    id: &str,
+    (object_key, mime_type, size_bytes, cdn_url, width, height, duration_ms): (
+        String,
+        String,
+        i64,
+        String,
+        Option<i32>,
+        Option<i32>,
+        Option<i64>,
+    ),
+    status: &str,
+) -> pb::MediaResource {
+    pb::MediaResource {
+        id: id.to_string(),
+        object_key,
+        mime_type,
+        size_bytes: size_bytes.max(0) as u64,
+        status: status.to_string(),
+        cdn_url,
+        width: width.unwrap_or_default().max(0) as u32,
+        height: height.unwrap_or_default().max(0) as u32,
+        duration_ms: duration_ms.map(|value| value.max(0) as u64),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MediaRepository, MemoryMediaRepository, NewMedia, RepositoryError};
+
+    fn media(id: &str, owner_id: &str) -> NewMedia {
+        NewMedia {
+            id: id.to_string(),
+            owner_id: owner_id.to_string(),
+            object_key: format!("{owner_id}/asset"),
+            bucket: "bookway-media".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            size_bytes: 128,
+            cdn_url: "https://cdn.example/asset".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_ready_batch_never_leaks_another_users_asset() {
+        let repository = MemoryMediaRepository::default();
+        repository
+            .create(media("0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b", "author-a"))
+            .await
+            .expect("create asset");
+        repository
+            .mark_processing("0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b")
+            .await
+            .expect("local processing completes");
+        let repeated_completion = repository
+            .mark_processing("0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b")
+            .await
+            .expect("repeated completion is safe in local storage");
+        assert_eq!(repeated_completion.status, "ready");
+
+        let owned = repository
+            .owned_ready_batch(
+                "author-a",
+                &["0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b".to_string()],
+            )
+            .await
+            .expect("owner can attach their ready asset");
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].status, "ready");
+
+        assert!(matches!(
+            repository
+                .owned_ready_batch(
+                    "author-b",
+                    &["0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b".to_string()],
+                )
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
     }
 }
 

@@ -1,0 +1,90 @@
+syntax = "proto3";
+package bookway.mall;
+
+enum MallProductStatus {
+  MALL_PRODUCT_STATUS_DRAFT = 0;
+  MALL_PRODUCT_STATUS_ACTIVE = 1;
+  MALL_PRODUCT_STATUS_ARCHIVED = 2;
+}
+
+message MallSku {
+  string id = 1;
+  string product_id = 2;
+  string title = 3;
+  int64 price_cents = 4;
+  string currency = 5;
+  map<string, string> attributes = 6;
+  bool saleable = 7;
+}
+
+message MallProduct {
+  string id = 1;
+  string title = 2;
+  string description = 3;
+  string image_url = 4;
+  MallProductStatus status = 5;
+  repeated MallSku skus = 6;
+  string created_at = 7;
+  string updated_at = 8;
+}
+
+message CreateSkuRequest {
+  string title = 1;
+  int64 price_cents = 2;
+  string currency = 3;
+  map<string, string> attributes = 4;
+  bool saleable = 5;
+}
+
+message CreateProductRequest {
+  string title = 1;
+  string description = 2;
+  string image_url = 3;
+  MallProductStatus status = 4;
+  repeated CreateSkuRequest skus = 5;
+}
+
+message Attributes {
+  map<string, string> values = 1;
+}
+
+message UpdateSkuRequest {
+  string sku_id = 1;
+  optional string title = 2;
+  optional int64 price_cents = 3;
+  optional string currency = 4;
+  optional Attributes attributes = 5;
+  optional bool saleable = 6;
+}
+
+message UpdateProductRequest {
+  string product_id = 1;
+  optional string title = 2;
+  optional string description = 3;
+  optional string image_url = 4;
+  optional MallProductStatus status = 5;
+  repeated UpdateSkuRequest sku_updates = 6;
+}
+
+message ProductQueryRequest {
+  optional string cursor = 1;
+  optional uint32 limit = 2;
+  optional string query = 3;
+}
+
+message ProductPage {
+  repeated MallProduct items = 1;
+  optional string next_cursor = 2;
+}
+
+message IdRequest { string id = 1; }
+message SkuIdsRequest { repeated string ids = 1; }
+message SkuListResponse { repeated MallSku items = 1; }
+
+service Mall {
+  rpc CreateProduct(CreateProductRequest) returns (MallProduct);
+  rpc UpdateProduct(UpdateProductRequest) returns (MallProduct);
+  rpc Products(ProductQueryRequest) returns (ProductPage);
+  rpc Product(IdRequest) returns (MallProduct);
+  rpc Skus(SkuIdsRequest) returns (SkuListResponse);
+}

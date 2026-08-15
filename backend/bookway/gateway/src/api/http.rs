@@ -1,3 +1,4 @@
+use crate::api::{ApiResponse, ErrorResponse, HealthResponse, rest};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -5,29 +6,25 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
-use bookway_api::{ApiResponse, ErrorResponse, HealthResponse};
 use serde::Deserialize;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use super::{
-    ActionDto, CommentDto, CommentPageDto, CommentQueryRequest, CompanionBriefDto,
-    ContentAppealDto, ContentAppealPageDto, ContentAppealQueryRequest, ContentDto, ContentPageDto,
-    ContentQueryRequest, ContentReportDto, ContentReportPageDto, ContentReportQueryRequest,
-    CreateActionRequest, CreateCommentRequest, CreateContentAppealRequest,
-    CreateContentReportRequest, CreateContentRequest, CreateGrowthEntryRequest,
-    CreateJourneyRequest, CreateKnowledgeResourceRequest, FeedDto, FeedQueryRequest, FollowRequest,
-    GrowthEntryDto, JourneyDetailDto, JourneyDto, KnowledgeQueryRequest, KnowledgeResourceDto,
-    MediaDto, MediaUploadRequest, MediaUploadResponse, NotificationPageDto,
-    NotificationQueryRequest, PushDeviceDto, ReactionDto, ReactionRequest,
-    RegisterPushDeviceRequest, ReminderPreferencesDto, ReviewContentAppealRequest,
-    ReviewContentReportRequest, RouteJoinResultDto, RouteParticipationDto,
-    RouteParticipationStateDto, SearchQueryRequest, SearchResponseDto,
-    SetRouteParticipationRequest, SocialContextDto, SuggestionResponseDto, TodayDto,
-    UpdateActionRequest, UpdateContentRequest, UpdateJourneyRequest,
-    UpdateKnowledgeResourceRequest, UpdateReminderPreferencesRequest, UserEventBatchRequest,
-    UserEventIngestResponse, UserNotificationDto, WeeklyReviewDto,
-};
 use crate::{datasource::UpstreamError, domain::Domain};
+use bookway_account_api::pb as account_pb;
+use bookway_ad_center_api::pb as ad_center_pb;
+use bookway_ad_main_api::pb as ad_main_pb;
+use bookway_bbs_api::pb as bbs_pb;
+use bookway_bbs_creator_api::pb as creator_pb;
+use bookway_bbs_link_api::pb as bbs_link_pb;
+use bookway_bbs_message_api::pb as message_pb;
+use bookway_comment_api::pb as comment_pb;
+use bookway_content_audit_api::pb as audit_pb;
+use bookway_feedback_api::pb as feedback_pb;
+use bookway_growth_api::pb as growth_pb;
+use bookway_mall_api::pb as mall_pb;
+use bookway_mall_order_api::pb as mall_order_pb;
+use bookway_media_api::pb as media_pb;
+use bookway_user_event_api::pb as user_event_pb;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -58,18 +55,24 @@ struct ScheduleQuery {
 #[derive(Debug, Default, Deserialize)]
 struct OwnContentQuery {
     cursor: Option<String>,
-    limit: Option<usize>,
-    status: Option<bookway_api::ContentStatusDto>,
+    limit: Option<u32>,
+    status: Option<rest::ContentStatus>,
     strategy: Option<String>,
-    content_type: Option<bookway_api::ContentTypeDto>,
-    domain: Option<bookway_api::GrowthDomainDto>,
+    content_type: Option<rest::ContentType>,
+    domain: Option<rest::GrowthDomain>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct OwnAppealQuery {
-    status: Option<bookway_api::ContentAppealStatusDto>,
+struct PublicAuthorContentQuery {
     cursor: Option<String>,
-    limit: Option<usize>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AdQuery {
+    placement: String,
+    domain: Option<String>,
+    limit: Option<u32>,
 }
 
 pub(crate) fn router(state: AppState) -> Router {
@@ -89,11 +92,22 @@ pub(crate) fn router(state: AppState) -> Router {
             header::CONTENT_TYPE,
             header::HeaderName::from_static("idempotency-key"),
             header::HeaderName::from_static("x-user-id"),
+            header::HeaderName::from_static("x-user-roles"),
         ])
         .expose_headers([header::HeaderName::from_static("x-request-id")])
         .max_age(std::time::Duration::from_secs(600));
     Router::new()
         .route("/health", get(health))
+        .route(
+            "/v1/me/profile",
+            get(account_profile).patch(update_account_profile),
+        )
+        .route(
+            "/v1/me/creator-profile",
+            get(own_creator_profile).put(update_creator_profile),
+        )
+        .route("/v1/creators", get(list_creator_profiles))
+        .route("/v1/creators/{user_id}", get(get_creator_profile))
         .route("/v1/journeys", get(list_journeys).post(create_journey))
         .route(
             "/v1/journeys/{journey_id}",
@@ -114,34 +128,111 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/notifications/{notification_id}/read",
             patch(mark_notification_read),
         )
+        .route("/v1/messages", post(send_direct_message))
+        .route(
+            "/v1/messages/{message_id}/report",
+            post(report_direct_message),
+        )
+        .route("/v1/messages/conversations", get(list_direct_conversations))
+        .route(
+            "/v1/messages/conversations/{conversation_id}",
+            get(list_direct_messages),
+        )
+        .route(
+            "/v1/messages/conversations/{conversation_id}/read",
+            post(mark_direct_conversation_read),
+        )
+        .route(
+            "/v1/message-preferences",
+            get(get_direct_message_preferences).put(update_direct_message_preferences),
+        )
         .route("/v1/entries", get(list_entries).post(create_entry))
+        .route(
+            "/v1/entries/{entry_id}/publication/retry",
+            post(retry_entry_publication),
+        )
         .route("/v1/reviews/weekly", get(weekly_review))
         .route("/v1/companion", get(companion))
         .route("/v1/knowledge", get(list_knowledge).post(create_knowledge))
+        .route(
+            "/v1/knowledge/{resource_id}/journey",
+            post(start_knowledge_journey),
+        )
         .route("/v1/knowledge/{resource_id}", patch(update_knowledge))
         .route("/v1/feed", get(feed))
+        .route("/v1/ads", get(ad_decisions))
+        .route("/v1/ads/events", post(report_ad_event))
+        .route("/v1/mall/products", get(mall_products))
+        .route("/v1/mall/products/{product_id}", get(mall_product))
+        .route("/v1/orders", get(mall_orders).post(create_mall_order))
+        .route("/v1/orders/{order_id}", get(mall_order))
+        .route("/v1/orders/{order_id}/cancel", post(cancel_mall_order))
         .route("/v1/search", get(search))
         .route("/v1/search/suggestions", get(suggestions))
         .route("/v1/events", post(ingest_events))
+        .route("/v1/feedback", post(create_feedback))
+        .route("/v1/me/feedback", get(list_own_feedback))
+        .route("/v1/moderation/feedback", get(list_moderation_feedback))
+        .route(
+            "/v1/moderation/feedback/{feedback_id}",
+            patch(review_moderation_feedback),
+        )
         .route("/v1/media/upload-url", post(create_media_upload))
         .route("/v1/media/{id}", get(get_media))
         .route("/v1/media/{id}/complete", post(complete_media_upload))
         .route("/v1/posts", post(create_content))
         .route("/v1/posts/{id}", get(get_content).patch(update_content))
         .route("/v1/posts/{id}/publish", post(publish_content))
+        .route(
+            "/v1/posts/{id}/knowledge",
+            post(capture_content_as_knowledge),
+        )
         .route("/v1/posts/{id}/report", post(report_content))
         .route("/v1/posts/{id}/appeals", post(appeal_content))
         .route("/v1/me/posts", get(list_own_contents))
+        .route(
+            "/v1/users/{user_id}/posts",
+            get(list_public_author_contents),
+        )
         .route("/v1/me/appeals", get(list_own_appeals))
         .route("/v1/moderation/reports", get(list_moderation_reports))
         .route(
             "/v1/moderation/reports/{report_id}",
             patch(review_moderation_report),
         )
+        .route(
+            "/v1/moderation/message-reports",
+            get(list_moderation_direct_message_reports),
+        )
+        .route(
+            "/v1/moderation/message-reports/{report_id}",
+            patch(review_moderation_direct_message_report),
+        )
+        .route(
+            "/v1/moderation/comment-reports",
+            get(list_moderation_comment_reports),
+        )
+        .route(
+            "/v1/moderation/comment-reports/{report_id}",
+            patch(review_moderation_comment_report),
+        )
+        .route(
+            "/v1/moderation/comment-appeals",
+            get(list_moderation_comment_appeals),
+        )
+        .route(
+            "/v1/moderation/comment-appeals/{appeal_id}",
+            patch(review_moderation_comment_appeal),
+        )
         .route("/v1/moderation/appeals", get(list_moderation_appeals))
         .route(
             "/v1/moderation/appeals/{appeal_id}",
             patch(review_moderation_appeal),
+        )
+        .route("/v1/moderation/comments", get(list_moderation_comments))
+        .route(
+            "/v1/moderation/comments/{comment_id}",
+            patch(review_moderation_comment),
         )
         .route("/v1/posts/{post_id}/reactions", put(set_reaction))
         .route(
@@ -152,7 +243,14 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/posts/{post_id}/comments/{comment_id}",
             delete(delete_comment),
         )
+        .route(
+            "/v1/posts/{post_id}/comments/{comment_id}/report",
+            post(report_comment),
+        )
+        .route("/v1/comments/{comment_id}/appeals", post(appeal_comment))
+        .route("/v1/me/comment-appeals", get(list_own_comment_appeals))
         .route("/v1/users/{user_id}/follow", put(set_follow))
+        .route("/v1/users/{user_id}/relationship", put(set_relationship))
         .route("/v1/social/context", get(social_context))
         .route("/v1/route-participations", get(list_route_participations))
         .route(
@@ -173,37 +271,252 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
+async fn account_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<account_pb::AccountProfile>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .account_profile(account_pb::ProfileRequest {
+                user_id: user_id(&headers),
+            })
+            .await?,
+    )))
+}
+
+async fn update_account_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<rest::UpdateAccountProfileRequest>,
+) -> Result<Json<ApiResponse<account_pb::AccountProfile>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .update_account_profile(request.into_pb(user_id(&headers)))
+            .await?,
+    )))
+}
+
+async fn own_creator_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<rest::CreatorProfile>>, HttpError> {
+    let profile = state
+        .domain
+        .creator_profile(creator_pb::CreatorProfileRequest {
+            user_id: user_id(&headers),
+        })
+        .await?;
+    Ok(Json(ApiResponse::new(
+        profile.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn update_creator_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<rest::UpdateCreatorProfileRequest>,
+) -> Result<Json<ApiResponse<rest::CreatorProfile>>, HttpError> {
+    let profile = state
+        .domain
+        .update_creator_profile(request.into_pb(user_id(&headers)))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        profile.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn list_creator_profiles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<rest::CreatorProfileQuery>,
+) -> Result<Json<ApiResponse<rest::CreatorProfilePage>>, HttpError> {
+    let profiles = state
+        .domain
+        .public_creator_profiles(&user_id(&headers), query.into_pb())
+        .await?;
+    Ok(Json(ApiResponse::new(
+        profiles.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn get_creator_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(creator_user_id): Path<String>,
+) -> Result<Json<ApiResponse<rest::CreatorProfile>>, HttpError> {
+    let profile = state
+        .domain
+        .public_creator_profile(
+            &user_id(&headers),
+            creator_pb::CreatorProfileRequest {
+                user_id: creator_user_id,
+            },
+        )
+        .await?;
+    Ok(Json(ApiResponse::new(
+        profile.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn send_direct_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<rest::SendDirectMessageRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::DirectMessage>>), HttpError> {
+    let request = request
+        .into_pb(user_id(&headers), idempotency_key(&headers))
+        .map_err(HttpError::InvalidRequest)?;
+    let message = state.domain.send_direct_message(request).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            message.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
+}
+
+async fn report_direct_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+    Json(request): Json<rest::CreateDirectMessageReportRequest>,
+) -> Result<
+    (
+        StatusCode,
+        Json<ApiResponse<rest::DirectMessageReportReceipt>>,
+    ),
+    HttpError,
+> {
+    let report = state
+        .domain
+        .report_direct_message(
+            request
+                .into_pb(user_id(&headers), message_id, idempotency_key(&headers))
+                .map_err(HttpError::InvalidRequest)?,
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            report.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
+}
+
+async fn list_direct_conversations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<rest::DirectConversationQuery>,
+) -> Result<Json<ApiResponse<rest::DirectConversationPage>>, HttpError> {
+    let page = state
+        .domain
+        .direct_conversations(query.into_pb(user_id(&headers)))
+        .await?;
+    Ok(Json(ApiResponse::new(page.into())))
+}
+
+async fn list_direct_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<String>,
+    Query(query): Query<rest::DirectMessageQuery>,
+) -> Result<Json<ApiResponse<rest::DirectMessagePage>>, HttpError> {
+    let page = state
+        .domain
+        .direct_messages(query.into_pb(user_id(&headers), conversation_id))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        page.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn mark_direct_conversation_read(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<String>,
+    request: Option<Json<rest::MarkConversationReadRequest>>,
+) -> Result<Json<ApiResponse<rest::MarkConversationReadResponse>>, HttpError> {
+    let request = request
+        .map(|request| request.0)
+        .unwrap_or_default()
+        .into_pb(user_id(&headers), conversation_id);
+    let response = state.domain.mark_direct_conversation_read(request).await?;
+    Ok(Json(ApiResponse::new(response.into())))
+}
+
+async fn get_direct_message_preferences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<rest::DirectMessagePreferences>>, HttpError> {
+    let preferences = state
+        .domain
+        .direct_message_preferences(message_pb::UserRequest {
+            user_id: user_id(&headers),
+        })
+        .await?;
+    Ok(Json(ApiResponse::new(preferences.into())))
+}
+
+async fn update_direct_message_preferences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<rest::UpdateDirectMessagePreferencesRequest>,
+) -> Result<Json<ApiResponse<rest::DirectMessagePreferences>>, HttpError> {
+    let preferences = state
+        .domain
+        .update_direct_message_preferences(request.into_pb(user_id(&headers)))
+        .await?;
+    Ok(Json(ApiResponse::new(preferences.into())))
+}
+
 async fn list_journeys(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<Vec<JourneyDto>>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::JourneyList>>, HttpError> {
+    let journeys = state
+        .domain
+        .list_journeys(growth_pb::UserRequest {
+            user_id: user_id(&headers),
+        })
+        .await?;
     Ok(Json(ApiResponse::new(
-        state.domain.list_journeys(&user_id(&headers)).await?,
+        journeys.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn create_journey(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateJourneyRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<JourneyDto>>), HttpError> {
-    let journey = state
-        .domain
-        .create_journey(&user_id(&headers), request)
-        .await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::new(journey))))
+    Json(request): Json<rest::CreateJourneyRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::Journey>>), HttpError> {
+    let request = request
+        .into_pb(user_id(&headers), idempotency_key(&headers))
+        .map_err(HttpError::InvalidRequest)?;
+    let journey = state.domain.create_journey(request).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            journey.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
 }
 
 async fn get_journey(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(journey_id): Path<String>,
-) -> Result<Json<ApiResponse<JourneyDetailDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::JourneyDetail>>, HttpError> {
+    let detail = state
+        .domain
+        .get_journey(growth_pb::JourneyRequest {
+            user_id: user_id(&headers),
+            journey_id,
+        })
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .get_journey(&user_id(&headers), &journey_id)
-            .await?,
+        detail.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -211,13 +524,14 @@ async fn update_journey(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(journey_id): Path<String>,
-    Json(request): Json<UpdateJourneyRequest>,
-) -> Result<Json<ApiResponse<JourneyDto>>, HttpError> {
+    Json(request): Json<rest::UpdateJourneyRequest>,
+) -> Result<Json<ApiResponse<rest::Journey>>, HttpError> {
+    let journey = state
+        .domain
+        .update_journey(request.into_pb(user_id(&headers), journey_id))
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .update_journey(&user_id(&headers), &journey_id, request)
-            .await?,
+        journey.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -225,30 +539,35 @@ async fn create_action(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(journey_id): Path<String>,
-    Json(mut request): Json<CreateActionRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<ActionDto>>), HttpError> {
-    request.journey_id = journey_id;
-    let action = state
-        .domain
-        .create_action(&user_id(&headers), request)
-        .await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::new(action))))
+    Json(request): Json<rest::CreateActionRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::Action>>), HttpError> {
+    let request = request
+        .into_pb(user_id(&headers), journey_id, idempotency_key(&headers))
+        .map_err(HttpError::InvalidRequest)?;
+    let action = state.domain.create_action(request).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            action.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
 }
 
 async fn today(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<ScheduleQuery>,
-) -> Result<Json<ApiResponse<TodayDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::TodaySummary>>, HttpError> {
+    let today = state
+        .domain
+        .today(growth_pb::ScheduleRequest {
+            user_id: user_id(&headers),
+            local_date: query.date,
+            timezone: query.timezone,
+        })
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .today(
-                &user_id(&headers),
-                query.date.as_deref(),
-                query.timezone.as_deref(),
-            )
-            .await?,
+        today.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -256,12 +575,16 @@ async fn complete_action(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(action_id): Path<String>,
-) -> Result<Json<ApiResponse<ActionDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::Action>>, HttpError> {
+    let action = state
+        .domain
+        .complete_action(growth_pb::CompleteActionRequest {
+            user_id: user_id(&headers),
+            action_id,
+        })
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .complete_action(&user_id(&headers), &action_id)
-            .await?,
+        action.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -269,24 +592,27 @@ async fn update_action(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(action_id): Path<String>,
-    Json(request): Json<UpdateActionRequest>,
-) -> Result<Json<ApiResponse<ActionDto>>, HttpError> {
+    Json(request): Json<rest::UpdateActionRequest>,
+) -> Result<Json<ApiResponse<rest::Action>>, HttpError> {
+    let action = state
+        .domain
+        .update_action(request.into_pb(user_id(&headers), action_id))
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .update_action(&user_id(&headers), &action_id, request)
-            .await?,
+        action.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn reminder_preferences(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<ReminderPreferencesDto>>, HttpError> {
+) -> Result<Json<ApiResponse<growth_pb::ReminderPreference>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .reminder_preferences(&user_id(&headers))
+            .reminder_preferences(growth_pb::UserRequest {
+                user_id: user_id(&headers),
+            })
             .await?,
     )))
 }
@@ -294,12 +620,12 @@ async fn reminder_preferences(
 async fn update_reminder_preferences(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<UpdateReminderPreferencesRequest>,
-) -> Result<Json<ApiResponse<ReminderPreferencesDto>>, HttpError> {
+    Json(request): Json<rest::UpdateReminderPreferencesRequest>,
+) -> Result<Json<ApiResponse<growth_pb::ReminderPreference>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .update_reminder_preferences(&user_id(&headers), request)
+            .update_reminder_preferences(request.into_pb(user_id(&headers)))
             .await?,
     )))
 }
@@ -307,12 +633,10 @@ async fn update_reminder_preferences(
 async fn register_push_device(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<RegisterPushDeviceRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<PushDeviceDto>>), HttpError> {
-    let device = state
-        .domain
-        .register_push_device(&user_id(&headers), request)
-        .await?;
+    Json(mut request): Json<growth_pb::RegisterPushDeviceRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<growth_pb::PushDevice>>), HttpError> {
+    request.user_id = user_id(&headers);
+    let device = state.domain.register_push_device(request).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::new(device))))
 }
 
@@ -323,7 +647,10 @@ async fn revoke_push_device(
 ) -> Result<StatusCode, HttpError> {
     state
         .domain
-        .revoke_push_device(&user_id(&headers), &device_id)
+        .revoke_push_device(growth_pb::PushDeviceRequest {
+            user_id: user_id(&headers),
+            device_id,
+        })
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -331,13 +658,14 @@ async fn revoke_push_device(
 async fn list_notifications(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(request): Query<NotificationQueryRequest>,
-) -> Result<Json<ApiResponse<NotificationPageDto>>, HttpError> {
+    Query(query): Query<rest::NotificationQuery>,
+) -> Result<Json<ApiResponse<rest::NotificationPage>>, HttpError> {
+    let notifications = state
+        .domain
+        .list_notifications(query.into_pb(user_id(&headers)))
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .list_notifications(&user_id(&headers), request)
-            .await?,
+        notifications.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -345,42 +673,80 @@ async fn mark_notification_read(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(notification_id): Path<String>,
-) -> Result<Json<ApiResponse<UserNotificationDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::UserNotification>>, HttpError> {
+    let notification = state
+        .domain
+        .mark_notification_read(growth_pb::NotificationRequest {
+            user_id: user_id(&headers),
+            notification_id,
+        })
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .mark_notification_read(&user_id(&headers), &notification_id)
-            .await?,
+        notification.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn list_entries(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<Vec<GrowthEntryDto>>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::EntryList>>, HttpError> {
+    let entries = state
+        .domain
+        .list_entries(growth_pb::UserRequest {
+            user_id: user_id(&headers),
+        })
+        .await?;
     Ok(Json(ApiResponse::new(
-        state.domain.list_entries(&user_id(&headers)).await?,
+        entries.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn create_entry(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateGrowthEntryRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<GrowthEntryDto>>), HttpError> {
+    Json(request): Json<rest::CreateEntryRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::GrowthEntry>>), HttpError> {
     let entry = state
         .domain
-        .create_entry(&user_id(&headers), request)
+        .create_entry(request.into_pb(user_id(&headers), idempotency_key(&headers)))
         .await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::new(entry))))
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            entry.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
+}
+
+async fn retry_entry_publication(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(entry_id): Path<String>,
+) -> Result<Json<ApiResponse<rest::GrowthEntry>>, HttpError> {
+    let entry = state
+        .domain
+        .retry_entry_publication(growth_pb::RetryEntryPublicationRequest {
+            user_id: user_id(&headers),
+            entry_id,
+        })
+        .await?;
+    Ok(Json(ApiResponse::new(
+        entry.try_into().map_err(HttpError::Contract)?,
+    )))
 }
 
 async fn weekly_review(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<WeeklyReviewDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::WeeklyReviewSummary>>, HttpError> {
+    let review = state
+        .domain
+        .weekly_review(growth_pb::UserRequest {
+            user_id: user_id(&headers),
+        })
+        .await?;
     Ok(Json(ApiResponse::new(
-        state.domain.weekly_review(&user_id(&headers)).await?,
+        review.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -388,98 +754,310 @@ async fn companion(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<ScheduleQuery>,
-) -> Result<Json<ApiResponse<CompanionBriefDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::CompanionBrief>>, HttpError> {
+    let companion = state
+        .domain
+        .companion(growth_pb::ScheduleRequest {
+            user_id: user_id(&headers),
+            local_date: query.date,
+            timezone: query.timezone,
+        })
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .companion(
-                &user_id(&headers),
-                query.date.as_deref(),
-                query.timezone.as_deref(),
-            )
-            .await?,
+        companion.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn list_knowledge(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(request): Query<KnowledgeQueryRequest>,
-) -> Result<Json<ApiResponse<Vec<KnowledgeResourceDto>>>, HttpError> {
+    Query(query): Query<rest::KnowledgeQuery>,
+) -> Result<Json<ApiResponse<rest::KnowledgeList>>, HttpError> {
+    let resources = state
+        .domain
+        .list_knowledge(query.into_pb(user_id(&headers)))
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .list_knowledge(&user_id(&headers), request)
-            .await?,
+        resources.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn create_knowledge(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateKnowledgeResourceRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<KnowledgeResourceDto>>), HttpError> {
+    Json(request): Json<rest::CreateKnowledgeRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::KnowledgeResource>>), HttpError> {
     let resource = state
         .domain
-        .create_knowledge(&user_id(&headers), request, idempotency_key(&headers))
+        .create_knowledge(request.into_pb(user_id(&headers), idempotency_key(&headers)))
         .await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::new(resource))))
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            resource.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
 }
 
 async fn update_knowledge(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(resource_id): Path<String>,
-    Json(request): Json<UpdateKnowledgeResourceRequest>,
-) -> Result<Json<ApiResponse<KnowledgeResourceDto>>, HttpError> {
+    Json(request): Json<rest::UpdateKnowledgeRequest>,
+) -> Result<Json<ApiResponse<rest::KnowledgeResource>>, HttpError> {
+    let resource = state
+        .domain
+        .update_knowledge(request.into_pb(user_id(&headers), resource_id))
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .update_knowledge(&user_id(&headers), &resource_id, request)
-            .await?,
+        resource.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn start_knowledge_journey(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resource_id): Path<String>,
+    Json(request): Json<rest::StartKnowledgeJourneyRequest>,
+) -> Result<Json<ApiResponse<rest::KnowledgeJourney>>, HttpError> {
+    let journey = state
+        .domain
+        .start_knowledge_journey(
+            request
+                .into_pb(user_id(&headers), resource_id)
+                .map_err(HttpError::InvalidRequest)?,
+        )
+        .await?;
+    Ok(Json(ApiResponse::new(
+        journey.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn feed(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(mut request): Query<FeedQueryRequest>,
-) -> Result<Json<ApiResponse<FeedDto>>, HttpError> {
-    request.user_id = Some(user_id(&headers));
-    Ok(Json(ApiResponse::new(state.domain.feed(request).await?)))
+    Query(query): Query<rest::FeedQuery>,
+) -> Result<Json<ApiResponse<rest::FeedResponse>>, HttpError> {
+    let request = query
+        .into_pb(user_id(&headers))
+        .map_err(HttpError::InvalidRequest)?;
+    let response = state.domain.feed(request).await?;
+    Ok(Json(ApiResponse::new(
+        response.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn ad_decisions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AdQuery>,
+) -> Result<Json<ApiResponse<ad_main_pb::DecisionResponse>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .ad_decisions(ad_main_pb::DecisionRequest {
+                user_id: user_id(&headers),
+                placement: query.placement,
+                domain: query.domain,
+                context: Default::default(),
+                limit: query.limit,
+            })
+            .await?,
+    )))
+}
+
+async fn report_ad_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut request): Json<ad_center_pb::RecordEventRequest>,
+) -> Result<Json<ApiResponse<ad_center_pb::EventReceipt>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .report_ad_event({
+                request.user_id = user_id(&headers);
+                request
+            })
+            .await?,
+    )))
+}
+
+async fn mall_products(
+    State(state): State<AppState>,
+    Query(request): Query<mall_pb::ProductQueryRequest>,
+) -> Result<Json<ApiResponse<mall_pb::ProductPage>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state.domain.mall_products(request).await?,
+    )))
+}
+
+async fn mall_product(
+    State(state): State<AppState>,
+    Path(product_id): Path<String>,
+) -> Result<Json<ApiResponse<mall_pb::MallProduct>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .mall_product(mall_pb::IdRequest { id: product_id })
+            .await?,
+    )))
+}
+
+async fn create_mall_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut request): Json<mall_order_pb::CreateRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<mall_order_pb::Order>>), HttpError> {
+    request.user_id = user_id(&headers);
+    request.idempotency_key = idempotency_key(&headers).unwrap_or_default();
+    let order = state.domain.create_mall_order(request).await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::new(order))))
+}
+
+async fn mall_orders(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<mall_order_pb::OrderListResponse>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .mall_orders(mall_order_pb::UserRequest {
+                user_id: user_id(&headers),
+            })
+            .await?,
+    )))
+}
+
+async fn mall_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+) -> Result<Json<ApiResponse<mall_order_pb::Order>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .mall_order(mall_order_pb::OrderRequest {
+                user_id: user_id(&headers),
+                order_id,
+            })
+            .await?,
+    )))
+}
+
+async fn cancel_mall_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+) -> Result<Json<ApiResponse<mall_order_pb::Order>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .cancel_mall_order(mall_order_pb::OrderRequest {
+                user_id: user_id(&headers),
+                order_id,
+            })
+            .await?,
+    )))
 }
 
 async fn search(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(mut request): Query<SearchQueryRequest>,
-) -> Result<Json<ApiResponse<SearchResponseDto>>, HttpError> {
-    request.user_id = Some(user_id(&headers));
-    Ok(Json(ApiResponse::new(state.domain.search(request).await?)))
+    Query(query): Query<rest::SearchQuery>,
+) -> Result<Json<ApiResponse<rest::SearchResponse>>, HttpError> {
+    let response = state
+        .domain
+        .search(query.into_pb(user_id(&headers)))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        response.try_into().map_err(HttpError::Contract)?,
+    )))
 }
 
 async fn suggestions(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(request): Query<SuggestionQuery>,
-) -> Result<Json<ApiResponse<SuggestionResponseDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::SuggestionsResponse>>, HttpError> {
+    let response = state
+        .domain
+        .suggestions(user_id(&headers), request.q)
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .suggestions(&user_id(&headers), &request.q)
-            .await?,
+        response.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn ingest_events(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<UserEventBatchRequest>,
-) -> Result<Json<ApiResponse<UserEventIngestResponse>>, HttpError> {
+    Json(request): Json<rest::IngestEventsRequest>,
+) -> Result<Json<ApiResponse<user_event_pb::IngestResponse>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .ingest_events(&user_id(&headers), request)
+            .ingest_events(request.into_pb(user_id(&headers)))
+            .await?,
+    )))
+}
+
+async fn create_feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<rest::CreateFeedbackRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::FeedbackItem>>), HttpError> {
+    let feedback = state
+        .domain
+        .create_feedback(request.into_pb(user_id(&headers), idempotency_key(&headers)))
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            feedback.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
+}
+
+async fn list_own_feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<rest::FeedbackQuery>,
+) -> Result<Json<ApiResponse<rest::FeedbackList>>, HttpError> {
+    let feedback = state
+        .domain
+        .own_feedback(query.into_own_pb(user_id(&headers)))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        feedback.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn list_moderation_feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<feedback_pb::ListFeedbackRequest>,
+) -> Result<Json<ApiResponse<feedback_pb::FeedbackList>>, HttpError> {
+    let _ = moderator_id(&headers)?;
+    Ok(Json(ApiResponse::new(
+        state.domain.moderation_feedback(query).await?,
+    )))
+}
+
+async fn review_moderation_feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(feedback_id): Path<String>,
+    Json(mut request): Json<feedback_pb::ReviewFeedbackRequest>,
+) -> Result<Json<ApiResponse<feedback_pb::FeedbackItem>>, HttpError> {
+    let reviewer_id = moderator_id(&headers)?;
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .review_feedback({
+                request.reviewer_id = reviewer_id;
+                request.feedback_id = feedback_id;
+                request
+            })
             .await?,
     )))
 }
@@ -487,11 +1065,11 @@ async fn ingest_events(
 async fn create_media_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<MediaUploadRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<MediaUploadResponse>>), HttpError> {
+    Json(request): Json<rest::CreateMediaUploadRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<media_pb::UploadResponse>>), HttpError> {
     let media = state
         .domain
-        .create_media_upload(&user_id(&headers), request)
+        .create_media_upload(request.into_pb(user_id(&headers)))
         .await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::new(media))))
 }
@@ -500,11 +1078,14 @@ async fn complete_media_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<MediaDto>>, HttpError> {
+) -> Result<Json<ApiResponse<media_pb::MediaResource>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .complete_media_upload(&user_id(&headers), &id)
+            .complete_media_upload(media_pb::ResourceRequest {
+                user_id: user_id(&headers),
+                id,
+            })
             .await?,
     )))
 }
@@ -513,9 +1094,15 @@ async fn get_media(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<MediaDto>>, HttpError> {
+) -> Result<Json<ApiResponse<media_pb::MediaResource>>, HttpError> {
     Ok(Json(ApiResponse::new(
-        state.domain.get_media(&user_id(&headers), &id).await?,
+        state
+            .domain
+            .get_media(media_pb::ResourceRequest {
+                user_id: user_id(&headers),
+                id,
+            })
+            .await?,
     )))
 }
 
@@ -523,35 +1110,42 @@ async fn get_content(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<ContentDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::Content>>, HttpError> {
+    let content = state.domain.get_content(&user_id(&headers), &id).await?;
     Ok(Json(ApiResponse::new(
-        state.domain.get_content(&user_id(&headers), &id).await?,
+        content.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn create_content(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateContentRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<ContentDto>>), HttpError> {
+    Json(request): Json<rest::CreateContentRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::Content>>), HttpError> {
     let content = state
         .domain
-        .create_content(&user_id(&headers), request, idempotency_key(&headers))
+        .create_content(request.into_pb(user_id(&headers), idempotency_key(&headers)))
         .await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::new(content))))
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            content.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
 }
 
 async fn update_content(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(request): Json<UpdateContentRequest>,
-) -> Result<Json<ApiResponse<ContentDto>>, HttpError> {
+    Json(request): Json<rest::UpdateContentRequest>,
+) -> Result<Json<ApiResponse<rest::Content>>, HttpError> {
+    let content = state
+        .domain
+        .update_content(request.into_pb(user_id(&headers), id))
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .update_content(&user_id(&headers), &id, request)
-            .await?,
+        content.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -559,12 +1153,36 @@ async fn publish_content(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<ContentDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::Content>>, HttpError> {
+    let content = state
+        .domain
+        .publish_content(bbs_link_pb::PublishRequest {
+            user_id: user_id(&headers),
+            id,
+            idempotency_key: idempotency_key(&headers),
+        })
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .publish_content(&user_id(&headers), &id)
-            .await?,
+        content.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn capture_content_as_knowledge(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    request: Option<Json<rest::CaptureContentAsKnowledgeRequest>>,
+) -> Result<Json<ApiResponse<rest::KnowledgeResource>>, HttpError> {
+    let resource = state
+        .domain
+        .capture_content_as_knowledge(
+            user_id(&headers),
+            id,
+            request.and_then(|request| request.0.into_attribution()),
+        )
+        .await?;
+    Ok(Json(ApiResponse::new(
+        resource.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -572,80 +1190,99 @@ async fn report_content(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(request): Json<CreateContentReportRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<ContentReportDto>>), HttpError> {
+    Json(request): Json<rest::CreateReportRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::ContentReport>>), HttpError> {
     let report = state
         .domain
-        .report_content(&user_id(&headers), &id, request, idempotency_key(&headers))
+        .report_content(request.into_pb(user_id(&headers), id, idempotency_key(&headers)))
         .await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::new(report))))
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            report.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
 }
 
 async fn appeal_content(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(request): Json<CreateContentAppealRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<ContentAppealDto>>), HttpError> {
+    Json(request): Json<rest::CreateAppealRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::ContentAppeal>>), HttpError> {
     let appeal = state
         .domain
-        .appeal_content(&user_id(&headers), &id, request, idempotency_key(&headers))
+        .appeal_content(request.into_pb(user_id(&headers), id, idempotency_key(&headers)))
         .await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::new(appeal))))
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            appeal.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
 }
 
 async fn list_own_contents(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<OwnContentQuery>,
-) -> Result<Json<ApiResponse<ContentPageDto>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::ContentPage>>, HttpError> {
+    let page = state
+        .domain
+        .own_contents(
+            bbs_link_pb::ListRequest {
+                cursor: query.cursor,
+                limit: query.limit,
+                status: query.status.map(rest::ContentStatus::into_link),
+                strategy: query.strategy,
+                ids: None,
+                author_id: None,
+                content_type: query.content_type.map(rest::ContentType::into_link),
+                domain: query.domain.map(rest::GrowthDomain::into_link),
+                author_ids: Vec::new(),
+            },
+            user_id(&headers),
+        )
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .own_contents(
-                &user_id(&headers),
-                ContentQueryRequest {
-                    cursor: query.cursor,
-                    limit: query.limit,
-                    status: query.status,
-                    strategy: query.strategy,
-                    ids: None,
-                    author_id: None,
-                    content_type: query.content_type,
-                    domain: query.domain,
-                },
-            )
-            .await?,
+        page.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn list_public_author_contents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(author_id): Path<String>,
+    Query(query): Query<PublicAuthorContentQuery>,
+) -> Result<Json<ApiResponse<rest::ContentPage>>, HttpError> {
+    let page = state
+        .domain
+        .public_author_contents(&user_id(&headers), &author_id, query.cursor, query.limit)
+        .await?;
+    Ok(Json(ApiResponse::new(
+        page.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn list_own_appeals(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<OwnAppealQuery>,
-) -> Result<Json<ApiResponse<ContentAppealPageDto>>, HttpError> {
+    Query(query): Query<rest::OwnAppealQuery>,
+) -> Result<Json<ApiResponse<rest::AppealPage>>, HttpError> {
+    let appeals = state
+        .domain
+        .own_appeals(query.into_pb(), user_id(&headers))
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .own_appeals(
-                &user_id(&headers),
-                ContentAppealQueryRequest {
-                    status: query.status,
-                    appellant_id: None,
-                    content_id: None,
-                    cursor: query.cursor,
-                    limit: query.limit,
-                },
-            )
-            .await?,
+        appeals.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn list_moderation_reports(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(request): Query<ContentReportQueryRequest>,
-) -> Result<Json<ApiResponse<ContentReportPageDto>>, HttpError> {
+    Query(request): Query<audit_pb::ListReportsRequest>,
+) -> Result<Json<ApiResponse<audit_pb::ReportPage>>, HttpError> {
     let _ = moderator_id(&headers)?;
     Ok(Json(ApiResponse::new(
         state.domain.moderation_reports(request).await?,
@@ -656,22 +1293,119 @@ async fn review_moderation_report(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(report_id): Path<String>,
-    Json(request): Json<ReviewContentReportRequest>,
-) -> Result<Json<ApiResponse<ContentReportDto>>, HttpError> {
+    Json(mut request): Json<audit_pb::ReviewReportRequest>,
+) -> Result<Json<ApiResponse<audit_pb::ContentReport>>, HttpError> {
     let reviewer_id = moderator_id(&headers)?;
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .review_report(&reviewer_id, &report_id, request)
+            .review_report({
+                request.reviewer_id = reviewer_id;
+                request.report_id = report_id;
+                request
+            })
             .await?,
+    )))
+}
+
+async fn list_moderation_direct_message_reports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<rest::ModerationDirectMessageReportQuery>,
+) -> Result<Json<ApiResponse<rest::DirectMessageReportPage>>, HttpError> {
+    let _ = moderator_id(&headers)?;
+    let reports = state
+        .domain
+        .moderation_direct_message_reports(query.into_pb())
+        .await?;
+    Ok(Json(ApiResponse::new(
+        reports.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn review_moderation_direct_message_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(report_id): Path<String>,
+    Json(request): Json<rest::ReviewDirectMessageReportRequest>,
+) -> Result<Json<ApiResponse<rest::DirectMessageReport>>, HttpError> {
+    let reviewer_user_id = moderator_id(&headers)?;
+    let report = state
+        .domain
+        .review_direct_message_report(request.into_pb(reviewer_user_id, report_id))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        report.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn list_moderation_comment_reports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<rest::ModerationCommentReportQuery>,
+) -> Result<Json<ApiResponse<rest::CommentReportPage>>, HttpError> {
+    let _ = moderator_id(&headers)?;
+    let reports = state
+        .domain
+        .moderation_comment_reports(query.into_pb())
+        .await?;
+    Ok(Json(ApiResponse::new(
+        reports.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn review_moderation_comment_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(report_id): Path<String>,
+    Json(request): Json<rest::ReviewCommentReportRequest>,
+) -> Result<Json<ApiResponse<rest::CommentReport>>, HttpError> {
+    let reviewer_id = moderator_id(&headers)?;
+    let report = state
+        .domain
+        .review_comment_report(request.into_pb(reviewer_id, report_id))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        report.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn list_moderation_comment_appeals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<rest::ModerationCommentAppealQuery>,
+) -> Result<Json<ApiResponse<rest::CommentAppealPage>>, HttpError> {
+    let _ = moderator_id(&headers)?;
+    let appeals = state
+        .domain
+        .moderation_comment_appeals(query.into_pb())
+        .await?;
+    Ok(Json(ApiResponse::new(
+        appeals.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn review_moderation_comment_appeal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(appeal_id): Path<String>,
+    Json(request): Json<rest::ReviewCommentAppealRequest>,
+) -> Result<Json<ApiResponse<rest::CommentAppeal>>, HttpError> {
+    let reviewer_id = moderator_id(&headers)?;
+    let appeal = state
+        .domain
+        .review_comment_appeal(request.into_pb(reviewer_id, appeal_id))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        appeal.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
 async fn list_moderation_appeals(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(request): Query<ContentAppealQueryRequest>,
-) -> Result<Json<ApiResponse<ContentAppealPageDto>>, HttpError> {
+    Query(request): Query<audit_pb::ListAppealsRequest>,
+) -> Result<Json<ApiResponse<audit_pb::AppealPage>>, HttpError> {
     let _ = moderator_id(&headers)?;
     Ok(Json(ApiResponse::new(
         state.domain.moderation_appeals(request).await?,
@@ -682,14 +1416,46 @@ async fn review_moderation_appeal(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(appeal_id): Path<String>,
-    Json(request): Json<ReviewContentAppealRequest>,
-) -> Result<Json<ApiResponse<ContentAppealDto>>, HttpError> {
+    Json(mut request): Json<audit_pb::ReviewAppealRequest>,
+) -> Result<Json<ApiResponse<audit_pb::ContentAppeal>>, HttpError> {
     let reviewer_id = moderator_id(&headers)?;
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .review_appeal(&reviewer_id, &appeal_id, request)
+            .review_appeal({
+                request.reviewer_id = reviewer_id;
+                request.appeal_id = appeal_id;
+                request
+            })
             .await?,
+    )))
+}
+
+async fn list_moderation_comments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(request): Query<rest::ModerationCommentQuery>,
+) -> Result<Json<ApiResponse<rest::CommentPage>>, HttpError> {
+    let _ = moderator_id(&headers)?;
+    let comments = state.domain.moderation_comments(request.into_pb()).await?;
+    Ok(Json(ApiResponse::new(
+        comments.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn review_moderation_comment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(comment_id): Path<String>,
+    Json(request): Json<rest::ReviewCommentRequest>,
+) -> Result<Json<ApiResponse<rest::CommentItem>>, HttpError> {
+    let reviewer_id = moderator_id(&headers)?;
+    let comment = state
+        .domain
+        .review_moderation_comment(request.into_pb(reviewer_id, comment_id))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        comment.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -697,13 +1463,17 @@ async fn set_reaction(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(post_id): Path<String>,
-    Json(request): Json<ReactionRequest>,
-) -> Result<Json<ApiResponse<ReactionDto>>, HttpError> {
+    Json(request): Json<rest::SetReactionRequest>,
+) -> Result<Json<ApiResponse<rest::Reaction>>, HttpError> {
+    let (request, negative_feedback_reason, attribution) = request
+        .into_pb(user_id(&headers), post_id)
+        .map_err(HttpError::InvalidRequest)?;
+    let reaction = state
+        .domain
+        .set_reaction(request, negative_feedback_reason, attribution)
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .set_reaction(&user_id(&headers), &post_id, request)
-            .await?,
+        reaction.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -711,13 +1481,14 @@ async fn list_comments(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(post_id): Path<String>,
-    Query(request): Query<CommentQueryRequest>,
-) -> Result<Json<ApiResponse<CommentPageDto>>, HttpError> {
+    Query(query): Query<rest::CommentQuery>,
+) -> Result<Json<ApiResponse<rest::CommentPage>>, HttpError> {
+    let comments = state
+        .domain
+        .comments(user_id(&headers), query.into_pb(post_id))
+        .await?;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .comments(&user_id(&headers), &post_id, request)
-            .await?,
+        comments.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -725,18 +1496,18 @@ async fn create_comment(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(post_id): Path<String>,
-    Json(request): Json<CreateCommentRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<CommentDto>>), HttpError> {
+    Json(request): Json<rest::CreateCommentRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::CommentItem>>), HttpError> {
     let comment = state
         .domain
-        .create_comment(
-            &user_id(&headers),
-            &post_id,
-            request,
-            idempotency_key(&headers),
-        )
+        .create_comment(request.into_pb(user_id(&headers), post_id, idempotency_key(&headers)))
         .await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::new(comment))))
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            comment.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
 }
 
 async fn delete_comment(
@@ -746,21 +1517,99 @@ async fn delete_comment(
 ) -> Result<StatusCode, HttpError> {
     state
         .domain
-        .delete_comment(&user_id(&headers), &post_id, &comment_id)
+        .delete_comment(comment_pb::DeleteRequest {
+            user_id: user_id(&headers),
+            post_id,
+            comment_id,
+        })
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn report_comment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((post_id, comment_id)): Path<(String, String)>,
+    Json(request): Json<rest::CreateCommentReportRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::CommentReportReceipt>>), HttpError> {
+    let report = state
+        .domain
+        .report_comment(
+            user_id(&headers),
+            request
+                .into_pb(post_id, comment_id, idempotency_key(&headers))
+                .map_err(HttpError::InvalidRequest)?,
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            report.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
+}
+
+async fn appeal_comment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(comment_id): Path<String>,
+    Json(request): Json<rest::CreateCommentAppealRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::CommentAppeal>>), HttpError> {
+    let appeal = state
+        .domain
+        .appeal_comment(
+            user_id(&headers),
+            request
+                .into_pb(comment_id, idempotency_key(&headers))
+                .map_err(HttpError::InvalidRequest)?,
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            appeal.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
+}
+
+async fn list_own_comment_appeals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<rest::OwnCommentAppealQuery>,
+) -> Result<Json<ApiResponse<rest::CommentAppealPage>>, HttpError> {
+    let appeals = state
+        .domain
+        .own_comment_appeals(query.into_pb(), user_id(&headers))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        appeals.try_into().map_err(HttpError::Contract)?,
+    )))
 }
 
 async fn set_follow(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(target_user_id): Path<String>,
-    Json(request): Json<FollowRequest>,
-) -> Result<Json<ApiResponse<bookway_api::SocialContextDto>>, HttpError> {
+    Json(request): Json<rest::FollowRequest>,
+) -> Result<Json<ApiResponse<bbs_pb::SocialContext>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .follow(&user_id(&headers), &target_user_id, request)
+            .follow(request.into_pb(user_id(&headers), target_user_id))
+            .await?,
+    )))
+}
+
+async fn set_relationship(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_user_id): Path<String>,
+    Json(request): Json<rest::SetRelationshipRequest>,
+) -> Result<Json<ApiResponse<bbs_pb::SocialContext>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .follow(request.into_pb(user_id(&headers), target_user_id))
             .await?,
     )))
 }
@@ -768,20 +1617,20 @@ async fn set_follow(
 async fn social_context(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<SocialContextDto>>, HttpError> {
+) -> Result<Json<ApiResponse<bbs_pb::SocialContext>>, HttpError> {
     Ok(Json(ApiResponse::new(
-        state.domain.social_context(&user_id(&headers)).await?,
+        state.domain.social_context(user_id(&headers)).await?,
     )))
 }
 
 async fn list_route_participations(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<Vec<RouteParticipationDto>>>, HttpError> {
+) -> Result<Json<ApiResponse<bbs_pb::RouteParticipationList>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .list_route_participations(&user_id(&headers))
+            .list_route_participations(user_id(&headers))
             .await?,
     )))
 }
@@ -790,12 +1639,12 @@ async fn set_route_participation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(route_id): Path<String>,
-    Json(request): Json<SetRouteParticipationRequest>,
-) -> Result<Json<ApiResponse<RouteParticipationStateDto>>, HttpError> {
+    Json(request): Json<rest::RouteParticipationRequest>,
+) -> Result<Json<ApiResponse<bbs_pb::RouteParticipationState>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .set_route_participation(&user_id(&headers), &route_id, request)
+            .set_route_participation(request.into_pb(user_id(&headers), route_id))
             .await?,
     )))
 }
@@ -804,11 +1653,16 @@ async fn join_route(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(route_id): Path<String>,
-) -> Result<Json<ApiResponse<RouteJoinResultDto>>, HttpError> {
+    request: Option<Json<rest::JoinRouteRequest>>,
+) -> Result<Json<ApiResponse<crate::domain::RouteJoinResult>>, HttpError> {
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .join_route(&user_id(&headers), &route_id)
+            .join_route(
+                user_id(&headers),
+                route_id,
+                request.and_then(|request| request.0.into_attribution()),
+            )
             .await?,
     )))
 }
@@ -861,6 +1715,8 @@ fn idempotency_key(headers: &HeaderMap) -> Option<String> {
 
 enum HttpError {
     Upstream(UpstreamError),
+    InvalidRequest(String),
+    Contract(String),
     Forbidden(String),
 }
 
@@ -873,6 +1729,14 @@ impl From<UpstreamError> for HttpError {
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         match self {
+            Self::InvalidRequest(message) => {
+                error_response(StatusCode::BAD_REQUEST, "invalid_request", message)
+            }
+            Self::Contract(message) => error_response(
+                StatusCode::BAD_GATEWAY,
+                "invalid_upstream_contract",
+                message,
+            ),
             Self::Forbidden(message) => error_response(StatusCode::FORBIDDEN, "forbidden", message),
             Self::Upstream(error) => match error {
                 error @ UpstreamError::Transport { .. } => error_response(

@@ -2,8 +2,6 @@
 
 use super::pb::{self, bbs_server::Bbs};
 use crate::domain::Domain;
-use bookway_api::{FollowRequest, SetRouteParticipationRequest, SocialContextRequest};
-use serde::Serialize;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
@@ -16,81 +14,74 @@ impl Bbs for GrpcServer {
     async fn context(
         &self,
         request: Request<pb::ContextRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let response = self
-            .domain
-            .context(SocialContextRequest {
-                user_id: Some(request.into_inner().user_id),
-                post_ids: None,
-            })
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-        json_response(&response)
+    ) -> Result<Response<pb::SocialContext>, Status> {
+        Ok(Response::new(
+            self.domain
+                .context(request.into_inner())
+                .await
+                .map_err(domain_error)?,
+        ))
     }
 
     async fn visibility_context(
         &self,
         request: Request<pb::ContextRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let response = self
-            .domain
-            .visibility_context(&request.into_inner().user_id)
-            .await
-            .map_err(domain_error)?;
-        json_response(&response)
+    ) -> Result<Response<pb::SocialVisibility>, Status> {
+        Ok(Response::new(
+            self.domain
+                .visibility_context(request.into_inner())
+                .await
+                .map_err(domain_error)?,
+        ))
     }
 
     async fn set_edge(
         &self,
         request: Request<pb::SetEdgeRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
-        let payload: FollowRequest = from_json(&request.request_json)?;
-        let response = self
-            .domain
-            .set_edge(&request.user_id, &request.target_user_id, payload)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-        json_response(&response)
+    ) -> Result<Response<pb::SocialContext>, Status> {
+        Ok(Response::new(
+            self.domain
+                .set_edge(request.into_inner())
+                .await
+                .map_err(domain_error)?,
+        ))
     }
 
     async fn list_route_participations(
         &self,
         request: Request<pb::ContextRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let response = self
-            .domain
-            .list_route_participations(&request.into_inner().user_id)
-            .await
-            .map_err(domain_error)?;
-        json_response(&response)
+    ) -> Result<Response<pb::RouteParticipationList>, Status> {
+        Ok(Response::new(pb::RouteParticipationList {
+            items: self
+                .domain
+                .list_route_participations(request.into_inner())
+                .await
+                .map_err(domain_error)?,
+        }))
     }
 
     async fn route_context(
         &self,
         request: Request<pb::RouteContextRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
-        let response = self
-            .domain
-            .route_context(&request.user_id, request.route_ids)
-            .await
-            .map_err(domain_error)?;
-        json_response(&response)
+    ) -> Result<Response<pb::RouteParticipationContext>, Status> {
+        Ok(Response::new(
+            self.domain
+                .route_context(request.into_inner())
+                .await
+                .map_err(domain_error)?,
+        ))
     }
 
     async fn set_route_participation(
         &self,
         request: Request<pb::RouteParticipationRequest>,
-    ) -> Result<Response<pb::JsonResponse>, Status> {
-        let request = request.into_inner();
-        let payload: SetRouteParticipationRequest = from_json(&request.request_json)?;
-        let response = self
-            .domain
-            .set_route_participation(&request.user_id, &request.route_id, payload)
-            .await
-            .map_err(domain_error)?;
-        json_response(&response)
+    ) -> Result<Response<pb::RouteParticipationState>, Status> {
+        Ok(Response::new(
+            self.domain
+                .set_route_participation(request.into_inner())
+                .await
+                .map_err(domain_error)?,
+        ))
     }
 }
 
@@ -110,10 +101,6 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .await
 }
 
-fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, Status> {
-    serde_json::from_str(value).map_err(|error| Status::invalid_argument(error.to_string()))
-}
-
 fn domain_error(error: crate::domain::BbsError) -> Status {
     match error {
         crate::domain::BbsError::Validation(message) => Status::invalid_argument(message),
@@ -122,11 +109,4 @@ fn domain_error(error: crate::domain::BbsError) -> Status {
         ) => Status::failed_precondition(error.to_string()),
         crate::domain::BbsError::Repository(_) => Status::internal(error.to_string()),
     }
-}
-
-fn json_response<T: Serialize>(value: &T) -> Result<Response<pb::JsonResponse>, Status> {
-    Ok(Response::new(pb::JsonResponse {
-        response_json: serde_json::to_string(value)
-            .map_err(|error| Status::internal(error.to_string()))?,
-    }))
 }

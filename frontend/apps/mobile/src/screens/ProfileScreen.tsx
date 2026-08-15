@@ -1,9 +1,9 @@
-import { Award, BookOpenText, BookMarked, ChevronRight, FilePenLine, LockKeyhole, Settings, Sparkles, UserRound } from 'lucide-react-native';
+import { Award, BookOpenText, BookMarked, ChevronRight, FilePenLine, LockKeyhole, MessageSquarePlus, Settings, ShieldCheck, Sparkles, UserRound } from 'lucide-react-native';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { ScreenHeader } from '../components/ScreenHeader';
 import { colors } from '../theme';
-import { GrowthEntry, Journey, Today } from '../types';
+import { AccountProfile, GrowthEntry, Journey, Today } from '../types';
 
 const links = [
   { key: 'review', label: '成长回望', icon: Sparkles },
@@ -16,7 +16,7 @@ const links = [
 
 export type ProfileSection = typeof links[number]['key'];
 
-export function ProfileScreen({ journeys, today, entries, onOpenSection, onOpenLibrary }: { journeys: Journey[]; today: Today; entries: GrowthEntry[]; onOpenSection: (section: ProfileSection) => void; onOpenLibrary: () => void }) {
+export function ProfileScreen({ profile, journeys, today, entries, moderator, onOpenSection, onOpenLibrary, onOpenFeedback, onOpenModeration }: { profile: AccountProfile; journeys: Journey[]; today: Today; entries: GrowthEntry[]; moderator: boolean; onOpenSection: (section: ProfileSection) => void; onOpenLibrary: () => void; onOpenFeedback: () => void; onOpenModeration: () => void }) {
   const activeJourneys = journeys.filter((journey) => journey.status === 'active').length;
   return (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -24,8 +24,8 @@ export function ProfileScreen({ journeys, today, entries, onOpenSection, onOpenL
       <View style={styles.identity}>
         <View style={styles.avatar}><UserRound color={colors.evergreen} size={34} /></View>
         <View style={styles.identityCopy}>
-          <Text style={styles.name}>行路人</Text>
-          <Text style={styles.caption}>在万卷与山河之间，成为自己</Text>
+          <Text style={styles.name}>{profile.display_name}</Text>
+          <Text style={styles.caption}>{profile.bio || '在万卷与山河之间，成为自己'}</Text>
         </View>
       </View>
       <View style={styles.stats}>
@@ -47,6 +47,16 @@ export function ProfileScreen({ journeys, today, entries, onOpenSection, onOpenL
             <ChevronRight color={colors.faint} size={18} />
           </Pressable>
         ))}
+        <Pressable onPress={onOpenFeedback} style={({ pressed }) => [styles.link, pressed && styles.pressed]}>
+          <View style={styles.linkIcon}><MessageSquarePlus color={colors.evergreen} size={19} /></View>
+          <Text style={styles.linkText}>意见反馈</Text>
+          <ChevronRight color={colors.faint} size={18} />
+        </Pressable>
+        {moderator ? <Pressable accessibilityLabel="打开评论审核工作台" onPress={onOpenModeration} style={({ pressed }) => [styles.link, styles.moderationLink, pressed && styles.pressed]}>
+          <View style={[styles.linkIcon, styles.moderationIcon]}><ShieldCheck color={colors.gold} size={19} /></View>
+          <View style={styles.linkCopy}><Text style={styles.linkText}>评论审核工作台</Text><Text style={styles.linkHint}>仅限受授权审核角色</Text></View>
+          <ChevronRight color={colors.faint} size={18} />
+        </Pressable> : null}
       </View>
     </ScrollView>
   );
@@ -77,5 +87,9 @@ const styles = StyleSheet.create({
   link: { minHeight: 58, marginLeft: 20, paddingRight: 20, flexDirection: 'row', alignItems: 'center', gap: 12, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
   pressed: { opacity: 0.55 },
   linkIcon: { width: 30, height: 30, borderRadius: 6, backgroundColor: colors.evergreenSoft, alignItems: 'center', justifyContent: 'center' },
+  moderationLink: { backgroundColor: '#FFFBF2' },
+  moderationIcon: { backgroundColor: colors.goldSoft },
+  linkCopy: { flex: 1, minWidth: 0 },
   linkText: { flex: 1, color: colors.ink, fontSize: 14, fontWeight: '600', letterSpacing: 0 },
+  linkHint: { color: colors.faint, fontSize: 10, marginTop: 2, letterSpacing: 0 },
 });

@@ -1,3 +1,4 @@
+use crate::api::{ApiResponse, HealthResponse, pb};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -6,7 +7,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, put},
 };
-use bookway_api::{ApiResponse, HealthResponse, ReactionDto, ReactionRequest};
 use tower_http::trace::TraceLayer;
 
 use crate::domain::{Domain, LikeStatusError};
@@ -42,13 +42,12 @@ async fn set_reaction(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(post_id): Path<String>,
-    Json(request): Json<ReactionRequest>,
-) -> Result<Json<ApiResponse<ReactionDto>>, HttpError> {
+    Json(mut request): Json<pb::SetReactionRequest>,
+) -> Result<Json<ApiResponse<pb::Reaction>>, HttpError> {
+    request.user_id = user_id(&headers);
+    request.post_id = post_id;
     Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .set_reaction(&user_id(&headers), &post_id, request)
-            .await?,
+        state.domain.set_reaction(request).await?,
     )))
 }
 
@@ -60,9 +59,13 @@ impl From<LikeStatusError> for HttpError {
 }
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
+        let status = match &self.0 {
+            LikeStatusError::Validation(_) => StatusCode::BAD_REQUEST,
+            LikeStatusError::Repository(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(bookway_api::ErrorResponse::new(
+            status,
+            Json(crate::api::ErrorResponse::new(
                 "storage_error",
                 self.0.to_string(),
             )),
