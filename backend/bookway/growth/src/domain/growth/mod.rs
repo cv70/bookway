@@ -478,6 +478,32 @@ impl Domain {
         })
     }
 
+    pub(crate) async fn save_weekly_review(
+        &self,
+        user_id: &str,
+        request: pb::SaveWeeklyReviewRequest,
+    ) -> Result<pb::ReviewRecord, GrowthError> {
+        validate_text(&request.reflection, 1, 4_000, "复盘结论")?;
+        validate_text(&request.next_focus, 0, 500, "下周重点")?;
+        let summary = self.weekly_review(user_id).await?;
+        let timestamp = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|error| GrowthError::Validation(format!("复盘时间无效: {error}")))?;
+        let stable_key = format!(
+            "bookway:weekly-review:{user_id}:{}:{}",
+            summary.period_start, summary.period_end
+        );
+        let review = pb::ReviewRecord {
+            id: Uuid::new_v5(&Uuid::NAMESPACE_URL, stable_key.as_bytes()).to_string(),
+            summary: Some(summary),
+            reflection: request.reflection.trim().to_string(),
+            next_focus: request.next_focus.trim().to_string(),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+        };
+        Ok(self.repository.save_weekly_review(user_id, review).await?)
+    }
+
     pub(crate) async fn companion_brief_for(
         &self,
         user_id: &str,
@@ -1932,6 +1958,41 @@ mod tests {
                 .and_then(|patch| patch.estimated_minutes),
             Some(10)
         );
+    }
+
+    #[tokio::test]
+    async fn saves_one_weekly_review_without_rewriting_its_snapshot() {
+        let domain = domain();
+        let first = domain
+            .save_weekly_review(
+                "demo-user",
+                pb::SaveWeeklyReviewRequest {
+                    user_id: String::new(),
+                    reflection: "午间阅读比晚间更容易坚持".to_string(),
+                    next_focus: "先完成每天 20 分钟阅读".to_string(),
+                },
+            )
+            .await
+            .expect("first review should persist");
+        let first_summary = first.summary.clone().expect("summary should be retained");
+
+        let updated = domain
+            .save_weekly_review(
+                "demo-user",
+                pb::SaveWeeklyReviewRequest {
+                    user_id: String::new(),
+                    reflection: "午间阅读和散步一起安排更可持续".to_string(),
+                    next_focus: "先完成每天 20 分钟阅读和一次散步".to_string(),
+                },
+            )
+            .await
+            .expect("review edits should persist");
+
+        assert_eq!(updated.id, first.id);
+        assert_eq!(updated.created_at, first.created_at);
+        assert_eq!(updated.summary, Some(first_summary));
+        assert_eq!(updated.reflection, "午间阅读和散步一起安排更可持续");
+        assert_eq!(updated.next_focus, "先完成每天 20 分钟阅读和一次散步");
     }
 
     #[tokio::test]

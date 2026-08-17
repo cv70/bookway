@@ -27,6 +27,8 @@ pub(crate) enum RepositoryError {
     KnowledgeNotFound(String),
     #[error("knowledge resource reference {0} was not found or does not belong to this user")]
     KnowledgeReferenceNotFound(String),
+    #[error("weekly review payload is missing its summary")]
+    InvalidWeeklyReview,
     #[error("idempotency key was already used with different content")]
     IdempotencyConflict,
     #[error("database operation failed: {0}")]
@@ -151,6 +153,11 @@ pub(crate) trait GrowthRepository: Send + Sync {
         entry_id: &str,
     ) -> Result<pb::GrowthEntry, RepositoryError>;
     async fn review_snapshot(&self, user_id: &str) -> Result<ReviewSnapshot, RepositoryError>;
+    async fn save_weekly_review(
+        &self,
+        user_id: &str,
+        review: pb::ReviewRecord,
+    ) -> Result<pb::ReviewRecord, RepositoryError>;
     async fn list_knowledge(
         &self,
         user_id: &str,
@@ -203,6 +210,7 @@ struct State {
     push_devices: HashMap<String, (String, pb::PushDevice)>,
     notifications: Vec<pb::UserNotification>,
     notification_owners: HashMap<String, String>,
+    weekly_reviews: HashMap<(String, String, String), pb::ReviewRecord>,
 }
 
 pub(crate) struct MemoryGrowthRepository {
@@ -372,6 +380,7 @@ impl MemoryGrowthRepository {
                 push_devices: HashMap::new(),
                 notifications,
                 notification_owners,
+                weekly_reviews: HashMap::new(),
             }),
         }
     }
@@ -1091,6 +1100,36 @@ impl GrowthRepository for MemoryGrowthRepository {
                 .cloned()
                 .collect(),
         })
+    }
+
+    async fn save_weekly_review(
+        &self,
+        user_id: &str,
+        review: pb::ReviewRecord,
+    ) -> Result<pb::ReviewRecord, RepositoryError> {
+        let mut state = self.state.write().await;
+        let key = (
+            user_id.to_string(),
+            review
+                .summary
+                .as_ref()
+                .map(|summary| summary.period_start.clone())
+                .unwrap_or_default(),
+            review
+                .summary
+                .as_ref()
+                .map(|summary| summary.period_end.clone())
+                .unwrap_or_default(),
+        );
+        if let Some(existing) = state.weekly_reviews.get_mut(&key) {
+            // Preserve the historical generated snapshot and original creation time.
+            existing.reflection = review.reflection;
+            existing.next_focus = review.next_focus;
+            existing.updated_at = review.updated_at;
+            return Ok(existing.clone());
+        }
+        state.weekly_reviews.insert(key, review.clone());
+        Ok(review)
     }
 
     async fn list_knowledge(
@@ -2152,6 +2191,70 @@ impl GrowthRepository for PostgresGrowthRepository {
             actions: deserialize_rows(action_rows)?,
             entries: deserialize_rows(entry_rows)?,
         })
+    }
+
+    async fn save_weekly_review(
+        &self,
+        user_id: &str,
+        review: pb::ReviewRecord,
+    ) -> Result<pb::ReviewRecord, RepositoryError> {
+        let summary = review
+            .summary
+            .as_ref()
+            .ok_or(RepositoryError::InvalidWeeklyReview)?;
+        let mut transaction = self.pool.begin().await.map_err(RepositoryError::Database)?;
+        let inserted = sqlx::query(
+            "INSERT INTO weekly_reviews (id,user_id,period_start,period_end,payload,created_at,updated_at) VALUES ($1,$2,$3::date,$4::date,$5,$6::timestamptz,$7::timestamptz) ON CONFLICT (user_id,period_start,period_end) DO NOTHING",
+        )
+        .bind(&review.id)
+        .bind(user_id)
+        .bind(&summary.period_start)
+        .bind(&summary.period_end)
+        .bind(serde_json::to_value(&review).map_err(RepositoryError::Serialization)?)
+        .bind(&review.created_at)
+        .bind(&review.updated_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(RepositoryError::Database)?;
+        if inserted.rows_affected() == 1 {
+            transaction
+                .commit()
+                .await
+                .map_err(RepositoryError::Database)?;
+            return Ok(review);
+        }
+        let payload = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT payload FROM weekly_reviews WHERE user_id=$1 AND period_start=$2::date AND period_end=$3::date FOR UPDATE",
+        )
+        .bind(user_id)
+        .bind(&summary.period_start)
+        .bind(&summary.period_end)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(RepositoryError::Database)?
+        .ok_or(RepositoryError::InvalidWeeklyReview)?;
+        let mut existing: pb::ReviewRecord =
+            serde_json::from_value(payload).map_err(RepositoryError::Serialization)?;
+        // The first confirmed review is the immutable period snapshot. A
+        // later PUT only edits the user's interpretation and next focus.
+        existing.reflection = review.reflection;
+        existing.next_focus = review.next_focus;
+        existing.updated_at = review.updated_at;
+        sqlx::query(
+            "UPDATE weekly_reviews SET payload=$1, updated_at=$2::timestamptz WHERE id=$3 AND user_id=$4",
+        )
+        .bind(serde_json::to_value(&existing).map_err(RepositoryError::Serialization)?)
+        .bind(&existing.updated_at)
+        .bind(&existing.id)
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(RepositoryError::Database)?;
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::Database)?;
+        Ok(existing)
     }
 
     async fn list_knowledge(

@@ -274,6 +274,24 @@ pub struct WeeklyReviewSummary {
     #[prost(message, repeated, tag = "11")]
     pub adjustment_suggestions: ::prost::alloc::vec::Vec<ReviewAdjustmentSuggestion>,
 }
+/// A user-confirmed weekly review retains the generated snapshot from the time
+/// of confirmation. Later edits change only the user's words, not history.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReviewRecord {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub summary: ::core::option::Option<WeeklyReviewSummary>,
+    #[prost(string, tag = "3")]
+    pub reflection: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub next_focus: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub created_at: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub updated_at: ::prost::alloc::string::String,
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CompanionBrief {
@@ -655,6 +673,16 @@ pub struct RetryEntryPublicationRequest {
     pub user_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub entry_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SaveWeeklyReviewRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub reflection: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub next_focus: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1858,6 +1886,27 @@ pub mod growth_client {
                 .insert(GrpcMethod::new("bookway.growth.Growth", "WeeklyReview"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn save_weekly_review(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SaveWeeklyReviewRequest>,
+        ) -> std::result::Result<tonic::Response<super::ReviewRecord>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.growth.Growth/SaveWeeklyReview",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.growth.Growth", "SaveWeeklyReview"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn companion(
             &mut self,
             request: impl tonic::IntoRequest<super::ScheduleRequest>,
@@ -2097,6 +2146,10 @@ pub mod growth_server {
             tonic::Response<super::WeeklyReviewSummary>,
             tonic::Status,
         >;
+        async fn save_weekly_review(
+            &self,
+            request: tonic::Request<super::SaveWeeklyReviewRequest>,
+        ) -> std::result::Result<tonic::Response<super::ReviewRecord>, tonic::Status>;
         async fn companion(
             &self,
             request: tonic::Request<super::ScheduleRequest>,
@@ -3131,6 +3184,51 @@ pub mod growth_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = WeeklyReviewSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.growth.Growth/SaveWeeklyReview" => {
+                    #[allow(non_camel_case_types)]
+                    struct SaveWeeklyReviewSvc<T: Growth>(pub Arc<T>);
+                    impl<
+                        T: Growth,
+                    > tonic::server::UnaryService<super::SaveWeeklyReviewRequest>
+                    for SaveWeeklyReviewSvc<T> {
+                        type Response = super::ReviewRecord;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SaveWeeklyReviewRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Growth>::save_weekly_review(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SaveWeeklyReviewSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

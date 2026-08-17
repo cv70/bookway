@@ -1653,6 +1653,52 @@ impl TryFrom<growth_pb::WeeklyReviewSummary> for WeeklyReviewSummary {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveWeeklyReviewRequest {
+    reflection: String,
+    #[serde(default)]
+    next_focus: String,
+}
+
+impl SaveWeeklyReviewRequest {
+    pub(crate) fn into_pb(self, user_id: String) -> growth_pb::SaveWeeklyReviewRequest {
+        growth_pb::SaveWeeklyReviewRequest {
+            user_id,
+            reflection: self.reflection,
+            next_focus: self.next_focus,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct WeeklyReview {
+    id: String,
+    summary: WeeklyReviewSummary,
+    reflection: String,
+    next_focus: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<growth_pb::ReviewRecord> for WeeklyReview {
+    type Error = String;
+
+    fn try_from(value: growth_pb::ReviewRecord) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            summary: value
+                .summary
+                .ok_or_else(|| "growth review is missing its summary".to_string())?
+                .try_into()?,
+            reflection: value.reflection,
+            next_focus: value.next_focus,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum KnowledgeResourceKind {
@@ -4108,8 +4154,8 @@ mod tests {
         FeedbackItem, FollowRequest, GrowthDomain, IngestEventsRequest, KnowledgeResource,
         ModerationCommentQuery, NotificationPage, OwnCommentAppealQuery, Reaction,
         ReviewCommentReportRequest, ReviewCommentRequest, ReviewDirectMessageReportRequest,
-        RouteParticipationRequest, RouteTemplate, RouteTemplateKind, SearchQuery,
-        SetReactionRequest, SetRelationshipRequest, StartKnowledgeJourneyRequest,
+        RouteParticipationRequest, RouteTemplate, RouteTemplateKind, SaveWeeklyReviewRequest,
+        SearchQuery, SetReactionRequest, SetRelationshipRequest, StartKnowledgeJourneyRequest,
         UpdateAccountProfileRequest, UpdateReminderPreferencesRequest,
     };
     use bookway_bbs_link_api::pb as bbs_link_pb;
@@ -4510,6 +4556,20 @@ mod tests {
         assert_eq!(action.user_id, "user-1");
         assert_eq!(action.journey_id, "journey-1");
         assert_eq!(action.idempotency_key.as_deref(), Some("action-create-1"));
+    }
+
+    #[test]
+    fn weekly_review_save_uses_gateway_identity() {
+        let request: SaveWeeklyReviewRequest = serde_json::from_value(serde_json::json!({
+            "reflection": "午间阅读更容易坚持",
+            "nextFocus": "每天先完成二十分钟阅读"
+        }))
+        .expect("mobile review JSON should deserialize");
+        let request = request.into_pb("user-1".to_string());
+
+        assert_eq!(request.user_id, "user-1");
+        assert_eq!(request.reflection, "午间阅读更容易坚持");
+        assert_eq!(request.next_focus, "每天先完成二十分钟阅读");
     }
 
     #[test]

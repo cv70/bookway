@@ -307,6 +307,20 @@ impl Growth for GrpcServer {
         ))
     }
 
+    async fn save_weekly_review(
+        &self,
+        request: Request<pb::SaveWeeklyReviewRequest>,
+    ) -> Result<Response<pb::ReviewRecord>, Status> {
+        let request = request.into_inner();
+        let user_id = request.user_id.clone();
+        Ok(Response::new(
+            self.domain
+                .save_weekly_review(&user_id, request)
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
     async fn companion(
         &self,
         request: Request<pb::ScheduleRequest>,

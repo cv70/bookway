@@ -493,6 +493,13 @@ impl Domain {
         grpc_call!(self, growth, "growth", weekly_review, request)
     }
 
+    pub(crate) async fn save_weekly_review(
+        &self,
+        request: growth_pb::SaveWeeklyReviewRequest,
+    ) -> Result<growth_pb::ReviewRecord, UpstreamError> {
+        grpc_call!(self, growth, "growth", save_weekly_review, request)
+    }
+
     pub(crate) async fn companion(
         &self,
         request: growth_pb::ScheduleRequest,

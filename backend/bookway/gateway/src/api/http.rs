@@ -151,7 +151,10 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/entries/{entry_id}/publication/retry",
             post(retry_entry_publication),
         )
-        .route("/v1/reviews/weekly", get(weekly_review))
+        .route(
+            "/v1/reviews/weekly",
+            get(weekly_review).put(save_weekly_review),
+        )
         .route("/v1/companion", get(companion))
         .route("/v1/knowledge", get(list_knowledge).post(create_knowledge))
         .route(
@@ -744,6 +747,20 @@ async fn weekly_review(
         .weekly_review(growth_pb::UserRequest {
             user_id: user_id(&headers),
         })
+        .await?;
+    Ok(Json(ApiResponse::new(
+        review.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn save_weekly_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<rest::SaveWeeklyReviewRequest>,
+) -> Result<Json<ApiResponse<rest::WeeklyReview>>, HttpError> {
+    let review = state
+        .domain
+        .save_weekly_review(request.into_pb(user_id(&headers)))
         .await?;
     Ok(Json(ApiResponse::new(
         review.try_into().map_err(HttpError::Contract)?,
