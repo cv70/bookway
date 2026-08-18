@@ -41,6 +41,7 @@ pub(crate) trait CatalogRepository: Send + Sync {
 #[derive(Default)]
 pub(crate) struct MemoryCatalogRepository {
     products: RwLock<HashMap<String, pb::MallProduct>>,
+    product_merchants: RwLock<HashMap<String, String>>,
     node_offers: RwLock<HashMap<String, pb::NodeOffer>>,
     node_offer_idempotency: RwLock<HashMap<String, String>>,
 }
@@ -50,11 +51,16 @@ impl CatalogRepository for MemoryCatalogRepository {
         &self,
         request: pb::CreateProductRequest,
     ) -> Result<pb::MallProduct, RepositoryError> {
+        let merchant_id = request.merchant_id.clone();
         let product = new_product(request);
         self.products
             .write()
             .await
             .insert(product.id.clone(), product.clone());
+        self.product_merchants
+            .write()
+            .await
+            .insert(product.id.clone(), merchant_id);
         Ok(product)
     }
     async fn update(
@@ -65,6 +71,15 @@ impl CatalogRepository for MemoryCatalogRepository {
         let product = products
             .get_mut(&request.product_id)
             .ok_or_else(|| RepositoryError::NotFound(request.product_id.clone()))?;
+        let owner = self
+            .product_merchants
+            .read()
+            .await
+            .get(&request.product_id)
+            .cloned();
+        if owner.as_deref() != Some(request.merchant_id.as_str()) {
+            return Err(RepositoryError::NotFound(request.product_id));
+        }
         apply_update(product, request)?;
         Ok(product.clone())
     }
@@ -75,12 +90,22 @@ impl CatalogRepository for MemoryCatalogRepository {
         let limit = usize::try_from(request.limit.unwrap_or(20).clamp(1, 100)).unwrap_or(100);
         let cursor = request.cursor.unwrap_or_default();
         let query = request.query.unwrap_or_default().to_lowercase();
+        let merchant_id = request.merchant_id.unwrap_or_default();
+        let product_merchants = self.product_merchants.read().await.clone();
         let mut values = self
             .products
             .read()
             .await
             .values()
-            .filter(|product| product.status == pb::MallProductStatus::Active as i32)
+            .filter(|product| {
+                request.include_inactive || product.status == pb::MallProductStatus::Active as i32
+            })
+            .filter(|product| {
+                merchant_id.is_empty()
+                    || product_merchants
+                        .get(&product.id)
+                        .is_some_and(|owner| owner == &merchant_id)
+            })
             .filter(|product| product.id > cursor)
             .filter(|product| query.is_empty() || product.title.to_lowercase().contains(&query))
             .cloned()
@@ -125,6 +150,15 @@ impl CatalogRepository for MemoryCatalogRepository {
         &self,
         request: pb::AttachNodeOfferRequest,
     ) -> Result<pb::NodeOffer, RepositoryError> {
+        let owner = self
+            .product_merchants
+            .read()
+            .await
+            .get(&request.product_id)
+            .cloned();
+        if owner.as_deref() != Some(request.merchant_id.as_str()) {
+            return Err(RepositoryError::NotFound(request.product_id));
+        }
         let mut idempotency = self.node_offer_idempotency.write().await;
         if let Some(id) = idempotency.get(&request.idempotency_key) {
             return self
@@ -212,9 +246,10 @@ impl CatalogRepository for PostgresCatalogRepository {
         &self,
         request: pb::CreateProductRequest,
     ) -> Result<pb::MallProduct, RepositoryError> {
+        let merchant_id = request.merchant_id.clone();
         let product = new_product(request);
         let mut tx = self.pool.begin().await.map_err(database)?;
-        sqlx::query("INSERT INTO mall_products (id,title,description,image_url,status) VALUES ($1,$2,$3,$4,$5)").bind(&product.id).bind(&product.title).bind(&product.description).bind(&product.image_url).bind(status_name(product.status)?).execute(&mut *tx).await.map_err(database)?;
+        sqlx::query("INSERT INTO mall_products (id,merchant_id,title,description,image_url,status) VALUES ($1,$2,$3,$4,$5,$6)").bind(&product.id).bind(&merchant_id).bind(&product.title).bind(&product.description).bind(&product.image_url).bind(status_name(product.status)?).execute(&mut *tx).await.map_err(database)?;
         for sku in &product.skus {
             sqlx::query("INSERT INTO mall_skus (id,product_id,title,price_cents,currency,attributes,saleable) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(&sku.id).bind(&sku.product_id).bind(&sku.title).bind(sku.price_cents).bind(&sku.currency).bind(serde_json::to_value(&sku.attributes).map_err(|error| RepositoryError::Failed(error.to_string()))?).bind(sku.saleable).execute(&mut *tx).await.map_err(database)?;
         }
@@ -229,9 +264,10 @@ impl CatalogRepository for PostgresCatalogRepository {
         let id = &request.product_id;
         let mut transaction = self.pool.begin().await.map_err(database)?;
         let changed = sqlx::query(
-            "UPDATE mall_products SET title=COALESCE($2,title),description=COALESCE($3,description),image_url=COALESCE($4,image_url),status=COALESCE($5,status),updated_at=now() WHERE id=$1",
+            "UPDATE mall_products SET title=COALESCE($3,title),description=COALESCE($4,description),image_url=COALESCE($5,image_url),status=COALESCE($6,status),updated_at=now() WHERE id=$1 AND merchant_id=$2",
         )
         .bind(id)
+        .bind(&request.merchant_id)
         .bind(request.title)
         .bind(request.description)
         .bind(request.image_url)
@@ -277,7 +313,7 @@ impl CatalogRepository for PostgresCatalogRepository {
         request: pb::ProductQueryRequest,
     ) -> Result<pb::ProductPage, RepositoryError> {
         let limit = usize::try_from(request.limit.unwrap_or(20).clamp(1, 100)).unwrap_or(100);
-        let rows = sqlx::query_as::<_, ProductRow>("SELECT id,title,description,image_url,status,created_at,updated_at FROM mall_products WHERE status='active' AND id > $1 AND ($2='' OR title ILIKE '%' || $2 || '%') ORDER BY id LIMIT $3").bind(request.cursor.unwrap_or_default()).bind(request.query.unwrap_or_default()).bind(i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)).fetch_all(&self.pool).await.map_err(database)?;
+        let rows = sqlx::query_as::<_, ProductRow>("SELECT id,title,description,image_url,status,created_at,updated_at FROM mall_products WHERE id > $1 AND ($2='' OR title ILIKE '%' || $2 || '%') AND ($3='' OR merchant_id=$3) AND ($4 OR status='active') ORDER BY id LIMIT $5").bind(request.cursor.unwrap_or_default()).bind(request.query.unwrap_or_default()).bind(request.merchant_id.unwrap_or_default()).bind(request.include_inactive).bind(i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)).fetch_all(&self.pool).await.map_err(database)?;
         let more = rows.len() > limit;
         let mut values = Vec::with_capacity(rows.len().min(limit));
         for row in rows.into_iter().take(limit) {
@@ -317,11 +353,23 @@ impl CatalogRepository for PostgresCatalogRepository {
         &self,
         request: pb::AttachNodeOfferRequest,
     ) -> Result<pb::NodeOffer, RepositoryError> {
+        let owns_product = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM mall_products WHERE id=$1 AND merchant_id=$2)",
+        )
+        .bind(&request.product_id)
+        .bind(&request.merchant_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(database)?;
+        if !owns_product {
+            return Err(RepositoryError::NotFound(request.product_id));
+        }
         let id = Uuid::now_v7().to_string();
         let row = sqlx::query_as::<_, NodeOfferRow>(
-            "INSERT INTO mall_node_offers (id,product_id,sku_id,route_id,action_node_id,creator_id,commission_bps,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING id,product_id,sku_id,route_id,action_node_id,creator_id,commission_bps,created_at",
+            "INSERT INTO mall_node_offers (id,merchant_id,product_id,sku_id,route_id,action_node_id,creator_id,commission_bps,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING id,product_id,sku_id,route_id,action_node_id,creator_id,commission_bps,created_at",
         )
         .bind(id)
+        .bind(request.merchant_id)
         .bind(request.product_id)
         .bind(request.sku_id)
         .bind(request.route_id)
@@ -537,7 +585,7 @@ fn database(error: sqlx::Error) -> RepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogRepository, MemoryCatalogRepository};
+    use super::{CatalogRepository, MemoryCatalogRepository, RepositoryError};
     use crate::api::pb;
 
     #[tokio::test]
@@ -545,6 +593,7 @@ mod tests {
         let repository = MemoryCatalogRepository::default();
         let product = repository
             .create(pb::CreateProductRequest {
+                merchant_id: "merchant-a".to_string(),
                 title: "Draft book".to_string(),
                 description: String::new(),
                 image_url: String::new(),
@@ -563,6 +612,7 @@ mod tests {
 
         let updated = repository
             .update(pb::UpdateProductRequest {
+                merchant_id: "merchant-a".to_string(),
                 product_id: product.id.clone(),
                 status: Some(pb::MallProductStatus::Active as i32),
                 sku_updates: vec![pb::UpdateSkuRequest {
@@ -589,10 +639,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merchant_catalog_is_isolated_and_management_lists_drafts() {
+        let repository = MemoryCatalogRepository::default();
+        let product = repository
+            .create(pb::CreateProductRequest {
+                merchant_id: "merchant-a".to_string(),
+                title: "Private draft".to_string(),
+                description: String::new(),
+                image_url: String::new(),
+                status: pb::MallProductStatus::Draft as i32,
+                skus: vec![pb::CreateSkuRequest {
+                    title: "Default".to_string(),
+                    price_cents: 100,
+                    currency: "CNY".to_string(),
+                    attributes: Default::default(),
+                    saleable: true,
+                }],
+            })
+            .await
+            .expect("product should be created");
+        let denied = repository
+            .update(pb::UpdateProductRequest {
+                merchant_id: "merchant-b".to_string(),
+                product_id: product.id.clone(),
+                title: Some("Hijacked".to_string()),
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(denied, Err(RepositoryError::NotFound(id)) if id == product.id));
+        let page = repository
+            .list(pb::ProductQueryRequest {
+                merchant_id: Some("merchant-a".to_string()),
+                include_inactive: true,
+                ..Default::default()
+            })
+            .await
+            .expect("merchant should list own draft");
+        assert_eq!(page.items, vec![product]);
+    }
+
+    #[tokio::test]
     async fn contextual_node_offer_is_idempotent_and_scoped_to_a_saleable_sku() {
         let repository = MemoryCatalogRepository::default();
         let product = repository
             .create(pb::CreateProductRequest {
+                merchant_id: "merchant-a".to_string(),
                 title: "Trail kit".to_string(),
                 description: String::new(),
                 image_url: String::new(),
@@ -608,6 +699,7 @@ mod tests {
             .await
             .expect("product should be created");
         let request = pb::AttachNodeOfferRequest {
+            merchant_id: "merchant-a".to_string(),
             product_id: product.id,
             sku_id: product.skus[0].id.clone(),
             route_id: "route-1".to_string(),

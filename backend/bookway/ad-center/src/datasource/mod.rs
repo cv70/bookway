@@ -34,7 +34,16 @@ pub(crate) trait CampaignRepository: Send + Sync {
         campaign_id: &str,
         request: pb::UpdateCampaignRequest,
     ) -> Result<pb::AdCampaign, RepositoryError>;
-    async fn get(&self, campaign_id: &str) -> Result<pb::AdCampaign, RepositoryError>;
+    async fn get_for_advertiser(
+        &self,
+        campaign_id: &str,
+        advertiser_id: &str,
+    ) -> Result<pb::AdCampaign, RepositoryError>;
+    async fn list_for_advertiser(
+        &self,
+        advertiser_id: &str,
+        limit: usize,
+    ) -> Result<Vec<pb::AdCampaign>, RepositoryError>;
     async fn eligible(
         &self,
         query: EligibleQuery<'_>,
@@ -99,17 +108,43 @@ impl CampaignRepository for MemoryCampaignRepository {
         let campaign = campaigns
             .get_mut(campaign_id)
             .ok_or_else(|| RepositoryError::NotFound(campaign_id.to_string()))?;
+        if campaign.advertiser_id != request.advertiser_id {
+            return Err(RepositoryError::NotFound(campaign_id.to_string()));
+        }
         apply_update(campaign, request);
         Ok(campaign.clone())
     }
 
-    async fn get(&self, campaign_id: &str) -> Result<pb::AdCampaign, RepositoryError> {
+    async fn get_for_advertiser(
+        &self,
+        campaign_id: &str,
+        advertiser_id: &str,
+    ) -> Result<pb::AdCampaign, RepositoryError> {
         self.campaigns
             .read()
             .await
             .get(campaign_id)
             .cloned()
+            .filter(|campaign| campaign.advertiser_id == advertiser_id)
             .ok_or_else(|| RepositoryError::NotFound(campaign_id.to_string()))
+    }
+
+    async fn list_for_advertiser(
+        &self,
+        advertiser_id: &str,
+        limit: usize,
+    ) -> Result<Vec<pb::AdCampaign>, RepositoryError> {
+        let mut campaigns = self
+            .campaigns
+            .read()
+            .await
+            .values()
+            .filter(|campaign| campaign.advertiser_id == advertiser_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        campaigns.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        campaigns.truncate(limit);
+        Ok(campaigns)
     }
 
     async fn eligible(
@@ -346,15 +381,22 @@ impl PostgresCampaignRepository {
         Self { pool }
     }
 
-    async fn get(&self, id: &str) -> Result<pb::AdCampaign, RepositoryError> {
-        sqlx::query_as::<_, CampaignRow>(&campaign_select("WHERE c.id = $1"))
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(database)?
-            .map(CampaignRow::into_proto)
-            .transpose()?
-            .ok_or_else(|| RepositoryError::NotFound(id.to_string()))
+    async fn get_for_advertiser(
+        &self,
+        id: &str,
+        advertiser_id: &str,
+    ) -> Result<pb::AdCampaign, RepositoryError> {
+        sqlx::query_as::<_, CampaignRow>(&campaign_select(
+            "WHERE c.id = $1 AND c.advertiser_id = $2",
+        ))
+        .bind(id)
+        .bind(advertiser_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?
+        .map(CampaignRow::into_proto)
+        .transpose()?
+        .ok_or_else(|| RepositoryError::NotFound(id.to_string()))
     }
 }
 
@@ -366,7 +408,7 @@ impl CampaignRepository for PostgresCampaignRepository {
     ) -> Result<pb::AdCampaign, RepositoryError> {
         let campaign = new_campaign(request);
         sqlx::query(
-            "INSERT INTO ad_campaigns (id, advertiser_id, name, placement, route_id, action_node_id, title, body, image_url, landing_url, target_domains, status, pricing_model, bid_micros, daily_budget_micros, frequency_cap, predicted_ctr, predicted_cvr, global_frequency_cap, starts_at, ends_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+            "INSERT INTO ad_campaigns (id, advertiser_id, name, placement, route_id, action_node_id, scene_equipment, title, body, image_url, landing_url, target_domains, status, pricing_model, bid_micros, daily_budget_micros, frequency_cap, predicted_ctr, predicted_cvr, global_frequency_cap, starts_at, ends_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
         )
         .bind(&campaign.id)
         .bind(&campaign.advertiser_id)
@@ -374,6 +416,7 @@ impl CampaignRepository for PostgresCampaignRepository {
         .bind(&campaign.placement)
         .bind(&campaign.route_id)
         .bind(&campaign.action_node_id)
+        .bind(&campaign.scene_equipment)
         .bind(&campaign.title)
         .bind(&campaign.body)
         .bind(&campaign.image_url)
@@ -392,7 +435,8 @@ impl CampaignRepository for PostgresCampaignRepository {
         .execute(&self.pool)
         .await
         .map_err(database)?;
-        self.get(&campaign.id).await
+        self.get_for_advertiser(&campaign.id, &campaign.advertiser_id)
+            .await
     }
 
     async fn update(
@@ -408,10 +452,11 @@ impl CampaignRepository for PostgresCampaignRepository {
                     .map_err(|error| RepositoryError::Failed(error.to_string()))
             })
             .transpose()?;
-        sqlx::query(
-            "UPDATE ad_campaigns SET status=COALESCE($2,status), name=COALESCE($3,name), title=COALESCE($4,title), body=COALESCE($5,body), image_url=COALESCE($6,image_url), landing_url=COALESCE($7,landing_url), target_domains=COALESCE($8,target_domains), bid_micros=COALESCE($9,bid_micros), daily_budget_micros=COALESCE($10,daily_budget_micros), frequency_cap=COALESCE($11,frequency_cap), starts_at=COALESCE($12,starts_at), ends_at=COALESCE($13,ends_at), predicted_ctr=COALESCE($14,predicted_ctr), predicted_cvr=COALESCE($15,predicted_cvr), global_frequency_cap=COALESCE($16,global_frequency_cap), updated_at=now() WHERE id=$1",
+        let updated = sqlx::query(
+            "UPDATE ad_campaigns SET status=COALESCE($3,status), name=COALESCE($4,name), title=COALESCE($5,title), body=COALESCE($6,body), image_url=COALESCE($7,image_url), landing_url=COALESCE($8,landing_url), target_domains=COALESCE($9,target_domains), bid_micros=COALESCE($10,bid_micros), daily_budget_micros=COALESCE($11,daily_budget_micros), frequency_cap=COALESCE($12,frequency_cap), starts_at=COALESCE($13,starts_at), ends_at=COALESCE($14,ends_at), predicted_ctr=COALESCE($15,predicted_ctr), predicted_cvr=COALESCE($16,predicted_cvr), global_frequency_cap=COALESCE($17,global_frequency_cap), scene_equipment=COALESCE($18,scene_equipment), updated_at=now() WHERE id=$1 AND advertiser_id=$2",
         )
         .bind(campaign_id)
+        .bind(&request.advertiser_id)
         .bind(status)
         .bind(request.name)
         .bind(request.title)
@@ -427,14 +472,40 @@ impl CampaignRepository for PostgresCampaignRepository {
         .bind(request.predicted_ctr)
         .bind(request.predicted_cvr)
         .bind(request.global_frequency_cap.map(|value| i32::try_from(value).unwrap_or(i32::MAX)))
+        .bind(request.scene_equipment)
         .execute(&self.pool)
         .await
-        .map_err(database)?;
-        self.get(campaign_id).await
+        .map_err(database)?
+        .rows_affected();
+        if updated == 0 {
+            return Err(RepositoryError::NotFound(campaign_id.to_string()));
+        }
+        self.get_for_advertiser(campaign_id, &request.advertiser_id)
+            .await
     }
 
-    async fn get(&self, campaign_id: &str) -> Result<pb::AdCampaign, RepositoryError> {
-        PostgresCampaignRepository::get(self, campaign_id).await
+    async fn get_for_advertiser(
+        &self,
+        campaign_id: &str,
+        advertiser_id: &str,
+    ) -> Result<pb::AdCampaign, RepositoryError> {
+        PostgresCampaignRepository::get_for_advertiser(self, campaign_id, advertiser_id).await
+    }
+
+    async fn list_for_advertiser(
+        &self,
+        advertiser_id: &str,
+        limit: usize,
+    ) -> Result<Vec<pb::AdCampaign>, RepositoryError> {
+        let campaigns = sqlx::query_as::<_, CampaignRow>(&campaign_select(
+            "WHERE c.advertiser_id = $1 ORDER BY c.updated_at DESC LIMIT $2",
+        ))
+        .bind(advertiser_id)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database)?;
+        campaigns.into_iter().map(CampaignRow::into_proto).collect()
     }
 
     async fn eligible(
@@ -647,6 +718,7 @@ struct CampaignRow {
     placement: String,
     route_id: String,
     action_node_id: String,
+    scene_equipment: String,
     title: String,
     body: String,
     image_url: String,
@@ -678,6 +750,7 @@ impl CampaignRow {
             placement: self.placement,
             route_id: self.route_id,
             action_node_id: self.action_node_id,
+            scene_equipment: self.scene_equipment,
             title: self.title,
             body: self.body,
             image_url: self.image_url,
@@ -705,7 +778,7 @@ impl CampaignRow {
 
 fn campaign_select(where_clause: &str) -> String {
     format!(
-        "SELECT c.id,c.advertiser_id,c.name,c.placement,c.route_id,c.action_node_id,c.title,c.body,c.image_url,c.landing_url,c.target_domains,c.status,c.pricing_model,c.bid_micros,c.daily_budget_micros,COALESCE(stats.spent_micros,0) AS spent_today_micros,c.frequency_cap,c.predicted_ctr,c.predicted_cvr,c.global_frequency_cap,c.impressions,c.clicks,c.starts_at,c.ends_at,c.created_at,c.updated_at FROM ad_campaigns c LEFT JOIN ad_campaign_daily_stats stats ON stats.campaign_id=c.id AND stats.stat_date=current_date {where_clause}"
+        "SELECT c.id,c.advertiser_id,c.name,c.placement,c.route_id,c.action_node_id,c.scene_equipment,c.title,c.body,c.image_url,c.landing_url,c.target_domains,c.status,c.pricing_model,c.bid_micros,c.daily_budget_micros,COALESCE(stats.spent_micros,0) AS spent_today_micros,c.frequency_cap,c.predicted_ctr,c.predicted_cvr,c.global_frequency_cap,c.impressions,c.clicks,c.starts_at,c.ends_at,c.created_at,c.updated_at FROM ad_campaigns c LEFT JOIN ad_campaign_daily_stats stats ON stats.campaign_id=c.id AND stats.stat_date=current_date {where_clause}"
     )
 }
 
@@ -718,6 +791,7 @@ fn new_campaign(request: pb::CreateCampaignRequest) -> pb::AdCampaign {
         placement: request.placement,
         route_id: request.route_id,
         action_node_id: request.action_node_id,
+        scene_equipment: request.scene_equipment,
         title: request.title,
         body: request.body,
         image_url: request.image_url,
@@ -780,6 +854,9 @@ fn apply_update(campaign: &mut pb::AdCampaign, request: pb::UpdateCampaignReques
     }
     if let Some(value) = request.global_frequency_cap {
         campaign.global_frequency_cap = value;
+    }
+    if let Some(value) = request.scene_equipment {
+        campaign.scene_equipment = value;
     }
     if let Some(value) = request.starts_at {
         campaign.starts_at = Some(value);
@@ -879,7 +956,7 @@ fn parse_pricing(value: &str) -> Result<pb::PricingModel, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CampaignRepository, MemoryCampaignRepository};
+    use super::{CampaignRepository, MemoryCampaignRepository, RepositoryError};
     use crate::api::pb;
 
     fn campaign_request() -> pb::CreateCampaignRequest {
@@ -889,6 +966,7 @@ mod tests {
             placement: "feed".to_string(),
             route_id: "route-1".to_string(),
             action_node_id: "node-1".to_string(),
+            scene_equipment: "轻量背包".to_string(),
             title: "广告标题".to_string(),
             body: String::new(),
             image_url: String::new(),
@@ -917,6 +995,7 @@ mod tests {
             .update(
                 &campaign.id,
                 pb::UpdateCampaignRequest {
+                    advertiser_id: campaign.advertiser_id.clone(),
                     status: Some(pb::CampaignStatus::Active as i32),
                     ..Default::default()
                 },
@@ -989,6 +1068,7 @@ mod tests {
             .update(
                 &campaign.id,
                 pb::UpdateCampaignRequest {
+                    advertiser_id: campaign.advertiser_id.clone(),
                     status: Some(pb::CampaignStatus::Active as i32),
                     ..Default::default()
                 },
@@ -1035,5 +1115,46 @@ mod tests {
                 .expect("second impression should be rejected")
                 .accepted
         );
+    }
+
+    #[tokio::test]
+    async fn advertiser_catalog_is_isolated_for_reads_and_updates() {
+        let repository = MemoryCampaignRepository::default();
+        let first = repository
+            .create(campaign_request())
+            .await
+            .expect("first advertiser campaign should be created");
+        let mut second_request = campaign_request();
+        second_request.advertiser_id = "advertiser-2".to_string();
+        let second = repository
+            .create(second_request)
+            .await
+            .expect("second advertiser campaign should be created");
+
+        let first_campaigns = repository
+            .list_for_advertiser("advertiser-1", 20)
+            .await
+            .expect("first advertiser list should load");
+        assert_eq!(first_campaigns.len(), 1);
+        assert_eq!(first_campaigns[0].id, first.id);
+        assert!(matches!(
+            repository
+                .get_for_advertiser(&first.id, "advertiser-2")
+                .await,
+            Err(RepositoryError::NotFound(_))
+        ));
+        assert!(matches!(
+            repository
+                .update(
+                    &second.id,
+                    pb::UpdateCampaignRequest {
+                        advertiser_id: "advertiser-1".to_string(),
+                        name: Some("attempted cross-account update".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await,
+            Err(RepositoryError::NotFound(_))
+        ));
     }
 }

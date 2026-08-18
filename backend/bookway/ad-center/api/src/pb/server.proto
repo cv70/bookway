@@ -14,6 +14,7 @@ message AdCampaign {
   optional string starts_at = 18; optional string ends_at = 19; string created_at = 20; string updated_at = 21;
   double predicted_ctr = 22; double predicted_cvr = 23; uint32 global_frequency_cap = 24;
   string route_id = 25; string action_node_id = 26;
+  string scene_equipment = 27;
 }
 message CreateCampaignRequest {
   string advertiser_id = 1; string name = 2; string placement = 3; string title = 4;
@@ -22,6 +23,7 @@ message CreateCampaignRequest {
   uint32 frequency_cap = 12; optional string starts_at = 13; optional string ends_at = 14;
   double predicted_ctr = 15; double predicted_cvr = 16; uint32 global_frequency_cap = 17;
   string route_id = 18; string action_node_id = 19;
+  string scene_equipment = 20;
 }
 message UpdateCampaignRequest {
   string campaign_id = 1; optional CampaignStatus status = 2; optional string name = 3;
@@ -30,8 +32,11 @@ message UpdateCampaignRequest {
   optional int64 bid_micros = 9; optional int64 daily_budget_micros = 10;
   optional uint32 frequency_cap = 11; optional string starts_at = 12; optional string ends_at = 13;
   optional double predicted_ctr = 14; optional double predicted_cvr = 15; optional uint32 global_frequency_cap = 16;
+  string advertiser_id = 17;
+  optional string scene_equipment = 18;
 }
-message CampaignIdRequest { string campaign_id = 1; }
+message CampaignIdRequest { string campaign_id = 1; string advertiser_id = 2; }
+message AdvertiserCampaignQuery { string advertiser_id = 1; optional uint32 limit = 2; }
 message EligibleRequest { string user_id = 1; string placement = 2; string domain = 3; uint32 limit = 4; string route_id = 5; string action_node_id = 6; }
 message CampaignList { repeated AdCampaign items = 1; }
 message RecordEventRequest { string user_id = 1; string event_id = 2; string request_id = 3; string campaign_id = 4; EventType event_type = 5; }
@@ -43,6 +48,7 @@ service AdCenter {
   rpc CreateCampaign(CreateCampaignRequest) returns (AdCampaign);
   rpc UpdateCampaign(UpdateCampaignRequest) returns (AdCampaign);
   rpc Campaign(CampaignIdRequest) returns (AdCampaign);
+  rpc Campaigns(AdvertiserCampaignQuery) returns (CampaignList);
   rpc Eligible(EligibleRequest) returns (CampaignList);
   rpc RegisterDecisions(RegisterDecisionRequest) returns (EmptyResponse);
   rpc RecordEvent(RecordEventRequest) returns (EventReceipt);

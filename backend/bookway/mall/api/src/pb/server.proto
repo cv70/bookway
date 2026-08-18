@@ -37,11 +37,12 @@ message CreateSkuRequest {
 }
 
 message CreateProductRequest {
-  string title = 1;
-  string description = 2;
-  string image_url = 3;
-  MallProductStatus status = 4;
-  repeated CreateSkuRequest skus = 5;
+  string merchant_id = 1;
+  string title = 2;
+  string description = 3;
+  string image_url = 4;
+  MallProductStatus status = 5;
+  repeated CreateSkuRequest skus = 6;
 }
 
 message Attributes {
@@ -58,18 +59,21 @@ message UpdateSkuRequest {
 }
 
 message UpdateProductRequest {
-  string product_id = 1;
-  optional string title = 2;
-  optional string description = 3;
-  optional string image_url = 4;
-  optional MallProductStatus status = 5;
-  repeated UpdateSkuRequest sku_updates = 6;
+  string merchant_id = 1;
+  string product_id = 2;
+  optional string title = 3;
+  optional string description = 4;
+  optional string image_url = 5;
+  optional MallProductStatus status = 6;
+  repeated UpdateSkuRequest sku_updates = 7;
 }
 
 message ProductQueryRequest {
-  optional string cursor = 1;
-  optional uint32 limit = 2;
-  optional string query = 3;
+  optional string merchant_id = 1;
+  optional string cursor = 2;
+  optional uint32 limit = 3;
+  optional string query = 4;
+  bool include_inactive = 5;
 }
 
 message ProductPage {
@@ -95,13 +99,14 @@ message NodeOffer {
 }
 
 message AttachNodeOfferRequest {
-  string product_id = 1;
-  string sku_id = 2;
-  string route_id = 3;
-  string action_node_id = 4;
-  string creator_id = 5;
-  uint32 commission_bps = 6;
-  string idempotency_key = 7;
+  string merchant_id = 1;
+  string product_id = 2;
+  string sku_id = 3;
+  string route_id = 4;
+  string action_node_id = 5;
+  string creator_id = 6;
+  uint32 commission_bps = 7;
+  string idempotency_key = 8;
 }
 
 message NodeOfferQueryRequest {

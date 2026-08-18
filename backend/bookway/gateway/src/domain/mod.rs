@@ -49,6 +49,7 @@ pub(crate) struct Domain {
     media: media_pb::media_client::MediaClient<Channel>,
     content_audit: audit_pb::content_audit_client::ContentAuditClient<Channel>,
     feedback: feedback_pb::feedback_client::FeedbackClient<Channel>,
+    ad_center: ad_center_pb::ad_center_client::AdCenterClient<Channel>,
     ad_main: ad_main_pb::ad_main_client::AdMainClient<Channel>,
     mall: mall_pb::mall_client::MallClient<Channel>,
     mall_order: mall_order_pb::mall_order_client::MallOrderClient<Channel>,
@@ -163,6 +164,10 @@ impl Domain {
             .await?,
             feedback: feedback_pb::feedback_client::FeedbackClient::connect(
                 config.feedback_url.clone(),
+            )
+            .await?,
+            ad_center: ad_center_pb::ad_center_client::AdCenterClient::connect(
+                config.ad_center_url.clone(),
             )
             .await?,
             ad_main: ad_main_pb::ad_main_client::AdMainClient::connect(config.ad_main_url.clone())
@@ -1391,6 +1396,34 @@ impl Domain {
         grpc_call!(self, ad_main, "ad-main", decide, request)
     }
 
+    pub(crate) async fn advertiser_campaigns(
+        &self,
+        request: ad_center_pb::AdvertiserCampaignQuery,
+    ) -> Result<ad_center_pb::CampaignList, UpstreamError> {
+        grpc_call!(self, ad_center, "ad-center", campaigns, request)
+    }
+
+    pub(crate) async fn advertiser_campaign(
+        &self,
+        request: ad_center_pb::CampaignIdRequest,
+    ) -> Result<ad_center_pb::AdCampaign, UpstreamError> {
+        grpc_call!(self, ad_center, "ad-center", campaign, request)
+    }
+
+    pub(crate) async fn create_advertiser_campaign(
+        &self,
+        request: ad_center_pb::CreateCampaignRequest,
+    ) -> Result<ad_center_pb::AdCampaign, UpstreamError> {
+        grpc_call!(self, ad_center, "ad-center", create_campaign, request)
+    }
+
+    pub(crate) async fn update_advertiser_campaign(
+        &self,
+        request: ad_center_pb::UpdateCampaignRequest,
+    ) -> Result<ad_center_pb::AdCampaign, UpstreamError> {
+        grpc_call!(self, ad_center, "ad-center", update_campaign, request)
+    }
+
     pub(crate) async fn report_ad_event(
         &self,
         request: ad_center_pb::RecordEventRequest,
@@ -1403,6 +1436,27 @@ impl Domain {
         request: mall_pb::ProductQueryRequest,
     ) -> Result<mall_pb::ProductPage, UpstreamError> {
         grpc_call!(self, mall, "mall", products, request)
+    }
+
+    pub(crate) async fn create_mall_product(
+        &self,
+        request: mall_pb::CreateProductRequest,
+    ) -> Result<mall_pb::MallProduct, UpstreamError> {
+        grpc_call!(self, mall, "mall", create_product, request)
+    }
+
+    pub(crate) async fn update_mall_product(
+        &self,
+        request: mall_pb::UpdateProductRequest,
+    ) -> Result<mall_pb::MallProduct, UpstreamError> {
+        grpc_call!(self, mall, "mall", update_product, request)
+    }
+
+    pub(crate) async fn attach_mall_node_offer(
+        &self,
+        request: mall_pb::AttachNodeOfferRequest,
+    ) -> Result<mall_pb::NodeOffer, UpstreamError> {
+        grpc_call!(self, mall, "mall", attach_node_offer, request)
     }
 
     pub(crate) async fn mall_product(

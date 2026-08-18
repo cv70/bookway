@@ -66,9 +66,9 @@ impl Domain {
         &self,
         request: pb::UpdateCampaignRequest,
     ) -> Result<pb::AdCampaign, AdCenterError> {
-        if request.campaign_id.trim().is_empty() {
+        if request.campaign_id.trim().is_empty() || request.advertiser_id.trim().is_empty() {
             return Err(AdCenterError::Validation(
-                "campaign_id is required".to_string(),
+                "campaign_id and advertiser_id are required".to_string(),
             ));
         }
         if request.bid_micros.is_some_and(|value| value < 0)
@@ -76,6 +76,15 @@ impl Domain {
         {
             return Err(AdCenterError::Validation(
                 "budget and bid cannot be negative".to_string(),
+            ));
+        }
+        if request
+            .scene_equipment
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(AdCenterError::Validation(
+                "scene equipment cannot be empty".to_string(),
             ));
         }
         if request
@@ -104,14 +113,33 @@ impl Domain {
         &self,
         request: pb::CampaignIdRequest,
     ) -> Result<pb::AdCampaign, AdCenterError> {
-        if request.campaign_id.trim().is_empty() {
+        if request.campaign_id.trim().is_empty() || request.advertiser_id.trim().is_empty() {
             return Err(AdCenterError::Validation(
-                "campaign_id is required".to_string(),
+                "campaign_id and advertiser_id are required".to_string(),
             ));
         }
         self.repository
-            .get(&request.campaign_id)
+            .get_for_advertiser(&request.campaign_id, &request.advertiser_id)
             .await
+            .map_err(repository_error)
+    }
+
+    pub(crate) async fn campaigns(
+        &self,
+        request: pb::AdvertiserCampaignQuery,
+    ) -> Result<pb::CampaignList, AdCenterError> {
+        if request.advertiser_id.trim().is_empty() {
+            return Err(AdCenterError::Validation(
+                "advertiser_id is required".to_string(),
+            ));
+        }
+        self.repository
+            .list_for_advertiser(
+                &request.advertiser_id,
+                usize::try_from(request.limit.unwrap_or(50).clamp(1, 100)).unwrap_or(100),
+            )
+            .await
+            .map(|items| pb::CampaignList { items })
             .map_err(repository_error)
     }
 
@@ -210,7 +238,10 @@ impl Domain {
             ));
         }
         if !route.route_template.as_ref().is_some_and(|template| {
-            template.actions.iter().any(|action| action.id == action_node_id)
+            template
+                .actions
+                .iter()
+                .any(|action| action.id == action_node_id)
         }) {
             return Err(AdCenterError::Validation(
                 "广告行动节点不属于该公开路线".to_string(),
@@ -226,11 +257,12 @@ fn validate_campaign(request: &pb::CreateCampaignRequest) -> Result<(), AdCenter
         || request.placement.trim().is_empty()
         || request.route_id.trim().is_empty()
         || request.action_node_id.trim().is_empty()
+        || request.scene_equipment.trim().is_empty()
         || request.title.trim().is_empty()
         || request.landing_url.trim().is_empty()
     {
         return Err(AdCenterError::Validation(
-            "advertiser_id, name, placement, route, action node, title and landing_url are required".to_string(),
+            "advertiser_id, name, placement, route, action node, scene equipment, title and landing_url are required".to_string(),
         ));
     }
     if !request.landing_url.starts_with("https://") && !request.landing_url.starts_with("http://") {

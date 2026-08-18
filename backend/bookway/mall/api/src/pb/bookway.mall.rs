@@ -61,14 +61,16 @@ pub struct CreateSkuRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateProductRequest {
     #[prost(string, tag = "1")]
-    pub title: ::prost::alloc::string::String,
+    pub merchant_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
-    pub description: ::prost::alloc::string::String,
+    pub title: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
+    pub description: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
     pub image_url: ::prost::alloc::string::String,
-    #[prost(enumeration = "MallProductStatus", tag = "4")]
+    #[prost(enumeration = "MallProductStatus", tag = "5")]
     pub status: i32,
-    #[prost(message, repeated, tag = "5")]
+    #[prost(message, repeated, tag = "6")]
     pub skus: ::prost::alloc::vec::Vec<CreateSkuRequest>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -100,27 +102,33 @@ pub struct UpdateSkuRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateProductRequest {
     #[prost(string, tag = "1")]
+    pub merchant_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
     pub product_id: ::prost::alloc::string::String,
-    #[prost(string, optional, tag = "2")]
-    pub title: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "3")]
-    pub description: ::core::option::Option<::prost::alloc::string::String>,
+    pub title: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "4")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "5")]
     pub image_url: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(enumeration = "MallProductStatus", optional, tag = "5")]
+    #[prost(enumeration = "MallProductStatus", optional, tag = "6")]
     pub status: ::core::option::Option<i32>,
-    #[prost(message, repeated, tag = "6")]
+    #[prost(message, repeated, tag = "7")]
     pub sku_updates: ::prost::alloc::vec::Vec<UpdateSkuRequest>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProductQueryRequest {
     #[prost(string, optional, tag = "1")]
+    pub merchant_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "2")]
     pub cursor: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(uint32, optional, tag = "2")]
+    #[prost(uint32, optional, tag = "3")]
     pub limit: ::core::option::Option<u32>,
-    #[prost(string, optional, tag = "3")]
+    #[prost(string, optional, tag = "4")]
     pub query: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag = "5")]
+    pub include_inactive: bool,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -174,18 +182,20 @@ pub struct NodeOffer {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AttachNodeOfferRequest {
     #[prost(string, tag = "1")]
-    pub product_id: ::prost::alloc::string::String,
+    pub merchant_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
-    pub sku_id: ::prost::alloc::string::String,
+    pub product_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
-    pub route_id: ::prost::alloc::string::String,
+    pub sku_id: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
-    pub action_node_id: ::prost::alloc::string::String,
+    pub route_id: ::prost::alloc::string::String,
     #[prost(string, tag = "5")]
+    pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
     pub creator_id: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "6")]
+    #[prost(uint32, tag = "7")]
     pub commission_bps: u32,
-    #[prost(string, tag = "7")]
+    #[prost(string, tag = "8")]
     pub idempotency_key: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]

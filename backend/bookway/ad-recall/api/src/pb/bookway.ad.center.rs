@@ -168,6 +168,32 @@ pub mod ad_center_client {
                 .insert(GrpcMethod::new("bookway.ad.center.AdCenter", "Campaign"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn campaigns(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                ::bookway_ad_center_api::pb::AdvertiserCampaignQuery,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_ad_center_api::pb::CampaignList>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.ad.center.AdCenter/Campaigns",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.ad.center.AdCenter", "Campaigns"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn eligible(
             &mut self,
             request: impl tonic::IntoRequest<
@@ -282,6 +308,13 @@ pub mod ad_center_server {
             request: tonic::Request<::bookway_ad_center_api::pb::CampaignIdRequest>,
         ) -> std::result::Result<
             tonic::Response<::bookway_ad_center_api::pb::AdCampaign>,
+            tonic::Status,
+        >;
+        async fn campaigns(
+            &self,
+            request: tonic::Request<::bookway_ad_center_api::pb::AdvertiserCampaignQuery>,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_ad_center_api::pb::CampaignList>,
             tonic::Status,
         >;
         async fn eligible(
@@ -511,6 +544,54 @@ pub mod ad_center_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CampaignSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.ad.center.AdCenter/Campaigns" => {
+                    #[allow(non_camel_case_types)]
+                    struct CampaignsSvc<T: AdCenter>(pub Arc<T>);
+                    impl<
+                        T: AdCenter,
+                    > tonic::server::UnaryService<
+                        ::bookway_ad_center_api::pb::AdvertiserCampaignQuery,
+                    > for CampaignsSvc<T> {
+                        type Response = ::bookway_ad_center_api::pb::CampaignList;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                ::bookway_ad_center_api::pb::AdvertiserCampaignQuery,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdCenter>::campaigns(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CampaignsSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

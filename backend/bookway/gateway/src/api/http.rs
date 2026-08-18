@@ -172,7 +172,27 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/feed", get(feed))
         .route("/v1/ads", get(ad_decisions))
         .route("/v1/ads/events", post(report_ad_event))
+        .route(
+            "/v1/admin/ads/campaigns",
+            get(admin_ad_campaigns).post(admin_create_ad_campaign),
+        )
+        .route(
+            "/v1/admin/ads/campaigns/{campaign_id}",
+            get(admin_ad_campaign).patch(admin_update_ad_campaign),
+        )
         .route("/v1/mall/products", get(mall_products))
+        .route(
+            "/v1/admin/mall/products",
+            get(admin_mall_products).post(admin_create_mall_product),
+        )
+        .route(
+            "/v1/admin/mall/products/{product_id}",
+            patch(admin_update_mall_product),
+        )
+        .route(
+            "/v1/admin/routes/{route_id}/nodes/{action_node_id}/offers",
+            post(admin_attach_mall_node_offer),
+        )
         .route("/v1/mall/products/{product_id}", get(mall_product))
         .route(
             "/v1/routes/{route_id}/nodes/{action_node_id}/offers",
@@ -947,13 +967,118 @@ async fn report_ad_event(
     )))
 }
 
+async fn admin_ad_campaigns(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut request): Query<ad_center_pb::AdvertiserCampaignQuery>,
+) -> Result<Json<ApiResponse<ad_center_pb::CampaignList>>, HttpError> {
+    request.advertiser_id = advertiser_admin_id(&headers)?;
+    Ok(Json(ApiResponse::new(
+        state.domain.advertiser_campaigns(request).await?,
+    )))
+}
+
+async fn admin_ad_campaign(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(campaign_id): Path<String>,
+) -> Result<Json<ApiResponse<ad_center_pb::AdCampaign>>, HttpError> {
+    let campaign = state
+        .domain
+        .advertiser_campaign(ad_center_pb::CampaignIdRequest {
+            campaign_id,
+            advertiser_id: advertiser_admin_id(&headers)?,
+        })
+        .await?;
+    Ok(Json(ApiResponse::new(campaign)))
+}
+
+async fn admin_create_ad_campaign(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut request): Json<ad_center_pb::CreateCampaignRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<ad_center_pb::AdCampaign>>), HttpError> {
+    request.advertiser_id = advertiser_admin_id(&headers)?;
+    let campaign = state.domain.create_advertiser_campaign(request).await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::new(campaign))))
+}
+
+async fn admin_update_ad_campaign(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(campaign_id): Path<String>,
+    Json(mut request): Json<ad_center_pb::UpdateCampaignRequest>,
+) -> Result<Json<ApiResponse<ad_center_pb::AdCampaign>>, HttpError> {
+    request.advertiser_id = advertiser_admin_id(&headers)?;
+    request.campaign_id = campaign_id;
+    Ok(Json(ApiResponse::new(
+        state.domain.update_advertiser_campaign(request).await?,
+    )))
+}
+
 async fn mall_products(
     State(state): State<AppState>,
-    Query(request): Query<mall_pb::ProductQueryRequest>,
+    Query(mut request): Query<mall_pb::ProductQueryRequest>,
 ) -> Result<Json<ApiResponse<mall_pb::ProductPage>>, HttpError> {
+    request = public_product_query(request);
     Ok(Json(ApiResponse::new(
         state.domain.mall_products(request).await?,
     )))
+}
+
+fn public_product_query(mut request: mall_pb::ProductQueryRequest) -> mall_pb::ProductQueryRequest {
+    request.merchant_id = None;
+    request.include_inactive = false;
+    request
+}
+
+async fn admin_mall_products(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut request): Query<mall_pb::ProductQueryRequest>,
+) -> Result<Json<ApiResponse<mall_pb::ProductPage>>, HttpError> {
+    request.merchant_id = Some(merchant_admin_id(&headers)?);
+    request.include_inactive = true;
+    Ok(Json(ApiResponse::new(
+        state.domain.mall_products(request).await?,
+    )))
+}
+
+async fn admin_create_mall_product(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut request): Json<mall_pb::CreateProductRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<mall_pb::MallProduct>>), HttpError> {
+    request.merchant_id = merchant_admin_id(&headers)?;
+    let product = state.domain.create_mall_product(request).await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::new(product))))
+}
+
+async fn admin_update_mall_product(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(product_id): Path<String>,
+    Json(mut request): Json<mall_pb::UpdateProductRequest>,
+) -> Result<Json<ApiResponse<mall_pb::MallProduct>>, HttpError> {
+    request.merchant_id = merchant_admin_id(&headers)?;
+    request.product_id = product_id;
+    Ok(Json(ApiResponse::new(
+        state.domain.update_mall_product(request).await?,
+    )))
+}
+
+async fn admin_attach_mall_node_offer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((route_id, action_node_id)): Path<(String, String)>,
+    Json(mut request): Json<mall_pb::AttachNodeOfferRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<mall_pb::NodeOffer>>), HttpError> {
+    request.merchant_id = merchant_admin_id(&headers)?;
+    request.route_id = route_id;
+    request.action_node_id = action_node_id;
+    request.idempotency_key = idempotency_key(&headers).unwrap_or_default();
+    let offer = state.domain.attach_mall_node_offer(request).await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::new(offer))))
 }
 
 async fn mall_product(
@@ -1892,11 +2017,71 @@ fn moderator_id(headers: &HeaderMap) -> Result<String, HttpError> {
         .ok_or_else(|| HttpError::Forbidden("authenticated user is required".to_string()))
 }
 
+fn merchant_admin_id(headers: &HeaderMap) -> Result<String, HttpError> {
+    if !std::env::var("AUTH_REQUIRED").is_ok_and(|value| value == "true") {
+        return Err(HttpError::Forbidden(
+            "admin endpoints require AUTH_REQUIRED=true".to_string(),
+        ));
+    }
+    let authorized = headers
+        .get("x-user-roles")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(has_merchant_admin_role);
+    if !authorized {
+        return Err(HttpError::Forbidden(
+            "merchant admin role is required".to_string(),
+        ));
+    }
+    headers
+        .get("x-user-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| HttpError::Forbidden("authenticated user is required".to_string()))
+}
+
+fn advertiser_admin_id(headers: &HeaderMap) -> Result<String, HttpError> {
+    if !std::env::var("AUTH_REQUIRED").is_ok_and(|value| value == "true") {
+        return Err(HttpError::Forbidden(
+            "admin endpoints require AUTH_REQUIRED=true".to_string(),
+        ));
+    }
+    let authorized = headers
+        .get("x-user-roles")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(has_advertiser_admin_role);
+    if !authorized {
+        return Err(HttpError::Forbidden(
+            "advertiser admin role is required".to_string(),
+        ));
+    }
+    headers
+        .get("x-user-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| HttpError::Forbidden("authenticated user is required".to_string()))
+}
+
 fn has_moderator_role(roles: &str) -> bool {
     roles
         .split(',')
         .map(str::trim)
         .any(|role| matches!(role, "moderator" | "admin" | "trust_safety"))
+}
+
+fn has_merchant_admin_role(roles: &str) -> bool {
+    roles
+        .split(',')
+        .map(str::trim)
+        .any(|role| matches!(role, "admin" | "merchant_admin"))
+}
+
+fn has_advertiser_admin_role(roles: &str) -> bool {
+    roles
+        .split(',')
+        .map(str::trim)
+        .any(|role| matches!(role, "admin" | "advertiser_admin"))
 }
 
 fn idempotency_key(headers: &HeaderMap) -> Option<String> {
@@ -1978,7 +2163,11 @@ fn error_response(status: StatusCode, code: &'static str, message: String) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::has_moderator_role;
+    use super::{
+        has_advertiser_admin_role, has_merchant_admin_role, has_moderator_role,
+        public_product_query,
+    };
+    use bookway_mall_api::pb as mall_pb;
 
     #[test]
     fn moderator_roles_are_explicitly_allowlisted() {
@@ -1986,5 +2175,32 @@ mod tests {
         assert!(has_moderator_role("admin"));
         assert!(!has_moderator_role("member, editor"));
         assert!(!has_moderator_role("supermoderator"));
+    }
+
+    #[test]
+    fn merchant_admin_roles_are_explicitly_allowlisted() {
+        assert!(has_merchant_admin_role("member, merchant_admin"));
+        assert!(has_merchant_admin_role("admin"));
+        assert!(!has_merchant_admin_role("merchant"));
+        assert!(!has_merchant_admin_role("moderator"));
+    }
+
+    #[test]
+    fn advertiser_admin_roles_are_explicitly_allowlisted() {
+        assert!(has_advertiser_admin_role("member, advertiser_admin"));
+        assert!(has_advertiser_admin_role("admin"));
+        assert!(!has_advertiser_admin_role("merchant_admin"));
+        assert!(!has_advertiser_admin_role("advertiser"));
+    }
+
+    #[test]
+    fn public_product_query_cannot_request_merchant_drafts() {
+        let request = public_product_query(mall_pb::ProductQueryRequest {
+            merchant_id: Some("merchant-a".to_string()),
+            include_inactive: true,
+            ..Default::default()
+        });
+        assert_eq!(request.merchant_id, None);
+        assert!(!request.include_inactive);
     }
 }

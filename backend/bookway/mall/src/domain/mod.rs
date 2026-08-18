@@ -96,6 +96,7 @@ impl Domain {
         request: pb::AttachNodeOfferRequest,
     ) -> Result<pb::NodeOffer, MallError> {
         if request.product_id.trim().is_empty()
+            || request.merchant_id.trim().is_empty()
             || request.sku_id.trim().is_empty()
             || request.route_id.trim().is_empty()
             || request.action_node_id.trim().is_empty()
@@ -103,7 +104,7 @@ impl Domain {
             || request.idempotency_key.trim().is_empty()
         {
             return Err(MallError::Validation(
-                "product, SKU, route, action node, creator and idempotency key are required"
+                "merchant, product, SKU, route, action node, creator and idempotency key are required"
                     .to_string(),
             ));
         }
@@ -210,7 +211,8 @@ impl Domain {
     }
 }
 fn validate(request: &pb::CreateProductRequest) -> Result<(), MallError> {
-    if request.title.trim().is_empty()
+    if request.merchant_id.trim().is_empty()
+        || request.title.trim().is_empty()
         || request.title.chars().count() > 120
         || request.skus.is_empty()
         || request.skus.len() > 100
@@ -229,6 +231,9 @@ fn validate(request: &pb::CreateProductRequest) -> Result<(), MallError> {
     Ok(())
 }
 fn validate_update(request: &pb::UpdateProductRequest) -> Result<(), MallError> {
+    if request.merchant_id.trim().is_empty() {
+        return Err(MallError::Validation("merchant id is required".to_string()));
+    }
     if request.title.is_none()
         && request.description.is_none()
         && request.image_url.is_none()

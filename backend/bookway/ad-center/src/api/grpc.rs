@@ -47,6 +47,18 @@ impl AdCenter for GrpcServer {
         ))
     }
 
+    async fn campaigns(
+        &self,
+        request: Request<pb::AdvertiserCampaignQuery>,
+    ) -> Result<Response<pb::CampaignList>, Status> {
+        Ok(Response::new(
+            self.domain
+                .campaigns(request.into_inner())
+                .await
+                .map_err(ad_error)?,
+        ))
+    }
+
     async fn eligible(
         &self,
         request: Request<pb::EligibleRequest>,
