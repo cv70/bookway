@@ -13,6 +13,7 @@ bookway-api.workspace = true
 bookway-bbs-link-api.workspace = true
 bookway-bbs-search-api.workspace = true
 bookway-data.workspace = true
+bookway-knowledge-catalog-api.workspace = true
 bookway-runtime.workspace = true
 reqwest.workspace = true
 serde.workspace = true

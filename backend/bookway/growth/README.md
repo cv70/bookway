@@ -22,7 +22,7 @@ Journey 通过 `journey_type` 区分 `habit`、`project`、`quantity`、`travel`
 
 行动的 `recurrence` 是结构化日历规则：仅支持 `daily` 和 `weekly`、正整数 `interval`、周重复的去重 `weekdays`、可选 `ends_on`，以及服务端写入的 `anchor_date`。重复行动必须同时提供带显式偏移量的 `scheduled_for` 与 IANA `scheduled_timezone`。完成或跳过一个待办 occurrence 会原子保留该次事实，并物化下一次待办；重复规则结束时不再创建后续 occurrence。客户端必须使用完成接口而非以 PATCH 直接标记 `completed`，以免丢失下一次安排。
 
-`GET /v1/reviews/weekly` 除汇总和反思题外，还返回 `adjustment_suggestions`。`PUT /v1/reviews/weekly` 会保存用户的复盘结论和下周重点，并以 `(user_id, period_start, period_end)` 保留首次确认时的指标快照；同周再次保存只更新用户文字，绝不篡改历史指标。每条建议包含理由及可选的 `action_patch` 或 `journey_patch` 参数，分别对应已有的 `PATCH /v1/actions/{action_id}` 和 `PATCH /v1/journeys/{journey_id}`；建议只在用户确认后由客户端应用，服务不会悄悄改变计划。
+`GET /v1/reviews/weekly` 除汇总和反思题外，还返回 `adjustment_suggestions`。`PUT /v1/reviews/weekly` 会保存用户的复盘结论和下周重点，并以 `(user_id, period_start, period_end)` 保留首次确认时的指标快照；同周再次保存只更新用户文字，绝不篡改历史指标。客户端确认建议时调用 `POST /v1/reviews/{review_id}/adjustments/{suggestion_index}/apply`，不能自行提交 Action/Journey patch。Growth 在一个事务中锁定复盘与目标，确认建议仍对应首次生成的待办时才更新计划并记录决定；重复确认返回原决定，目标已完成、状态或预计时长已变化时拒绝陈旧建议。
 
 ## 陪伴简报策略
 

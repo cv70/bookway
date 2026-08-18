@@ -21,6 +21,25 @@ const MAX_REPORT_DETAILS_LENGTH: usize = 1_000;
 const MAX_REVIEW_RESOLUTION_LENGTH: usize = 1_000;
 
 impl Domain {
+    pub(crate) async fn get(
+        &self,
+        request: pb::GetRequest,
+    ) -> Result<pb::CommentItem, CommentError> {
+        if request.post_id.trim().is_empty() || request.comment_id.trim().is_empty() {
+            return Err(CommentError::Validation(
+                "内容和评论 ID 不能为空".to_string(),
+            ));
+        }
+        Ok(self
+            .repository
+            .get(
+                request.post_id.trim(),
+                request.comment_id.trim(),
+                &normalized_excluded_author_ids(request.excluded_author_ids),
+            )
+            .await?)
+    }
+
     pub(crate) async fn list(
         &self,
         request: pb::ListRequest,

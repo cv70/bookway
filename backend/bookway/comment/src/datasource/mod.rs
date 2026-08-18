@@ -83,6 +83,12 @@ impl CommentCursor {
 
 #[async_trait]
 pub(crate) trait CommentRepository: Send + Sync {
+    async fn get(
+        &self,
+        post_id: &str,
+        comment_id: &str,
+        excluded_author_ids: &[String],
+    ) -> Result<pb::CommentItem, RepositoryError>;
     async fn list(
         &self,
         post_id: &str,
@@ -268,6 +274,23 @@ fn public_comment_items(
 
 #[async_trait]
 impl CommentRepository for MemoryCommentRepository {
+    async fn get(
+        &self,
+        post_id: &str,
+        comment_id: &str,
+        excluded_author_ids: &[String],
+    ) -> Result<pb::CommentItem, RepositoryError> {
+        let state = self.state.read().await;
+        let items = state
+            .comments
+            .get(post_id)
+            .ok_or_else(|| RepositoryError::NotFound(comment_id.to_string()))?;
+        public_comment_items(items, excluded_author_ids)
+            .into_iter()
+            .find(|comment| comment.id == comment_id)
+            .ok_or_else(|| RepositoryError::NotFound(comment_id.to_string()))
+    }
+
     async fn list(
         &self,
         post_id: &str,
@@ -772,6 +795,25 @@ struct CommentAppealRow {
 
 #[async_trait]
 impl CommentRepository for PostgresCommentRepository {
+    async fn get(
+        &self,
+        post_id: &str,
+        comment_id: &str,
+        excluded_author_ids: &[String],
+    ) -> Result<pb::CommentItem, RepositoryError> {
+        let row = sqlx::query_as::<_, StoredCommentRow>(
+            "SELECT id, post_id, author_id, parent_id, body, like_count, created_at, moderation_state, deleted_at IS NOT NULL FROM comments WHERE id = $1 AND post_id = $2 AND deleted_at IS NULL AND moderation_state = 'published' AND (cardinality($3::TEXT[]) = 0 OR author_id <> ALL($3::TEXT[]))",
+        )
+        .bind(comment_id)
+        .bind(post_id)
+        .bind(excluded_author_ids)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::Database)?
+        .ok_or_else(|| RepositoryError::NotFound(comment_id.to_string()))?;
+        comment_from_stored_row(row)
+    }
+
     async fn list(
         &self,
         post_id: &str,
@@ -2300,6 +2342,28 @@ mod tests {
         assert!(matches!(
             conflicting_terminal_review,
             Err(RepositoryError::ReportConflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_returns_only_a_visible_published_comment_on_the_requested_post() {
+        let repository = MemoryCommentRepository::default();
+        let comment = published_comment(&repository).await;
+
+        let fetched = repository
+            .get("post", &comment.id, &[])
+            .await
+            .expect("published answer is readable");
+        assert_eq!(fetched.id, comment.id);
+        assert!(matches!(
+            repository
+                .get("post", &comment.id, &["author".to_string()])
+                .await,
+            Err(RepositoryError::NotFound(_))
+        ));
+        assert!(matches!(
+            repository.get("other-post", &comment.id, &[]).await,
+            Err(RepositoryError::NotFound(_))
         ));
     }
 }

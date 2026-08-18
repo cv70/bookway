@@ -726,6 +726,13 @@ mod tests {
         ) -> Result<Response<bbs_link_pb::Content>, Status> {
             Err(Status::unimplemented("not used by following recall"))
         }
+
+        async fn accept_answer(
+            &self,
+            _request: Request<bbs_link_pb::AcceptAnswerRequest>,
+        ) -> Result<Response<bbs_link_pb::Content>, Status> {
+            Err(Status::unimplemented("not used by following recall"))
+        }
     }
 
     async fn recording_bbs_link() -> (RecordingBbsLink, String, tokio::task::JoinHandle<()>) {

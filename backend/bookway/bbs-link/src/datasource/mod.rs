@@ -214,6 +214,8 @@ fn seed(input: SeedContent<'_>) -> pb::Content {
             freshness: input.freshness,
             tags: input.tags.split(',').map(str::to_string).collect(),
             is_route: true,
+            is_milestone: false,
+            is_question: false,
         }),
         author_id: input.author_id.to_string(),
         content_type: pb::ContentType::Route as i32,
@@ -233,6 +235,9 @@ fn seed(input: SeedContent<'_>) -> pb::Content {
         version: 1,
         quality_score: input.freshness * 0.4 + f64::from(input.like_count).ln_1p() / 10.0,
         route_template: Some(seed_route_template(&input)),
+        milestone: None,
+        accepted_answer_id: None,
+        question_context: None,
     }
 }
 
@@ -246,6 +251,7 @@ fn seed_route_template(input: &SeedContent<'_>) -> pb::RouteTemplate {
             completion_criteria: "完成至少一次行动并留下简短记录".to_string(),
         }],
         actions: vec![pb::RouteTemplateAction {
+            id: format!("{}-start", input.id),
             title: input.route_title.to_string(),
             detail: input.summary.to_string(),
             estimated_minutes: 20,
@@ -856,6 +862,8 @@ fn content_type_name(value: i32) -> Result<&'static str, RepositoryError> {
         Ok(pb::ContentType::Article) => Ok("article"),
         Ok(pb::ContentType::Video) => Ok("video"),
         Ok(pb::ContentType::Route) => Ok("route"),
+        Ok(pb::ContentType::Milestone) => Ok("milestone"),
+        Ok(pb::ContentType::Question) => Ok("question"),
         Err(_) => Err(RepositoryError::InvalidContent(
             "invalid content type".to_string(),
         )),

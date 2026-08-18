@@ -58,6 +58,34 @@ pub struct PostSummary {
     pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(bool, tag = "14")]
     pub is_route: bool,
+    #[prost(bool, tag = "15")]
+    pub is_milestone: bool,
+    #[prost(bool, tag = "16")]
+    pub is_question: bool,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ResourceSummary {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub provider: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub url: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub license: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub version: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub citation: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "8")]
+    pub topics: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "9")]
+    pub published_at: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub updated_at: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -84,6 +112,8 @@ pub struct SearchResult {
     pub highlights: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "11")]
     pub post: ::core::option::Option<PostSummary>,
+    #[prost(message, optional, tag = "12")]
+    pub resource: ::core::option::Option<ResourceSummary>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -112,6 +142,8 @@ pub struct Suggestion {
     pub result_type: i32,
     #[prost(double, tag = "3")]
     pub score: f64,
+    #[prost(bool, tag = "4")]
+    pub personal: bool,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -130,6 +162,7 @@ pub enum SearchType {
     Journeys = 2,
     Users = 3,
     Topics = 4,
+    Resources = 5,
 }
 impl SearchType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -143,6 +176,7 @@ impl SearchType {
             Self::Journeys => "SEARCH_TYPE_JOURNEYS",
             Self::Users => "SEARCH_TYPE_USERS",
             Self::Topics => "SEARCH_TYPE_TOPICS",
+            Self::Resources => "SEARCH_TYPE_RESOURCES",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -153,6 +187,7 @@ impl SearchType {
             "SEARCH_TYPE_JOURNEYS" => Some(Self::Journeys),
             "SEARCH_TYPE_USERS" => Some(Self::Users),
             "SEARCH_TYPE_TOPICS" => Some(Self::Topics),
+            "SEARCH_TYPE_RESOURCES" => Some(Self::Resources),
             _ => None,
         }
     }
@@ -165,6 +200,7 @@ pub enum SearchResultType {
     Journey = 1,
     User = 2,
     Topic = 3,
+    Resource = 4,
 }
 impl SearchResultType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -177,6 +213,7 @@ impl SearchResultType {
             Self::Journey => "SEARCH_RESULT_TYPE_JOURNEY",
             Self::User => "SEARCH_RESULT_TYPE_USER",
             Self::Topic => "SEARCH_RESULT_TYPE_TOPIC",
+            Self::Resource => "SEARCH_RESULT_TYPE_RESOURCE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -186,6 +223,7 @@ impl SearchResultType {
             "SEARCH_RESULT_TYPE_JOURNEY" => Some(Self::Journey),
             "SEARCH_RESULT_TYPE_USER" => Some(Self::User),
             "SEARCH_RESULT_TYPE_TOPIC" => Some(Self::Topic),
+            "SEARCH_RESULT_TYPE_RESOURCE" => Some(Self::Resource),
             _ => None,
         }
     }

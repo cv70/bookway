@@ -132,9 +132,22 @@ pub(crate) enum SearchSessionError {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RecallState {
+    #[serde(default = "default_recall_source")]
+    pub(crate) source: RecallSource,
     pub(crate) query: String,
     pub(crate) source_cursor: Option<String>,
     pub(crate) exhausted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RecallSource {
+    Bbs,
+    Resource,
+}
+
+fn default_recall_source() -> RecallSource {
+    RecallSource::Bbs
 }
 
 /// The main-search session mixes independently paged recalls without exposing

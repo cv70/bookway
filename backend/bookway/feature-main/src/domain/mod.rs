@@ -32,7 +32,7 @@ impl Domain {
         let model_version = config.model_version.clone();
         Ok(Self {
             config,
-            repository: Arc::new(FeatureRepository::new(pool)),
+            repository: Arc::new(FeatureRepository::new(pool, model_version.clone())),
             cache: Arc::new(FeatureCache::new(redis)),
             model_version,
         })
@@ -82,6 +82,10 @@ impl Domain {
                     author_affinity: features.author_affinity,
                     impression_fatigue: features.impression_fatigue,
                     direct_negative_feedback: features.direct_negative_feedback,
+                    click_through_rate: features.click_through_rate,
+                    save_rate: features.save_rate,
+                    action_completion_rate: features.action_completion_rate,
+                    purchase_conversion_rate: features.purchase_conversion_rate,
                 })
                 .collect(),
         }
@@ -120,6 +124,7 @@ mod tests {
                 author_affinity: 0.3,
                 impression_fatigue: 0.5,
                 direct_negative_feedback: 0.0,
+                ..Default::default()
             },
         )]);
         let response = pb::FeaturesResponse {
@@ -131,6 +136,10 @@ mod tests {
                     author_affinity: features.author_affinity,
                     impression_fatigue: features.impression_fatigue,
                     direct_negative_feedback: features.direct_negative_feedback,
+                    click_through_rate: features.click_through_rate,
+                    save_rate: features.save_rate,
+                    action_completion_rate: features.action_completion_rate,
+                    purchase_conversion_rate: features.purchase_conversion_rate,
                 })
                 .collect(),
             ..Default::default()

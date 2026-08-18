@@ -8,6 +8,10 @@ message CandidateFeatures {
   double author_affinity = 3;
   double impression_fatigue = 4;
   double direct_negative_feedback = 5;
+  double click_through_rate = 6;
+  double save_rate = 7;
+  double action_completion_rate = 8;
+  double purchase_conversion_rate = 9;
 }
 message FeaturesResponse {
   string user_id = 1;

@@ -148,6 +148,62 @@ pub struct SkuListResponse {
     #[prost(message, repeated, tag = "1")]
     pub items: ::prost::alloc::vec::Vec<MallSku>,
 }
+/// A contextual offer is attached to a public route action node.  The mall
+/// owns this association so content services never need to copy product facts.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NodeOffer {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub product_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub sku_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub creator_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "7")]
+    pub commission_bps: u32,
+    #[prost(string, tag = "8")]
+    pub created_at: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttachNodeOfferRequest {
+    #[prost(string, tag = "1")]
+    pub product_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub sku_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub creator_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "6")]
+    pub commission_bps: u32,
+    #[prost(string, tag = "7")]
+    pub idempotency_key: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NodeOfferQueryRequest {
+    #[prost(string, tag = "1")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub action_node_id: ::prost::alloc::string::String,
+    #[prost(uint32, optional, tag = "3")]
+    pub limit: ::core::option::Option<u32>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NodeOfferList {
+    #[prost(message, repeated, tag = "1")]
+    pub items: ::prost::alloc::vec::Vec<NodeOffer>,
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -373,6 +429,69 @@ pub mod mall_client {
             req.extensions_mut().insert(GrpcMethod::new("bookway.mall.Mall", "Skus"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn attach_node_offer(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AttachNodeOfferRequest>,
+        ) -> std::result::Result<tonic::Response<super::NodeOffer>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.mall.Mall/AttachNodeOffer",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.mall.Mall", "AttachNodeOffer"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn node_offers(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NodeOfferQueryRequest>,
+        ) -> std::result::Result<tonic::Response<super::NodeOfferList>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.mall.Mall/NodeOffers",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.mall.Mall", "NodeOffers"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_node_offer(
+            &mut self,
+            request: impl tonic::IntoRequest<super::IdRequest>,
+        ) -> std::result::Result<tonic::Response<super::NodeOffer>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.mall.Mall/GetNodeOffer",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.mall.Mall", "GetNodeOffer"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -408,6 +527,18 @@ pub mod mall_server {
             &self,
             request: tonic::Request<super::SkuIdsRequest>,
         ) -> std::result::Result<tonic::Response<super::SkuListResponse>, tonic::Status>;
+        async fn attach_node_offer(
+            &self,
+            request: tonic::Request<super::AttachNodeOfferRequest>,
+        ) -> std::result::Result<tonic::Response<super::NodeOffer>, tonic::Status>;
+        async fn node_offers(
+            &self,
+            request: tonic::Request<super::NodeOfferQueryRequest>,
+        ) -> std::result::Result<tonic::Response<super::NodeOfferList>, tonic::Status>;
+        async fn get_node_offer(
+            &self,
+            request: tonic::Request<super::IdRequest>,
+        ) -> std::result::Result<tonic::Response<super::NodeOffer>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct MallServer<T> {
@@ -689,6 +820,139 @@ pub mod mall_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SkusSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.mall.Mall/AttachNodeOffer" => {
+                    #[allow(non_camel_case_types)]
+                    struct AttachNodeOfferSvc<T: Mall>(pub Arc<T>);
+                    impl<
+                        T: Mall,
+                    > tonic::server::UnaryService<super::AttachNodeOfferRequest>
+                    for AttachNodeOfferSvc<T> {
+                        type Response = super::NodeOffer;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AttachNodeOfferRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Mall>::attach_node_offer(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AttachNodeOfferSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.mall.Mall/NodeOffers" => {
+                    #[allow(non_camel_case_types)]
+                    struct NodeOffersSvc<T: Mall>(pub Arc<T>);
+                    impl<
+                        T: Mall,
+                    > tonic::server::UnaryService<super::NodeOfferQueryRequest>
+                    for NodeOffersSvc<T> {
+                        type Response = super::NodeOfferList;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NodeOfferQueryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Mall>::node_offers(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = NodeOffersSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.mall.Mall/GetNodeOffer" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetNodeOfferSvc<T: Mall>(pub Arc<T>);
+                    impl<T: Mall> tonic::server::UnaryService<super::IdRequest>
+                    for GetNodeOfferSvc<T> {
+                        type Response = super::NodeOffer;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::IdRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Mall>::get_node_offer(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetNodeOfferSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

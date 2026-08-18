@@ -16,6 +16,8 @@ pub struct CreateRequest {
     pub idempotency_key: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "3")]
     pub items: ::prost::alloc::vec::Vec<OrderItemRequest>,
+    #[prost(string, optional, tag = "4")]
+    pub node_offer_id: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -58,6 +60,12 @@ pub struct Order {
     pub created_at: ::prost::alloc::string::String,
     #[prost(string, tag = "10")]
     pub updated_at: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "11")]
+    pub node_offer_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "12")]
+    pub affiliate_creator_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int64, tag = "13")]
+    pub commission_cents: i64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

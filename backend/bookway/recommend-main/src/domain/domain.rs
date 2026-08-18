@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use bookway_ad_main_api::pb::ad_main_client::AdMainClient;
 use bookway_bbs_api::pb::bbs_client::BbsClient;
-use bookway_commonlikestatus_api::pb::common_like_status_client::CommonLikeStatusClient;
+use bookway_interaction_status_api::pb::interaction_status_client::InteractionStatusClient;
 use bookway_recommend_rank_api::pb as rank;
 use bookway_recommend_recall_api::pb as recall;
 
@@ -34,9 +35,10 @@ impl Domain {
         let bbs = BbsClient::connect(config.bbs_url.clone())
             .await
             .map_err(|error| setting_error("BBS_GRPC_URL", error))?;
-        let like_status = CommonLikeStatusClient::connect(config.like_status_url.clone())
-            .await
-            .map_err(|error| setting_error("LIKE_STATUS_GRPC_URL", error))?;
+        let interaction_status =
+            InteractionStatusClient::connect(config.interaction_status_url.clone())
+                .await
+                .map_err(|error| setting_error("INTERACTION_STATUS_GRPC_URL", error))?;
         let exposures: SharedExposureDataSource = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => Arc::new(MemoryExposureDataSource::default()),
             bookway_data::StorageMode::Postgres => Arc::new(PostgresExposureDataSource::new(
@@ -63,6 +65,9 @@ impl Domain {
             )
             .await
             .map_err(|error| setting_error("FEATURE_MAIN_GRPC_URL", error))?;
+        let ad_main = AdMainClient::connect(config.ad_main_url.clone())
+            .await
+            .map_err(|error| setting_error("AD_MAIN_GRPC_URL", error))?;
         let pipeline = FeedPipeline::new(FeedPipelineComponents {
             query_hydrator: Arc::new(DefaultQueryHydrator),
             sources: vec![Arc::new(RecommendRecallSource::new(
@@ -74,7 +79,7 @@ impl Domain {
                 Arc::new(ServedHistoryHydrator::new(exposures.clone())),
                 Arc::new(SocialContextHydrator::new(bbs.clone())),
                 Arc::new(RouteContextHydrator::new(bbs)),
-                Arc::new(ReactionContextHydrator::new(like_status)),
+                Arc::new(ReactionContextHydrator::new(interaction_status)),
                 Arc::new(SocialProofHydrator),
             ],
             filters: vec![
@@ -97,7 +102,7 @@ impl Domain {
         });
         Ok(Self {
             config,
-            feed: super::FeedService::new(pipeline),
+            feed: super::FeedService::new(pipeline, ad_main),
             exposures,
         })
     }

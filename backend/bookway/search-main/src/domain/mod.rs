@@ -6,6 +6,9 @@ use std::{
 
 use bookway_bbs_link_api::pb::{self as bbs_link_pb, bbs_link_client::BbsLinkClient};
 use bookway_bbs_search_api::pb::{self, bbs_search_client::BbsSearchClient};
+use bookway_knowledge_catalog_api::pb::{
+    self as catalog_pb, knowledge_catalog_client::KnowledgeCatalogClient,
+};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -16,7 +19,7 @@ use crate::{
     datasource::{
         MemoryQueryRewriteRepository, MemorySearchExposureStore, MemorySearchSessionStore,
         PostgresQueryRewriteRepository, PostgresSearchExposureStore, PostgresSearchSessionStore,
-        QueryRewriteDictionary, RecallState, SearchAttribution, SearchExposure,
+        QueryRewriteDictionary, RecallSource, RecallState, SearchAttribution, SearchExposure,
         SearchExposureError, SearchExposureItem, SearchPipelineSession, SearchSessionError,
         SearchSessionStore, SharedQueryRewriteRepository, SharedSearchExposureStore,
         builtin_query_rewrite_dictionary,
@@ -33,6 +36,7 @@ const MAX_REWRITE_TERMS: usize = 6;
 const QUERY_REWRITE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const BBS_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_500);
 const BBS_LINK_TIMEOUT: Duration = Duration::from_millis(1_500);
+const KNOWLEDGE_CATALOG_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SearchIntent {
@@ -40,10 +44,12 @@ enum SearchIntent {
     Topic,
     User,
     Journey,
+    Resource,
 }
 
 #[derive(Clone, Debug)]
 struct RecallPlan {
+    source: RecallSource,
     query: String,
 }
 
@@ -163,6 +169,8 @@ pub(crate) enum SearchMainError {
     Upstream { code: tonic::Code, message: String },
     #[error("bbs-link public content request failed with {code:?}: {message}")]
     ContentUpstream { code: tonic::Code, message: String },
+    #[error("knowledge-catalog resource request failed with {code:?}: {message}")]
+    ResourceUpstream { code: tonic::Code, message: String },
     #[error("bbs-link returned an invalid public summary batch")]
     InvalidContentSummary,
 }
@@ -172,6 +180,7 @@ pub(crate) struct Domain {
     pub(crate) config: Config,
     search_client: BbsSearchClient<tonic::transport::Channel>,
     content_client: Option<BbsLinkClient<tonic::transport::Channel>>,
+    resource_client: Option<KnowledgeCatalogClient<tonic::transport::Channel>>,
     sessions: Arc<dyn SearchSessionStore>,
     exposures: SharedSearchExposureStore,
     query_rewrites: Arc<QueryRewriteCache>,
@@ -182,6 +191,7 @@ impl Domain {
         config: Config,
         search_client: BbsSearchClient<tonic::transport::Channel>,
         content_client: BbsLinkClient<tonic::transport::Channel>,
+        resource_client: KnowledgeCatalogClient<tonic::transport::Channel>,
     ) -> Result<Self, bookway_data::DataError> {
         let storage = bookway_data::storage_mode()?;
         let pool = match storage {
@@ -204,6 +214,7 @@ impl Domain {
             config,
             search_client,
             content_client: Some(content_client),
+            resource_client: Some(resource_client),
             sessions,
             exposures,
             query_rewrites: Arc::new(QueryRewriteCache::new(query_rewrites)),
@@ -221,11 +232,13 @@ impl Domain {
                 listen_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
                 bbs_search_url: String::new(),
                 bbs_link_url: String::new(),
+                knowledge_catalog_url: String::new(),
             },
             search_client,
             // Unit tests supply already-authoritative candidates directly. Production
             // construction above always installs the BBS Link public-fact client.
             content_client: None,
+            resource_client: None,
             sessions,
             exposures,
             query_rewrites: Arc::new(QueryRewriteCache::new(Arc::new(
@@ -242,7 +255,12 @@ impl Domain {
             .map_err(|_| SearchMainError::InvalidCursor("搜索类型无效".to_string()))?;
         let started = Instant::now();
         let rewrite_resolution = self.query_rewrites.active().await;
-        let plan = make_search_plan(&request.q, &rewrite_resolution.dictionary)?;
+        let plan = make_search_plan(
+            &request.q,
+            search_type,
+            &rewrite_resolution.dictionary,
+            self.resource_client.is_some(),
+        )?;
         request.q = plan.original_query.clone();
         let limit = request
             .limit
@@ -431,7 +449,11 @@ impl Domain {
             source_request.limit = Some(RECALL_PAGE_SIZE as u32);
             calls += 1;
 
-            match self.search_bbs(source_request).await {
+            let recall_result = match recall.source {
+                RecallSource::Bbs => self.search_bbs(source_request).await,
+                RecallSource::Resource => self.search_resources(source_request).await,
+            };
+            match recall_result {
                 Ok(response) => {
                     let recall = &mut session.recalls[index];
                     recall.source_cursor = response.next_cursor;
@@ -463,6 +485,52 @@ impl Domain {
         }
         sort_results(&mut session.pending);
         Ok(calls)
+    }
+
+    async fn search_resources(
+        &self,
+        request: pb::SearchRequest,
+    ) -> Result<pb::SearchResponse, SearchMainError> {
+        let Some(resource_client) = self.resource_client.as_ref() else {
+            return Ok(pb::SearchResponse {
+                query: request.q,
+                items: Vec::new(),
+                next_cursor: None,
+                total_estimate: 0,
+                took_ms: 0,
+                degraded: true,
+                request_id: String::new(),
+            });
+        };
+        let mut client = resource_client.clone();
+        let query = request.q.clone();
+        let response = tokio::time::timeout(
+            KNOWLEDGE_CATALOG_TIMEOUT,
+            client.search(
+                bookway_runtime::grpc_service_request(catalog_pb::SearchRequest {
+                    query: query.clone(),
+                    kind: None,
+                    topic: String::new(),
+                    cursor: request.cursor.unwrap_or_default(),
+                    limit: request.limit,
+                })
+                .map_err(|error| SearchMainError::ResourceUpstream {
+                    code: tonic::Code::Internal,
+                    message: error.to_string(),
+                })?,
+            ),
+        )
+        .await
+        .map_err(|_| SearchMainError::ResourceUpstream {
+            code: tonic::Code::DeadlineExceeded,
+            message: "knowledge-catalog request timed out".to_string(),
+        })?
+        .map_err(|error| SearchMainError::ResourceUpstream {
+            code: error.code(),
+            message: error.message().to_string(),
+        })?
+        .into_inner();
+        Ok(resource_search_response(query, response))
     }
 
     async fn revalidate_pending(
@@ -570,6 +638,79 @@ fn pending_content_ids(
     Ok(ids)
 }
 
+fn resource_search_response(
+    query: String,
+    value: catalog_pb::SearchResponse,
+) -> pb::SearchResponse {
+    let total_estimate = u64::try_from(value.items.len()).unwrap_or(u64::MAX);
+    let items = value
+        .items
+        .into_iter()
+        .enumerate()
+        .map(|(position, resource)| resource_to_result(resource, position))
+        .collect::<Vec<_>>();
+    pb::SearchResponse {
+        query,
+        items,
+        next_cursor: value.next_cursor,
+        total_estimate,
+        took_ms: 0,
+        degraded: false,
+        request_id: String::new(),
+    }
+}
+
+fn resource_to_result(resource: catalog_pb::Resource, position: usize) -> pb::SearchResult {
+    let kind = match catalog_pb::ResourceKind::try_from(resource.kind).ok() {
+        Some(catalog_pb::ResourceKind::Book) => "book",
+        Some(catalog_pb::ResourceKind::Course) => "course",
+        Some(catalog_pb::ResourceKind::Tool) => "tool",
+        Some(catalog_pb::ResourceKind::Article) => "article",
+        Some(catalog_pb::ResourceKind::Podcast) => "podcast",
+        _ => "unspecified",
+    };
+    let score = 100.0 - position as f64;
+    pb::SearchResult {
+        id: resource.id.clone(),
+        result_type: pb::SearchResultType::Resource as i32,
+        title: resource.title.clone(),
+        snippet: resource.summary.clone(),
+        cover_url: None,
+        author_id: Some(resource.provider.clone()),
+        author_name: Some(resource.provider.clone()),
+        domain: resource_domain(&resource.topics),
+        score,
+        highlights: vec![],
+        post: None,
+        resource: Some(pb::ResourceSummary {
+            id: resource.id,
+            kind: kind.to_string(),
+            provider: resource.provider,
+            url: resource.url,
+            license: resource.license,
+            version: resource.version,
+            citation: resource.citation,
+            topics: resource.topics,
+            published_at: resource.published_at,
+            updated_at: resource.updated_at,
+        }),
+    }
+}
+
+fn resource_domain(topics: &[String]) -> Option<i32> {
+    if topics.iter().any(|topic| topic.contains("学习")) {
+        Some(pb::GrowthDomain::Learning as i32)
+    } else if topics.iter().any(|topic| topic.contains("运动")) {
+        Some(pb::GrowthDomain::Movement as i32)
+    } else if topics.iter().any(|topic| topic.contains("健康")) {
+        Some(pb::GrowthDomain::Wellness as i32)
+    } else if topics.iter().any(|topic| topic.contains("旅行")) {
+        Some(pb::GrowthDomain::Travel as i32)
+    } else {
+        None
+    }
+}
+
 fn reconcile_pending_results(
     candidates: Vec<pb::SearchResult>,
     summaries: bbs_link_pb::PublicContentSummaries,
@@ -588,6 +729,8 @@ fn reconcile_pending_results(
             || !requested.contains(&summary.id)
             || bbs_link_pb::GrowthDomain::try_from(post.domain).is_err()
             || post.is_route != (content_type == bbs_link_pb::ContentType::Route)
+            || post.is_milestone != (content_type == bbs_link_pb::ContentType::Milestone)
+            || post.is_question != (content_type == bbs_link_pb::ContentType::Question)
             || authoritative.insert(summary.id.clone(), summary).is_some()
         {
             return Err(SearchMainError::InvalidContentSummary);
@@ -632,6 +775,7 @@ fn search_result_from_summary(
         score: candidate.score,
         highlights: Vec::new(),
         post: Some(search_post_summary(post.clone())),
+        resource: None,
     }
 }
 
@@ -651,6 +795,8 @@ fn search_post_summary(value: bbs_link_pb::PostSummary) -> pb::PostSummary {
         freshness: value.freshness,
         tags: value.tags,
         is_route: value.is_route,
+        is_milestone: value.is_milestone,
+        is_question: value.is_question,
     }
 }
 
@@ -670,22 +816,45 @@ fn non_empty(value: &str) -> Option<String> {
 
 fn make_search_plan(
     query: &str,
+    search_type: pb::SearchType,
     dictionary: &QueryRewriteDictionary,
+    enable_resource_search: bool,
 ) -> Result<SearchPlan, SearchMainError> {
     let original_query = normalize_query(query)?;
-    let mut recalls = vec![RecallPlan {
-        query: original_query.clone(),
-    }];
+    let mut recalls = Vec::new();
     let intent = search_intent(&original_query);
     let aliases = matches!(intent, SearchIntent::Generic | SearchIntent::Journey)
         .then(|| synonym_aliases(&original_query, dictionary))
         .unwrap_or_default();
-    if !aliases.is_empty() {
-        let mut expansion_terms = vec![original_query.clone()];
-        expansion_terms.extend(aliases);
+    if !matches!(search_type, pb::SearchType::Resources) {
         recalls.push(RecallPlan {
-            query: expansion_terms.join(" "),
+            source: RecallSource::Bbs,
+            query: original_query.clone(),
         });
+        if !aliases.is_empty() {
+            let mut expansion_terms = vec![original_query.clone()];
+            expansion_terms.extend(aliases.iter().cloned());
+            recalls.push(RecallPlan {
+                source: RecallSource::Bbs,
+                query: expansion_terms.join(" "),
+            });
+        }
+    }
+    if enable_resource_search
+        && matches!(search_type, pb::SearchType::All | pb::SearchType::Resources)
+    {
+        recalls.push(RecallPlan {
+            source: RecallSource::Resource,
+            query: original_query.clone(),
+        });
+        if !aliases.is_empty() {
+            let mut expansion_terms = vec![original_query.clone()];
+            expansion_terms.extend(aliases);
+            recalls.push(RecallPlan {
+                source: RecallSource::Resource,
+                query: expansion_terms.join(" "),
+            });
+        }
     }
     Ok(SearchPlan {
         intent,
@@ -808,6 +977,11 @@ fn search_intent(query: &str) -> SearchIntent {
         .any(|term| query.contains(term))
     {
         SearchIntent::Journey
+    } else if ["资源", "资料", "工具", "课程", "清单"]
+        .iter()
+        .any(|term| query.contains(term))
+    {
+        SearchIntent::Resource
     } else {
         SearchIntent::Generic
     }
@@ -821,6 +995,7 @@ fn new_session(fingerprint: u64, plan: &SearchPlan) -> SearchPipelineSession {
             .recalls
             .iter()
             .map(|recall| RecallState {
+                source: recall.source,
                 query: recall.query.clone(),
                 source_cursor: None,
                 exhausted: false,
@@ -839,6 +1014,7 @@ fn legacy_session(fingerprint: u64, query: String, source_cursor: String) -> Sea
         query_fingerprint: fingerprint,
         query_rewrite_version: "legacy-unversioned".to_string(),
         recalls: vec![RecallState {
+            source: RecallSource::Bbs,
             query,
             source_cursor: Some(source_cursor),
             exhausted: false,
@@ -892,9 +1068,16 @@ fn rerank_results(items: &mut [pb::SearchResult], query: &str, intent: SearchInt
             SearchIntent::Topic => item.result_type == pb::SearchResultType::Topic as i32,
             SearchIntent::User => item.result_type == pb::SearchResultType::User as i32,
             SearchIntent::Journey => item.result_type == pb::SearchResultType::Journey as i32,
+            SearchIntent::Resource => item.result_type == pb::SearchResultType::Resource as i32,
         };
         if matches_intent {
             item.score += 2.0;
+        }
+        if item.result_type == pb::SearchResultType::Resource as i32 {
+            item.score += 0.25;
+            if matches!(intent, SearchIntent::Resource) {
+                item.score += 1.5;
+            }
         }
         if expected_domain.is_some_and(|domain| item.domain == Some(domain)) {
             item.score += 0.5;
@@ -950,7 +1133,8 @@ fn result_type_name(result_type: i32) -> &'static str {
         Ok(pb::SearchResultType::Post) => "post",
         Ok(pb::SearchResultType::Journey) => "journey",
         Ok(pb::SearchResultType::User) => "user",
-        Ok(pb::SearchResultType::Topic) | Err(_) => "topic",
+        Ok(pb::SearchResultType::Topic) => "topic",
+        Ok(pb::SearchResultType::Resource) | Err(_) => "resource",
     }
 }
 
@@ -1054,6 +1238,7 @@ fn search_type_name(search_type: pb::SearchType) -> &'static str {
         pb::SearchType::Journeys => "journeys",
         pb::SearchType::Users => "users",
         pb::SearchType::Topics => "topics",
+        pb::SearchType::Resources => "resources",
     }
 }
 
@@ -1078,6 +1263,11 @@ mod tests {
         bbs_search_client::BbsSearchClient,
         bbs_search_server::{BbsSearch, BbsSearchServer},
     };
+    use bookway_knowledge_catalog_api::pb::{
+        self as catalog_pb,
+        knowledge_catalog_client::KnowledgeCatalogClient,
+        knowledge_catalog_server::{KnowledgeCatalog, KnowledgeCatalogServer},
+    };
     use tokio::{sync::Mutex, time::sleep};
     use tonic::{Request, Response, Status};
 
@@ -1097,6 +1287,12 @@ mod tests {
     struct RecordingContentSource {
         summaries: Arc<Mutex<HashMap<String, bbs_link_pb::PublicContentSummary>>>,
         requests: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingResourceSource {
+        requests: Arc<Mutex<Vec<catalog_pb::SearchRequest>>>,
+        responses: Arc<Mutex<HashMap<ResponseKey, catalog_pb::SearchResponse>>>,
     }
 
     impl RecordingContentSource {
@@ -1125,6 +1321,20 @@ mod tests {
 
         async fn delay_search(&self, delay: Duration) {
             self.search_delay.lock().await.replace(delay);
+        }
+    }
+
+    impl RecordingResourceSource {
+        async fn respond(
+            &self,
+            query: &str,
+            cursor: Option<&str>,
+            response: catalog_pb::SearchResponse,
+        ) {
+            self.responses
+                .lock()
+                .await
+                .insert((query.to_string(), cursor.map(str::to_string)), response);
         }
     }
 
@@ -1161,6 +1371,63 @@ mod tests {
                 query: request.q,
                 items: Vec::new(),
             }))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl KnowledgeCatalog for RecordingResourceSource {
+        async fn search(
+            &self,
+            request: Request<catalog_pb::SearchRequest>,
+        ) -> Result<Response<catalog_pb::SearchResponse>, Status> {
+            let request = request.into_inner();
+            self.requests.lock().await.push(request.clone());
+            Ok(Response::new(
+                self.responses
+                    .lock()
+                    .await
+                    .get(&(
+                        request.query.clone(),
+                        (!request.cursor.is_empty()).then(|| request.cursor.clone()),
+                    ))
+                    .cloned()
+                    .unwrap_or_default(),
+            ))
+        }
+
+        async fn get(
+            &self,
+            _request: Request<catalog_pb::GetRequest>,
+        ) -> Result<Response<catalog_pb::Resource>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
+
+        async fn list_node_resources(
+            &self,
+            _request: Request<catalog_pb::ListNodeResourcesRequest>,
+        ) -> Result<Response<catalog_pb::ListNodeResourcesResponse>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
+
+        async fn attach_node_resource(
+            &self,
+            _request: Request<catalog_pb::AttachNodeResourceRequest>,
+        ) -> Result<Response<catalog_pb::RouteNodeResourceAttachment>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
+
+        async fn detach_node_resource(
+            &self,
+            _request: Request<catalog_pb::DetachNodeResourceRequest>,
+        ) -> Result<Response<catalog_pb::DetachNodeResourceResponse>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
+
+        async fn retrieve_rag_context(
+            &self,
+            _request: Request<catalog_pb::RetrieveRagContextRequest>,
+        ) -> Result<Response<catalog_pb::RetrieveRagContextResponse>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
         }
     }
 
@@ -1236,6 +1503,13 @@ mod tests {
         ) -> Result<Response<bbs_link_pb::Content>, Status> {
             Err(Status::unimplemented("not used by Search Main"))
         }
+
+        async fn accept_answer(
+            &self,
+            _request: Request<bbs_link_pb::AcceptAnswerRequest>,
+        ) -> Result<Response<bbs_link_pb::Content>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
     }
 
     async fn service(source: Arc<RecordingSearchSource>) -> Domain {
@@ -1288,6 +1562,30 @@ mod tests {
         panic!("connect to bbs-link test server");
     }
 
+    async fn resource_client(
+        source: RecordingResourceSource,
+    ) -> KnowledgeCatalogClient<tonic::transport::Channel> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("allocate test server port");
+        let address = listener.local_addr().expect("read test server address");
+        drop(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(KnowledgeCatalogServer::new(source))
+                .serve(address)
+                .await
+                .expect("run knowledge-catalog test server");
+        });
+
+        let endpoint = format!("http://{address}");
+        for _ in 0..20 {
+            if let Ok(client) = KnowledgeCatalogClient::connect(endpoint.clone()).await {
+                return client;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("connect to knowledge-catalog test server");
+    }
+
     fn request(query: &str) -> pb::SearchRequest {
         pb::SearchRequest {
             q: query.to_string(),
@@ -1310,6 +1608,7 @@ mod tests {
             score,
             highlights: Vec::new(),
             post: None,
+            resource: None,
         }
     }
 
@@ -1322,6 +1621,24 @@ mod tests {
             next_cursor: next_cursor.map(str::to_string),
             took_ms: 0,
             degraded: false,
+        }
+    }
+
+    fn catalog_resource(id: &str, title: &str, summary: &str) -> catalog_pb::Resource {
+        catalog_pb::Resource {
+            id: id.to_string(),
+            title: title.to_string(),
+            kind: catalog_pb::ResourceKind::Course as i32,
+            provider: "开放课程机构".to_string(),
+            summary: summary.to_string(),
+            url: format!("https://resources.example/{id}"),
+            license: "CC BY-NC-SA 4.0".to_string(),
+            version: "2026.1".to_string(),
+            citation: format!("开放课程机构. {title}. 2026."),
+            topics: vec!["学习".to_string(), "课程".to_string()],
+            status: catalog_pb::ResourceStatus::Published as i32,
+            published_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-08-01T00:00:00Z".to_string(),
         }
     }
 
@@ -1350,6 +1667,8 @@ mod tests {
                 freshness: 0.8,
                 tags: vec!["当前标签".to_string()],
                 is_route: content_type == bbs_link_pb::ContentType::Route,
+                is_milestone: content_type == bbs_link_pb::ContentType::Milestone,
+                is_question: content_type == bbs_link_pb::ContentType::Question,
             }),
             author_id: author_id.to_string(),
             content_type: content_type as i32,
@@ -1403,6 +1722,7 @@ mod tests {
             score: 1.5,
             highlights: vec!["用户命中".to_string()],
             post: None,
+            resource: None,
         };
         let topic = pb::SearchResult {
             id: "topic:跑步".to_string(),
@@ -1416,6 +1736,7 @@ mod tests {
             score: 1.2,
             highlights: vec!["话题命中".to_string()],
             post: None,
+            resource: None,
         };
 
         let reconciled = reconcile_pending_results(
@@ -1596,14 +1917,15 @@ mod tests {
                 expansion_terms: vec!["慢跑".to_string(), "晨跑".to_string()],
             }],
         };
-        let plan = make_search_plan("跑步 计划", &dictionary).expect("query plan should build");
+        let plan = make_search_plan("跑步 计划", pb::SearchType::All, &dictionary, false)
+            .expect("query plan should build");
         assert_eq!(plan.query_rewrite_version, "lifestyle-v3");
         assert_eq!(plan.recalls.len(), 2);
         assert_eq!(plan.recalls[1].query, "跑步 计划 慢跑 晨跑");
         assert_eq!(new_session(1, &plan).query_rewrite_version, "lifestyle-v3");
 
-        let identity_plan =
-            make_search_plan("#跑步", &dictionary).expect("topic query plan should build");
+        let identity_plan = make_search_plan("#跑步", pb::SearchType::All, &dictionary, false)
+            .expect("topic query plan should build");
         assert_eq!(identity_plan.recalls.len(), 1);
     }
 
@@ -1647,7 +1969,7 @@ mod tests {
         assert!(resolution.degraded);
         assert_eq!(resolution.dictionary.version, "builtin-v1");
         assert_eq!(
-            make_search_plan("跑步", &resolution.dictionary)
+            make_search_plan("跑步", pb::SearchType::All, &resolution.dictionary, false)
                 .expect("fallback dictionary remains usable")
                 .recalls
                 .len(),
@@ -1673,6 +1995,58 @@ mod tests {
             .map(|request| request.q.clone())
             .collect::<Vec<_>>();
         assert_eq!(queries, vec!["跑步", "跑步 慢跑 晨跑 夜跑"]);
+    }
+
+    #[tokio::test]
+    async fn resources_search_uses_public_catalog_without_bbs_recall() {
+        let search_source = Arc::new(RecordingSearchSource::default());
+        let resource_source = RecordingResourceSource::default();
+        resource_source
+            .respond(
+                "课程资源",
+                None,
+                catalog_pb::SearchResponse {
+                    items: vec![catalog_resource(
+                        "resource-course-1",
+                        "行动复盘公开课程",
+                        "围绕行动记录和周复盘设计的公开课程。",
+                    )],
+                    next_cursor: None,
+                },
+            )
+            .await;
+        let mut service = service(search_source.clone()).await;
+        service.resource_client = Some(resource_client(resource_source.clone()).await);
+
+        let mut search_request = request("课程资源");
+        search_request.search_type = pb::SearchType::Resources as i32;
+        let page = service
+            .search(search_request)
+            .await
+            .expect("resource search succeeds");
+
+        assert!(
+            search_source.requests.lock().await.is_empty(),
+            "resource-only search must not query BBS"
+        );
+        assert_eq!(resource_source.requests.lock().await[0].query, "课程资源");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            page.items[0].result_type,
+            pb::SearchResultType::Resource as i32
+        );
+        assert_eq!(page.items[0].title, "行动复盘公开课程");
+        assert_eq!(
+            page.items[0]
+                .resource
+                .as_ref()
+                .map(|resource| resource.url.as_str()),
+            Some("https://resources.example/resource-course-1")
+        );
+        assert_eq!(
+            page.items[0].domain,
+            Some(pb::GrowthDomain::Learning as i32)
+        );
     }
 
     #[tokio::test]

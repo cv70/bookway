@@ -10,6 +10,10 @@ pub struct RecallRequest {
     pub domain: ::prost::alloc::string::String,
     #[prost(uint32, tag = "4")]
     pub limit: u32,
+    #[prost(string, tag = "5")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub action_node_id: ::prost::alloc::string::String,
 }
 /// Generated client implementations.
 pub mod ad_recall_client {

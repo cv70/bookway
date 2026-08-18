@@ -18,7 +18,7 @@
 | `bbs-link` | `8084` | bbs-content | 内容事实、版本和发布状态 |
 | `bbs-search` | `8085` | bbs-search | 内容、路线、用户、主题检索与联想 |
 | `comment` | `8086` | comment | 评论正文、父子关系、审核、举报与申诉状态 |
-| `commonlikestatus` | `8087` | interaction | 点赞、收藏、计数和批量互动状态 |
+| `interaction-status` | `8087` | interaction | 点赞、收藏、计数和批量互动状态 |
 | `bbs-feed` | `8088` | bbs-feed | Feed 产品策略、请求规范化和交付 |
 | `user-event` | `8089` | data-platform | 曝光、点击等用户行为批量接收 |
 | `search-main` | `8090` | search | 查询规范化、搜索编排和降级边界 |
@@ -54,7 +54,7 @@ mobile ──HTTPS──> gateway ─┬──> growth
                            ├──> bbs-message ──────> bbs
                            │         └────────────> Growth inbox
                            ├──> comment
-                           ├──> commonlikestatus
+                           ├──> interaction-status
                            ├──> user-event
                            ├──> media ────────────> S3/MinIO + CDN
                            ├──> ad-main ──────────> ad-recall ──> ad-center
@@ -65,11 +65,11 @@ mobile ──HTTPS──> gateway ─┬──> growth
                            ├──> search-main ───────> bbs-search ──> bbs-link
                            └──> bbs-feed ─────────> recommend-main ─┬──> bbs-link
                                                                   ├──> bbs
-                                                                  ├──> commonlikestatus
+                                                                  ├──> interaction-status
                                                                   └──> feature-main ──> recommend-rank
 ```
 
-数据所有权严格分离：`account` 持有公开资料，`bbs-link` 持有内容事实，`bbs` 持有关系，`bbs-creator` 持有创作者经营档案，`bbs-message` 持有会话、消息、私信意愿、举报、发送限制与本地通知 Outbox，`comment` 持有评论、评论举报和评论申诉，`commonlikestatus` 持有互动状态，`user-event` 持有行为接收幂等状态，`recommend-main` 只负责在线推荐决策，`bbs-feed` 负责 Feed 交付，`search-main` 负责搜索产品编排，`bbs-search` 只负责检索和索引访问，`feedback` 持有用户提交的产品反馈与处理状态。广告活动、预算和可验证投放凭证由 `ad-center` 持有，`ad-main` 只编排投放；商品目录、库存和订单分别由 `mall`、`mall-inventory`、`mall-order` 持有。Gateway 只持有跨服务互动中已解析接收者的社区通知投递工作项，不复制点赞、评论或关注事实。`bbs-message` 在写入前直接调用 BBS 生成 Client 检查双方的 block 边，不复制关系数据。`mall-order-expirer` 和 `mall-inventory-sweeper` 只通过受服务令牌保护的内部 gRPC 执行过期补偿，不持有业务事实。JWT 与其他认证凭证不属于 `account` 的数据所有权。
+数据所有权严格分离：`account` 持有公开资料，`bbs-link` 持有内容事实，`bbs` 持有关系，`bbs-creator` 持有创作者经营档案，`bbs-message` 持有会话、消息、私信意愿、举报、发送限制与本地通知 Outbox，`comment` 持有评论、评论举报和评论申诉，`interaction-status` 持有互动状态，`user-event` 持有行为接收幂等状态，`recommend-main` 只负责在线推荐决策，`bbs-feed` 负责 Feed 交付，`search-main` 负责搜索产品编排，`bbs-search` 只负责检索和索引访问，`feedback` 持有用户提交的产品反馈与处理状态。广告活动、预算和可验证投放凭证由 `ad-center` 持有，`ad-main` 只编排投放；商品目录、库存和订单分别由 `mall`、`mall-inventory`、`mall-order` 持有。Gateway 只持有跨服务互动中已解析接收者的社区通知投递工作项，不复制点赞、评论或关注事实。`bbs-message` 在写入前直接调用 BBS 生成 Client 检查双方的 block 边，不复制关系数据。`mall-order-expirer` 和 `mall-inventory-sweeper` 只通过受服务令牌保护的内部 gRPC 执行过期补偿，不持有业务事实。JWT 与其他认证凭证不属于 `account` 的数据所有权。
 
 ## 目录约定
 
@@ -86,7 +86,7 @@ backend/
 │   ├── bbs-link/
 │   ├── bbs-search/
 │   ├── comment/
-│   ├── commonlikestatus/
+│   ├── interaction-status/
 │   ├── bbs-feed/
 │   ├── user-event/
 │   ├── search-main/
@@ -141,7 +141,7 @@ main -> Domain -> api/http.rs or api/grpc.rs
 Query Hydrator
 -> 质量/新鲜度内容召回（并行）
 -> BBS 关系补全
--> commonlikestatus 互动状态补全
+-> interaction-status 互动状态补全
 -> 去重、客户端已看、安全过滤
 -> 质量、意图、作者多样性打分
 -> 多样性 Selector（优先未曝光、受控回补）
@@ -177,7 +177,7 @@ Gateway 只请求 `search-main`，由它规范化参数和编排底层 `bbs-sear
 - `bbs-link`：草稿、审核中、已发布、受限、删除状态；作者归属、版本号和 `Idempotency-Key` 请求指纹。
 - `bbs`：关注、拉黑、静音和公共路线参与；拉黑清理关注并阻止冲突关注，路线参与支持退出、重入、私人 Journey 关联和按路线批量计数。
 - `comment`：空评论/超长评论/跨帖父评论校验，支持回复、写入幂等和 `(created_at, id)` 稳定游标分页；新评论先待审，只有 `content-audit` 通过后才会进入公开列表，审核故障 fail-closed。举报仅针对当前可见的公开评论，作者可对受限评论申诉；`restrict_comment` 与 `restore_comment` 在审核事务内直接改变评论状态。
-- `commonlikestatus`：点赞、收藏与 `hide` 负反馈的幂等集合、计数和批量互动上下文；隐藏内容供推荐在线硬过滤。
+- `interaction-status`：点赞、收藏与 `hide` 负反馈的幂等集合、计数和批量互动上下文；隐藏内容供推荐在线硬过滤。
 - Gateway：互动写入前调用内容服务校验内容存在且公开；审核员 JWT 角色受限地开放举报队列和处置入口。
 - `content-audit`：接收按用户和幂等键去重的内容举报与作者申诉；内部人工队列支持稳定游标、认领、结案说明、不可覆盖的终态决定，以及持久化的 `restrict_content` / `restore_content` 动作；终态决定与对应的下架、恢复或通知任务同事务提交。
 - `growth`：持有私人资源知识库、阅读进度、书签、路线关联、检索条件、只读陪伴简报和提醒偏好/设备注册；一条资源可原子转换为带首项行动的私人 Journey，资源关联本身是转换幂等边界；创建使用用户级 `Idempotency-Key`，所有关联路线均校验归属。
@@ -197,7 +197,7 @@ Gateway 只请求 `search-main`，由它规范化参数和编排底层 `bbs-sear
 | `0002_bbs.sql` | bbs | 社交关系 |
 | `0003_search.sql` | bbs-search | 搜索文档和查询统计 |
 | `0004_feed.sql` | recommend-main | 曝光和推荐事件 |
-| `0005_commonlikestatus.sql` | commonlikestatus | 点赞/收藏状态 |
+| `0005_interaction_status.sql` | interaction-status | 点赞/收藏状态 |
 | `0006_comment.sql` | comment | 评论和审核状态 |
 | `0007_user_event.sql` | user-event | 用户行为事件、时间和请求关联索引 |
 | `0008_growth.sql` | growth | 私人路线与今日行动 |
@@ -283,7 +283,7 @@ cargo run -p bookway-account
 cargo run -p bookway-bbs-link
 cargo run -p bookway-bbs-search
 cargo run -p bookway-comment
-cargo run -p bookway-commonlikestatus
+cargo run -p bookway-interaction-status
 cargo run -p bookway-recommend-main
 cargo run -p bookway-bbs-feed
 cargo run -p bookway-user-event
@@ -309,17 +309,17 @@ cargo run -p bookway-gateway
 
 | 服务 | 监听变量 | 上游变量 |
 | --- | --- | --- |
-| gateway | `GATEWAY_ADDR` | `ACCOUNT_GRPC_URL`、`GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`、`BBS_CREATOR_GRPC_URL`、`BBS_MESSAGE_GRPC_URL`、`COMMENT_GRPC_URL`、`LIKE_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、`FEEDBACK_GRPC_URL` |
+| gateway | `GATEWAY_ADDR` | `ACCOUNT_GRPC_URL`、`GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`、`BBS_CREATOR_GRPC_URL`、`BBS_MESSAGE_GRPC_URL`、`COMMENT_GRPC_URL`、`INTERACTION_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、`FEEDBACK_GRPC_URL` |
 | account | `ACCOUNT_ADDR` | 无 |
 | growth | `GROWTH_ADDR` | 无 |
 | bbs | `BBS_ADDR` | 无 |
 | bbs-creator | `BBS_CREATOR_ADDR`、`BBS_CREATOR_GRPC_ADDR` | PostgreSQL 创作者档案 |
 | bbs-message | `BBS_MESSAGE_ADDR`、`BBS_MESSAGE_GRPC_ADDR` | `BBS_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、PostgreSQL 会话/私信/举报/通知 Outbox；持久化模式下审核缺失即拒绝启动 |
-| recommend-main | `RECOMMEND_MAIN_ADDR` | `BBS_GRPC_URL`、`LIKE_STATUS_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`RECOMMEND_RECALL_GRPC_URL`、`RECOMMEND_RANK_GRPC_URL` |
+| recommend-main | `RECOMMEND_MAIN_ADDR` | `BBS_GRPC_URL`、`INTERACTION_STATUS_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`RECOMMEND_RECALL_GRPC_URL`、`RECOMMEND_RANK_GRPC_URL` |
 | bbs-link | `BBS_LINK_ADDR`、`BBS_LINK_GRPC_ADDR` | `CONTENT_AUDIT_GRPC_URL` |
 | comment | `COMMENT_ADDR`、`COMMENT_GRPC_ADDR` | `CONTENT_AUDIT_GRPC_URL`（持久化模式缺失时评论 fail-closed） |
 | bbs-search | `BBS_SEARCH_ADDR` | `BBS_LINK_GRPC_URL` |
-| commonlikestatus | `LIKE_STATUS_ADDR` | 无（由 Gateway 先校验内容） |
+| interaction-status | `INTERACTION_STATUS_ADDR` | 无（由 Gateway 先校验内容） |
 | bbs-feed | `BBS_FEED_ADDR` | `RECOMMEND_MAIN_GRPC_URL` |
 | user-event | `USER_EVENT_ADDR` | `RECOMMEND_MAIN_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、PostgreSQL + Transactional Outbox，由 Relay 发布 Kafka |
 | route-participation-reconciler | 无监听端口 | `DATABASE_URL`、`BBS_GRPC_URL`、`ROUTE_RECONCILE_*` |

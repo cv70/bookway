@@ -12,5 +12,5 @@ dependencies:
   - bookway-search-main
   - bookway-user-event
   - bookway-comment
-  - bookway-commonlikestatus
+  - bookway-interaction-status
   - bookway-media

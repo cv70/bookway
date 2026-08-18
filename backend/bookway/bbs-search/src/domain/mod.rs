@@ -277,7 +277,12 @@ impl SearchService {
         };
         if session_id.is_none() {
             self.analytics
-                .record(&query_text, search_type, !has_next_page && page.is_empty())
+                .record(
+                    request.user_id.as_deref(),
+                    &query_text,
+                    search_type,
+                    !has_next_page && page.is_empty(),
+                )
                 .await;
         }
         Ok(pb::SearchResponse {
@@ -320,7 +325,8 @@ impl SearchService {
             ..Default::default()
         };
         let (popular, source) = tokio::join!(
-            self.analytics.suggestions(&query, 8),
+            self.analytics
+                .suggestions(request.user_id.as_deref(), &query, 8),
             self.search_contents(
                 source_query,
                 &query,
@@ -352,6 +358,7 @@ impl SearchService {
                     text: term.clone(),
                     result_type: pb::SearchResultType::Topic as i32,
                     score: 0.2 / (index as f64 + 1.0),
+                    personal: false,
                 }),
         );
         deduplicate_suggestions(&mut items);
@@ -677,6 +684,7 @@ fn push_suggestion(
             text: text.to_string(),
             result_type: result_type as i32,
             score: score + if lower.starts_with(query) { 1.0 } else { 0.0 },
+            personal: false,
         });
     }
 }
@@ -715,6 +723,7 @@ fn search_results(
         }
         pb::SearchType::Users => user_results(&visible_contents, query),
         pb::SearchType::Topics => topic_results(&visible_contents, query),
+        pb::SearchType::Resources => Vec::new(),
         pb::SearchType::All => {
             let mut results = content_results(&visible_contents, query, true, true, source_ranked);
             results.extend(user_results(&visible_contents, query));
@@ -738,7 +747,8 @@ fn result_identity(item: &pb::SearchResult) -> String {
         Ok(pb::SearchResultType::Post) => "post",
         Ok(pb::SearchResultType::Journey) => "journey",
         Ok(pb::SearchResultType::User) => "user",
-        Ok(pb::SearchResultType::Topic) | Err(_) => "topic",
+        Ok(pb::SearchResultType::Topic) => "topic",
+        Ok(pb::SearchResultType::Resource) | Err(_) => "resource",
     };
     format!("{result_type}:{}", item.id)
 }
@@ -799,6 +809,7 @@ fn content_results(
                 score,
                 highlights,
                 post: Some(post_summary(post.clone())),
+                resource: None,
             })
         })
         .collect()
@@ -833,6 +844,7 @@ fn user_results(contents: &[&bbs_link_pb::Content], query: &str) -> Vec<pb::Sear
                 score: score + quality * 0.2,
                 highlights,
                 post: None,
+                resource: None,
             })
         })
         .collect()
@@ -871,6 +883,7 @@ fn topic_results(contents: &[&bbs_link_pb::Content], query: &str) -> Vec<pb::Sea
                 score: score + quality * 0.1,
                 highlights,
                 post: None,
+                resource: None,
             })
         })
         .collect()
@@ -918,6 +931,8 @@ fn post_summary(value: bbs_link_pb::PostSummary) -> pb::PostSummary {
         freshness: value.freshness,
         tags: value.tags,
         is_route: value.is_route,
+        is_milestone: value.is_milestone,
+        is_question: value.is_question,
     }
 }
 
@@ -1570,8 +1585,19 @@ mod tests {
     async fn separates_posts_and_journeys_without_misclassifying_all_results() {
         let mut route = content("route-1", "领路人", "阅读入门路线", "阅读");
         route.content_type = bbs_link_pb::ContentType::Route as i32;
+        let mut milestone = content("milestone-1", "同行者", "第一周阅读成果", "阅读");
+        milestone.content_type = bbs_link_pb::ContentType::Milestone as i32;
+        milestone
+            .post
+            .as_mut()
+            .expect("milestone summary")
+            .is_milestone = true;
         let service = SearchService::new(Arc::new(StaticSearchSource {
-            items: vec![content("post-1", "一册", "阅读笔记", "阅读"), route],
+            items: vec![
+                content("post-1", "一册", "阅读笔记", "阅读"),
+                milestone,
+                route,
+            ],
             degraded: false,
         }));
 
@@ -1584,8 +1610,13 @@ mod tests {
             .await
             .expect("all search");
 
-        assert_eq!(posts.items.len(), 1);
-        assert_eq!(posts.items[0].id, "post-1");
+        assert_eq!(posts.items.len(), 2);
+        assert!(posts.items.iter().any(|item| item.id == "post-1"));
+        assert!(posts.items.iter().any(|item| {
+            item.id == "milestone-1"
+                && item.result_type == pb::SearchResultType::Post as i32
+                && item.post.as_ref().is_some_and(|post| post.is_milestone)
+        }));
         assert!(all.items.iter().any(|item| {
             item.id == "route-1" && item.result_type == pb::SearchResultType::Journey as i32
         }));
@@ -1644,6 +1675,8 @@ mod tests {
                 freshness: 1.0,
                 tags: vec![topic.to_string()],
                 is_route: false,
+                is_milestone: false,
+                is_question: false,
             }),
             author_id: format!("author-{id}"),
             content_type: bbs_link_pb::ContentType::Article as i32,
@@ -1653,9 +1686,12 @@ mod tests {
             topics: vec![topic.to_string()],
             created_at: "0".to_string(),
             published_at: Some("0".to_string()),
+            question_context: None,
             version: 1,
             quality_score: 1.0,
             route_template: None,
+            milestone: None,
+            accepted_answer_id: None,
         }
     }
 

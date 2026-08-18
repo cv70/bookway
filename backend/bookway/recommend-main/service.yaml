@@ -5,7 +5,7 @@ port: 8083
 healthcheck: grpc
 dependencies:
   - bookway-bbs
-  - bookway-commonlikestatus
+  - bookway-interaction-status
   - bookway-recommend-recall
   - bookway-recommend-rank
   - bookway-feature-main

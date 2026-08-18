@@ -13,7 +13,7 @@ prost.workspace = true
 tonic.workspace = true
 bookway-bbs-link-api.workspace = true
 bookway-bbs-api.workspace = true
-bookway-commonlikestatus-api.workspace = true
+bookway-interaction-status-api.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

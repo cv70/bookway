@@ -200,8 +200,19 @@ impl OpenSearchSource {
 
 #[async_trait]
 pub(crate) trait SearchAnalytics: Send + Sync {
-    async fn record(&self, query: &str, search_type: pb::SearchType, zero_results: bool);
-    async fn suggestions(&self, prefix: &str, limit: usize) -> Vec<pb::Suggestion>;
+    async fn record(
+        &self,
+        user_id: Option<&str>,
+        query: &str,
+        search_type: pb::SearchType,
+        zero_results: bool,
+    );
+    async fn suggestions(
+        &self,
+        user_id: Option<&str>,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<pb::Suggestion>;
 }
 
 pub(crate) type SharedSearchAnalytics = Arc<dyn SearchAnalytics>;
@@ -209,35 +220,97 @@ pub(crate) type SharedSearchAnalytics = Arc<dyn SearchAnalytics>;
 #[derive(Default)]
 pub(crate) struct MemorySearchAnalytics {
     stats: RwLock<HashMap<(String, pb::SearchType), (u64, u64)>>,
+    global_users: RwLock<HashMap<(String, pb::SearchType), HashSet<String>>>,
+    history: RwLock<HashMap<(String, String, pb::SearchType), (u64, u64)>>,
+    sequence: RwLock<u64>,
 }
 
 #[async_trait]
 impl SearchAnalytics for MemorySearchAnalytics {
-    async fn record(&self, query: &str, search_type: pb::SearchType, zero_results: bool) {
+    async fn record(
+        &self,
+        user_id: Option<&str>,
+        query: &str,
+        search_type: pb::SearchType,
+        zero_results: bool,
+    ) {
         let mut stats = self.stats.write().await;
         let value = stats
             .entry((query.to_string(), search_type))
             .or_insert((0, 0));
         value.0 = value.0.saturating_add(1);
         value.1 = value.1.saturating_add(u64::from(zero_results));
+        let user_id = user_id.map(str::trim).filter(|id| !id.is_empty());
+        if let Some(user_id) = user_id {
+            self.global_users
+                .write()
+                .await
+                .entry((query.to_string(), search_type))
+                .or_default()
+                .insert(user_id.to_string());
+        }
+        let Some(user_id) = user_id else { return };
+        let mut sequence = self.sequence.write().await;
+        *sequence = sequence.saturating_add(1);
+        self.history.write().await.insert(
+            (user_id.to_string(), query.to_string(), search_type),
+            (value.0, *sequence),
+        );
     }
 
-    async fn suggestions(&self, prefix: &str, limit: usize) -> Vec<pb::Suggestion> {
+    async fn suggestions(
+        &self,
+        user_id: Option<&str>,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<pb::Suggestion> {
         let prefix = prefix.to_lowercase();
-        let mut items = self
-            .stats
-            .read()
-            .await
+        let user_id = user_id.map(str::trim).filter(|id| !id.is_empty());
+        let mut personal = {
+            let history = self.history.read().await;
+            history
+                .iter()
+                .filter(|((owner, query, _), _)| {
+                    Some(owner.as_str()) == user_id && query.to_lowercase().contains(&prefix)
+                })
+                .map(
+                    |((_, query, search_type), (requests, sequence))| pb::Suggestion {
+                        text: query.clone(),
+                        result_type: result_type(*search_type) as i32,
+                        score: 10.0
+                            + (*sequence as f64 / 1_000_000_000.0)
+                            + suggestion_score(*requests, 0),
+                        personal: true,
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        personal.sort_by(|left, right| right.score.total_cmp(&left.score));
+        personal.truncate(limit);
+        let stats = self.stats.read().await.clone();
+        let global_users = self.global_users.read().await;
+        let mut items = stats
             .iter()
-            .filter(|((query, _), _)| query.to_lowercase().contains(&prefix))
+            .filter(|((query, search_type), (requests, _))| {
+                let unique_users = global_users
+                    .get(&(query.clone(), *search_type))
+                    .map_or(0, HashSet::len);
+                *requests >= 2
+                    && (unique_users == 0 || unique_users >= 2)
+                    && query.to_lowercase().contains(&prefix)
+            })
             .map(
                 |((query, search_type), (requests, zero_results))| pb::Suggestion {
                     text: query.clone(),
                     result_type: result_type(*search_type) as i32,
                     score: suggestion_score(*requests, *zero_results),
+                    personal: false,
                 },
             )
             .collect::<Vec<_>>();
+        items.retain(|item| !personal.iter().any(|owned| owned.text == item.text));
+        personal.extend(items);
+        let mut items = personal;
         items.sort_by(|left, right| right.score.total_cmp(&left.score));
         items.truncate(limit);
         items
@@ -256,13 +329,19 @@ impl PostgresSearchAnalytics {
 
 #[async_trait]
 impl SearchAnalytics for PostgresSearchAnalytics {
-    async fn record(&self, query: &str, search_type: pb::SearchType, zero_results: bool) {
+    async fn record(
+        &self,
+        user_id: Option<&str>,
+        query: &str,
+        search_type: pb::SearchType,
+        zero_results: bool,
+    ) {
         let search_type = search_type_name(search_type);
         let hash = format!("{:016x}", stable_hash(&format!("{search_type}\0{query}")));
         if let Err(error) = sqlx::query(
             "INSERT INTO search_query_stats (query_hash,query_text,search_type,request_count,zero_result_count,last_seen_at) VALUES ($1,$2,$3,1,$4,now()) ON CONFLICT (query_hash) DO UPDATE SET request_count=search_query_stats.request_count+1, zero_result_count=search_query_stats.zero_result_count+EXCLUDED.zero_result_count, last_seen_at=now()",
         )
-        .bind(hash)
+        .bind(&hash)
         .bind(query)
         .bind(search_type)
         .bind(i64::from(zero_results))
@@ -271,31 +350,96 @@ impl SearchAnalytics for PostgresSearchAnalytics {
         {
             tracing::warn!(%error, "search analytics write degraded");
         }
+        if let Some(user_id) = user_id.map(str::trim).filter(|id| !id.is_empty()) {
+            let history_hash = format!("{:016x}", stable_hash(&format!("{user_id}\0{query}")));
+            if let Err(error) = sqlx::query(
+                "INSERT INTO search_query_history (history_hash,user_id,query_text,search_type,request_count,last_seen_at) VALUES ($1,$2,$3,$4,1,now()) ON CONFLICT (history_hash) DO UPDATE SET request_count=search_query_history.request_count+1,last_seen_at=now()",
+            )
+            .bind(history_hash)
+            .bind(user_id)
+            .bind(query)
+            .bind(search_type)
+            .execute(&self.pool)
+            .await
+            {
+                tracing::warn!(%error, "personal search history write degraded");
+            }
+            if let Err(error) = sqlx::query(
+                "INSERT INTO search_query_stats_users (query_hash,user_id,last_seen_at) VALUES ($1,$2,now()) ON CONFLICT (query_hash,user_id) DO UPDATE SET last_seen_at=now()",
+            )
+            .bind(&hash)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            {
+                tracing::warn!(%error, "search query unique-user write degraded");
+            }
+            if let Err(error) = sqlx::query(
+                "DELETE FROM search_query_history WHERE user_id = $1 AND last_seen_at < now() - interval '90 days'",
+            )
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            {
+                tracing::warn!(%error, "personal search history retention cleanup degraded");
+            }
+        }
     }
 
-    async fn suggestions(&self, prefix: &str, limit: usize) -> Vec<pb::Suggestion> {
+    async fn suggestions(
+        &self,
+        user_id: Option<&str>,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<pb::Suggestion> {
         let pattern = format!("%{}%", escape_like(prefix));
+        let mut items = Vec::new();
+        if let Some(user_id) = user_id.map(str::trim).filter(|id| !id.is_empty()) {
+            let rows = sqlx::query_as::<_, (String, String, i64)>(&format!(
+                "SELECT query_text,search_type,request_count FROM search_query_history WHERE user_id = $1 AND query_text ILIKE $2 ESCAPE '\\\\' AND last_seen_at > now() - interval '90 days' ORDER BY last_seen_at DESC LIMIT {}",
+                limit
+            ))
+            .bind(user_id)
+            .bind(&pattern)
+            .fetch_all(&self.pool)
+            .await;
+            if let Ok(rows) = rows {
+                items.extend(rows.into_iter().map(|(text, search_type, requests)| {
+                    pb::Suggestion {
+                        text,
+                        result_type: result_type_from_name(&search_type) as i32,
+                        score: 10.0 + suggestion_score(requests.max(0) as u64, 0),
+                        personal: true,
+                    }
+                }));
+            }
+        }
         let rows = sqlx::query_as::<_, (String, String, i64, i64)>(
-            "SELECT query_text,search_type,request_count,zero_result_count FROM search_query_stats WHERE query_text ILIKE $1 ESCAPE '\\' AND last_seen_at > now() - interval '90 days' ORDER BY (request_count-zero_result_count) DESC,last_seen_at DESC LIMIT $2",
+            "SELECT stats.query_text,stats.search_type,stats.request_count,stats.zero_result_count FROM search_query_stats AS stats LEFT JOIN (SELECT query_hash,COUNT(*) AS unique_users FROM search_query_stats_users GROUP BY query_hash) AS users ON users.query_hash = stats.query_hash WHERE stats.request_count >= 2 AND (COALESCE(users.unique_users, 0) = 0 OR users.unique_users >= 2) AND stats.query_text ILIKE $1 ESCAPE '\\' AND stats.last_seen_at > now() - interval '90 days' ORDER BY (stats.request_count-stats.zero_result_count) DESC,stats.last_seen_at DESC LIMIT $2",
         )
         .bind(pattern)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await;
         match rows {
-            Ok(rows) => rows
-                .into_iter()
-                .map(
+            Ok(rows) => {
+                items.extend(rows.into_iter().map(
                     |(text, search_type, requests, zero_results)| pb::Suggestion {
                         text,
                         result_type: result_type_from_name(&search_type) as i32,
                         score: suggestion_score(requests.max(0) as u64, zero_results.max(0) as u64),
+                        personal: false,
                     },
-                )
-                .collect(),
+                ));
+                items.sort_by(|left, right| right.score.total_cmp(&left.score));
+                items.dedup_by(|left, right| left.text == right.text);
+                items.truncate(limit);
+                items
+            }
             Err(error) => {
                 tracing::warn!(%error, "search analytics suggestions degraded");
-                Vec::new()
+                items.truncate(limit);
+                items
             }
         }
     }
@@ -310,6 +454,7 @@ fn result_type(search_type: pb::SearchType) -> pb::SearchResultType {
         pb::SearchType::Journeys => pb::SearchResultType::Journey,
         pb::SearchType::Users => pb::SearchResultType::User,
         pb::SearchType::Topics => pb::SearchResultType::Topic,
+        pb::SearchType::Resources => pb::SearchResultType::Resource,
         pb::SearchType::All | pb::SearchType::Posts => pb::SearchResultType::Post,
     }
 }
@@ -319,6 +464,7 @@ fn result_type_from_name(value: &str) -> pb::SearchResultType {
         "journeys" => pb::SearchResultType::Journey,
         "users" => pb::SearchResultType::User,
         "topics" => pb::SearchResultType::Topic,
+        "resources" => pb::SearchResultType::Resource,
         _ => pb::SearchResultType::Post,
     }
 }
@@ -330,6 +476,7 @@ pub(crate) fn search_type_name(value: pb::SearchType) -> &'static str {
         pb::SearchType::Journeys => "journeys",
         pb::SearchType::Users => "users",
         pb::SearchType::Topics => "topics",
+        pb::SearchType::Resources => "resources",
     }
 }
 
@@ -344,6 +491,41 @@ fn escape_like(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MemorySearchAnalytics, SearchAnalytics};
+    use bookway_bbs_search_api::pb;
+
+    #[tokio::test]
+    async fn personal_history_is_prioritized_and_never_shared_between_users() {
+        let analytics = MemorySearchAnalytics::default();
+        analytics
+            .record(Some("user-a"), "我的晨跑调整", pb::SearchType::Posts, false)
+            .await;
+        analytics
+            .record(
+                Some("user-b"),
+                "别人的晨跑调整",
+                pb::SearchType::Posts,
+                false,
+            )
+            .await;
+        analytics
+            .record(Some("user-a"), "我的晨跑调整", pb::SearchType::Posts, false)
+            .await;
+
+        let own = analytics.suggestions(Some("user-a"), "晨跑", 8).await;
+        assert_eq!(
+            own.first().map(|item| item.text.as_str()),
+            Some("我的晨跑调整")
+        );
+        assert!(!own.iter().any(|item| item.text == "别人的晨跑调整"));
+
+        let anonymous = analytics.suggestions(None, "晨跑", 8).await;
+        assert!(!anonymous.iter().any(|item| item.text == "我的晨跑调整"));
+    }
 }
 
 #[async_trait]
@@ -561,7 +743,10 @@ fn content_type_name(value: i32) -> &'static str {
         Ok(bbs_link_pb::ContentType::Note) => "note",
         Ok(bbs_link_pb::ContentType::Article) => "article",
         Ok(bbs_link_pb::ContentType::Video) => "video",
-        Ok(bbs_link_pb::ContentType::Route) | Err(_) => "route",
+        Ok(bbs_link_pb::ContentType::Route) => "route",
+        Ok(bbs_link_pb::ContentType::Milestone) => "milestone",
+        Ok(bbs_link_pb::ContentType::Question) => "question",
+        Err(_) => "route",
     }
 }
 

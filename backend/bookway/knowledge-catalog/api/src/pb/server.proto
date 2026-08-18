@@ -1,0 +1,139 @@
+syntax = "proto3";
+package bookway.knowledge.catalog;
+
+enum ResourceKind {
+  RESOURCE_KIND_UNSPECIFIED = 0;
+  RESOURCE_KIND_BOOK = 1;
+  RESOURCE_KIND_COURSE = 2;
+  RESOURCE_KIND_TOOL = 3;
+  RESOURCE_KIND_ARTICLE = 4;
+  RESOURCE_KIND_PODCAST = 5;
+}
+
+enum ResourceStatus {
+  RESOURCE_STATUS_UNSPECIFIED = 0;
+  RESOURCE_STATUS_PUBLISHED = 1;
+  RESOURCE_STATUS_ARCHIVED = 2;
+}
+
+enum AttachmentKind {
+  ATTACHMENT_KIND_UNSPECIFIED = 0;
+  ATTACHMENT_KIND_DOCUMENT = 1;
+  ATTACHMENT_KIND_PDF = 2;
+  ATTACHMENT_KIND_EXTERNAL_LINK = 3;
+  ATTACHMENT_KIND_TOOL_CHECKLIST = 4;
+  ATTACHMENT_KIND_AI_ACTION_GUIDE = 5;
+  ATTACHMENT_KIND_RAG_CORPUS = 6;
+}
+
+message Resource {
+  string id = 1;
+  string title = 2;
+  ResourceKind kind = 3;
+  string provider = 4;
+  string summary = 5;
+  string url = 6;
+  string license = 7;
+  string version = 8;
+  string citation = 9;
+  repeated string topics = 10;
+  ResourceStatus status = 11;
+  string published_at = 12;
+  string updated_at = 13;
+}
+
+message SearchRequest {
+  string query = 1;
+  optional ResourceKind kind = 2;
+  string topic = 3;
+  string cursor = 4;
+  optional uint32 limit = 5;
+}
+
+message SearchResponse {
+  repeated Resource items = 1;
+  optional string next_cursor = 2;
+}
+
+message GetRequest { string resource_id = 1; }
+
+message RouteNodeResourceAttachment {
+  string id = 1;
+  string route_id = 2;
+  string action_node_id = 3;
+  string resource_id = 4;
+  AttachmentKind kind = 5;
+  string title_override = 6;
+  string note = 7;
+  int32 sort_rank = 8;
+  bool rag_enabled = 9;
+  string embedding_collection = 10;
+  string retrieval_scope = 11;
+  string created_by = 12;
+  string created_at = 13;
+  string updated_at = 14;
+  optional Resource resource = 15;
+}
+
+message ListNodeResourcesRequest {
+  string route_id = 1;
+  string action_node_id = 2;
+  bool include_archived = 3;
+}
+
+message ListNodeResourcesResponse {
+  repeated RouteNodeResourceAttachment items = 1;
+}
+
+message AttachNodeResourceRequest {
+  string route_id = 1;
+  string action_node_id = 2;
+  string resource_id = 3;
+  AttachmentKind kind = 4;
+  string title_override = 5;
+  string note = 6;
+  int32 sort_rank = 7;
+  bool rag_enabled = 8;
+  string retrieval_scope = 9;
+  string idempotency_key = 10;
+  string created_by = 11;
+}
+
+message DetachNodeResourceRequest {
+  string route_id = 1;
+  string action_node_id = 2;
+  string attachment_id = 3;
+  string operator_id = 4;
+}
+
+message DetachNodeResourceResponse {
+  bool detached = 1;
+}
+
+message RetrieveRagContextRequest {
+  string route_id = 1;
+  string action_node_id = 2;
+  string question = 3;
+  optional uint32 limit = 4;
+}
+
+message RagContext {
+  RouteNodeResourceAttachment attachment = 1;
+  string excerpt = 2;
+  double relevance = 3;
+}
+
+message RetrieveRagContextResponse {
+  repeated RagContext contexts = 1;
+  repeated string embedding_collections = 2;
+  string retrieval_mode = 3;
+}
+
+service KnowledgeCatalog {
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc Get(GetRequest) returns (Resource);
+  rpc ListNodeResources(ListNodeResourcesRequest) returns (ListNodeResourcesResponse);
+  rpc AttachNodeResource(AttachNodeResourceRequest) returns (RouteNodeResourceAttachment);
+  rpc DetachNodeResource(DetachNodeResourceRequest) returns (DetachNodeResourceResponse);
+  rpc RetrieveRagContext(RetrieveRagContextRequest) returns (RetrieveRagContextResponse);
+}

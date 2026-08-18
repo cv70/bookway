@@ -8,20 +8,29 @@ pub(crate) struct CandidateFeatures {
     pub(crate) author_affinity: f64,
     pub(crate) impression_fatigue: f64,
     pub(crate) direct_negative_feedback: f64,
+    pub(crate) click_through_rate: f64,
+    pub(crate) save_rate: f64,
+    pub(crate) action_completion_rate: f64,
+    pub(crate) purchase_conversion_rate: f64,
 }
 
 #[derive(Clone)]
 pub(crate) struct FeatureRepository {
     pool: Option<sqlx::PgPool>,
+    feature_version: String,
 }
 impl FeatureRepository {
-    pub(crate) fn new(pool: Option<sqlx::PgPool>) -> Self {
-        Self { pool }
+    pub(crate) fn new(pool: Option<sqlx::PgPool>, feature_version: String) -> Self {
+        Self {
+            pool,
+            feature_version,
+        }
     }
     pub(crate) async fn load(&self, user_id: &str) -> HashMap<String, f64> {
         let Some(pool) = &self.pool else {
             return HashMap::new();
         };
+        let mut derived = self.load_snapshot(user_id).await;
         // Keep feature freshness bounded while deriving feedback features
         // from the canonical event log. The event types are intentionally
         // weighted so a repeat dismissal does not look like topic rejection,
@@ -51,7 +60,7 @@ impl FeatureRepository {
         let negative = feedback.1;
         let impressions = feedback.2 as f64;
         let total = feedback.3 as f64;
-        let mut derived = HashMap::from([
+        derived.extend([
             (
                 "recent_positive_rate".to_string(),
                 (positive / impressions.max(1.0)).min(1.0),
@@ -83,6 +92,27 @@ impl FeatureRepository {
             Err(error) => {
                 tracing::warn!(%error, user_id, "feature store degraded");
                 derived
+            }
+        }
+    }
+
+    async fn load_snapshot(&self, user_id: &str) -> HashMap<String, f64> {
+        let Some(pool) = &self.pool else {
+            return HashMap::new();
+        };
+        let row = sqlx::query_as::<_, (serde_json::Value,)>(
+            "SELECT features FROM user_feature_snapshots WHERE user_id=$1 AND feature_version=$2 AND expires_at > now() ORDER BY as_of DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(&self.feature_version)
+        .fetch_optional(pool)
+        .await;
+        match row {
+            Ok(Some((features,))) => finite_features(features),
+            Ok(None) => HashMap::new(),
+            Err(error) => {
+                tracing::warn!(%error, user_id, version = %self.feature_version, "feature snapshot read degraded");
+                HashMap::new()
             }
         }
     }
@@ -164,7 +194,7 @@ impl FeatureRepository {
 
         // Normalize high-intent history within each user's strongest domain
         // and author so global popularity does not erase personal preference.
-        let rows = sqlx::query_as::<_, (String, f64, f64, f64, f64)>(
+        let rows = sqlx::query_as::<_, (String, f64, f64, f64, f64, f64, f64, f64, f64)>(
             r#"
             WITH history AS (
                 SELECT
@@ -239,6 +269,11 @@ impl FeatureRepository {
                              AND occurred_at > now() - interval '90 days' THEN 1.0
                         ELSE 0.0
                     END)::double precision AS negative_weight
+                    ,COUNT(*) FILTER (WHERE event_type = 'click')::double precision AS clicks
+                    ,COUNT(*) FILTER (WHERE event_type IN ('bookmark', 'save_knowledge'))::double precision AS saves
+                    ,COUNT(*) FILTER (WHERE event_type = 'complete')::double precision AS completions
+                    ,COUNT(*) FILTER (WHERE event_type = 'join_route')::double precision AS joins
+                    ,COUNT(*) FILTER (WHERE event_type = 'purchase')::double precision AS purchases
                 FROM user_events
                 WHERE user_id = $1 AND content_id = ANY($2)
                 GROUP BY content_id
@@ -248,7 +283,11 @@ impl FeatureRepository {
                 LEAST(GREATEST(COALESCE(domain.score, 0.0), 0.0) / normalizers.domain_max, 1.0)::double precision,
                 LEAST(GREATEST(COALESCE(author.score, 0.0), 0.0) / normalizers.author_max, 1.0)::double precision,
                 LEAST(COALESCE(feedback.impression_count, 0.0) / 4.0, 1.0)::double precision,
-                LEAST(COALESCE(feedback.negative_weight, 0.0), 1.0)::double precision
+                LEAST(COALESCE(feedback.negative_weight, 0.0), 1.0)::double precision,
+                LEAST(COALESCE(feedback.clicks, 0.0) / GREATEST(COALESCE(feedback.impression_count, 0.0), 1.0), 1.0)::double precision,
+                LEAST(COALESCE(feedback.saves, 0.0) / GREATEST(COALESCE(feedback.impression_count, 0.0), 1.0), 1.0)::double precision,
+                LEAST(COALESCE(feedback.completions, 0.0) / GREATEST(COALESCE(feedback.joins, 0.0), 1.0), 1.0)::double precision,
+                LEAST(COALESCE(feedback.purchases, 0.0) / GREATEST(COALESCE(feedback.impression_count, 0.0), 1.0), 1.0)::double precision
             FROM content_items AS candidate
             CROSS JOIN normalizers
             LEFT JOIN domain_scores AS domain ON domain.domain = candidate.domain
@@ -272,6 +311,10 @@ impl FeatureRepository {
                         author_affinity,
                         impression_fatigue,
                         direct_negative_feedback,
+                        click_through_rate,
+                        save_rate,
+                        action_completion_rate,
+                        purchase_conversion_rate,
                     )| {
                         (
                             content_id,
@@ -280,6 +323,10 @@ impl FeatureRepository {
                                 author_affinity,
                                 impression_fatigue,
                                 direct_negative_feedback,
+                                click_through_rate,
+                                save_rate,
+                                action_completion_rate,
+                                purchase_conversion_rate,
                             },
                         )
                     },
@@ -290,6 +337,39 @@ impl FeatureRepository {
                 HashMap::new()
             }
         }
+    }
+}
+
+fn finite_features(features: serde_json::Value) -> HashMap<String, f64> {
+    features
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter_map(|(name, value)| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .map(|number| (name.clone(), number))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::finite_features;
+
+    #[test]
+    fn snapshot_payload_accepts_only_finite_numeric_features() {
+        let features = finite_features(serde_json::json!({
+            "domain_interest.learning": 0.8,
+            "recent_positive_rate": 0.4,
+            "label": "ignored",
+            "nested": { "value": 1.0 }
+        }));
+        assert_eq!(features.get("domain_interest.learning"), Some(&0.8));
+        assert_eq!(features.get("recent_positive_rate"), Some(&0.4));
+        assert!(!features.contains_key("label"));
+        assert!(!features.contains_key("nested"));
     }
 }
 

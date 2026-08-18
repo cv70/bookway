@@ -19,10 +19,11 @@ use bookway_bbs_link_api::pb as bbs_link_pb;
 use bookway_bbs_message_api::pb as message_pb;
 use bookway_bbs_search_api::pb as search_pb;
 use bookway_comment_api::pb as comment_pb;
-use bookway_commonlikestatus_api::pb as like_pb;
 use bookway_content_audit_api::pb as audit_pb;
 use bookway_feedback_api::pb as feedback_pb;
 use bookway_growth_api::pb as growth_pb;
+use bookway_interaction_status_api::pb as like_pb;
+use bookway_knowledge_catalog_api::pb as catalog_pb;
 use bookway_mall_api::pb as mall_pb;
 use bookway_mall_order_api::pb as mall_order_pb;
 use bookway_media_api::pb as media_pb;
@@ -35,6 +36,7 @@ pub(crate) struct Domain {
     pub(crate) config: Config,
     account: account_pb::account_client::AccountClient<Channel>,
     growth: growth_pb::growth_client::GrowthClient<Channel>,
+    knowledge_catalog: catalog_pb::knowledge_catalog_client::KnowledgeCatalogClient<Channel>,
     bbs_feed: bbs_feed_pb::bbs_feed_client::BbsFeedClient<Channel>,
     bbs_link: bbs_link_pb::bbs_link_client::BbsLinkClient<Channel>,
     search_main: search_main_pb::search_main_client::SearchMainClient<Channel>,
@@ -42,7 +44,7 @@ pub(crate) struct Domain {
     bbs_creator: creator_pb::bbs_creator_client::BbsCreatorClient<Channel>,
     bbs_message: message_pb::bbs_message_client::BbsMessageClient<Channel>,
     comment: comment_pb::comment_client::CommentClient<Channel>,
-    like_status: like_pb::common_like_status_client::CommonLikeStatusClient<Channel>,
+    interaction_status: like_pb::interaction_status_client::InteractionStatusClient<Channel>,
     user_event: user_event_pb::user_event_client::UserEventClient<Channel>,
     media: media_pb::media_client::MediaClient<Channel>,
     content_audit: audit_pb::content_audit_client::ContentAuditClient<Channel>,
@@ -117,6 +119,11 @@ impl Domain {
                 .await?,
             growth: growth_pb::growth_client::GrowthClient::connect(config.growth_url.clone())
                 .await?,
+            knowledge_catalog:
+                catalog_pb::knowledge_catalog_client::KnowledgeCatalogClient::connect(
+                    config.knowledge_catalog_url.clone(),
+                )
+                .await?,
             bbs_feed: bbs_feed_pb::bbs_feed_client::BbsFeedClient::connect(
                 config.bbs_feed_url.clone(),
             )
@@ -140,10 +147,11 @@ impl Domain {
             .await?,
             comment: comment_pb::comment_client::CommentClient::connect(config.comment_url.clone())
                 .await?,
-            like_status: like_pb::common_like_status_client::CommonLikeStatusClient::connect(
-                config.like_status_url.clone(),
-            )
-            .await?,
+            interaction_status:
+                like_pb::interaction_status_client::InteractionStatusClient::connect(
+                    config.interaction_status_url.clone(),
+                )
+                .await?,
             user_event: user_event_pb::user_event_client::UserEventClient::connect(
                 config.user_event_url.clone(),
             )
@@ -500,6 +508,19 @@ impl Domain {
         grpc_call!(self, growth, "growth", save_weekly_review, request)
     }
 
+    pub(crate) async fn apply_weekly_review_adjustment(
+        &self,
+        request: growth_pb::ApplyWeeklyReviewAdjustmentRequest,
+    ) -> Result<growth_pb::ApplyWeeklyReviewAdjustmentResponse, UpstreamError> {
+        grpc_call!(
+            self,
+            growth,
+            "growth",
+            apply_weekly_review_adjustment,
+            request
+        )
+    }
+
     pub(crate) async fn companion(
         &self,
         request: growth_pb::ScheduleRequest,
@@ -569,6 +590,143 @@ impl Domain {
         request: bbs_link_pb::PublishRequest,
     ) -> Result<bbs_link_pb::Content, UpstreamError> {
         grpc_call!(self, bbs_link, "bbs-link", publish, request)
+    }
+
+    pub(crate) async fn search_resources(
+        &self,
+        request: catalog_pb::SearchRequest,
+    ) -> Result<catalog_pb::SearchResponse, UpstreamError> {
+        grpc_call!(
+            self,
+            knowledge_catalog,
+            "knowledge-catalog",
+            search,
+            request
+        )
+    }
+
+    pub(crate) async fn get_resource(
+        &self,
+        resource_id: String,
+    ) -> Result<catalog_pb::Resource, UpstreamError> {
+        grpc_call!(
+            self,
+            knowledge_catalog,
+            "knowledge-catalog",
+            get,
+            catalog_pb::GetRequest { resource_id }
+        )
+    }
+
+    pub(crate) async fn list_route_node_resources(
+        &self,
+        request: catalog_pb::ListNodeResourcesRequest,
+    ) -> Result<catalog_pb::ListNodeResourcesResponse, UpstreamError> {
+        grpc_call!(
+            self,
+            knowledge_catalog,
+            "knowledge-catalog",
+            list_node_resources,
+            request
+        )
+    }
+
+    pub(crate) async fn attach_route_node_resource(
+        &self,
+        request: catalog_pb::AttachNodeResourceRequest,
+    ) -> Result<catalog_pb::RouteNodeResourceAttachment, UpstreamError> {
+        grpc_call!(
+            self,
+            knowledge_catalog,
+            "knowledge-catalog",
+            attach_node_resource,
+            request
+        )
+    }
+
+    pub(crate) async fn detach_route_node_resource(
+        &self,
+        request: catalog_pb::DetachNodeResourceRequest,
+    ) -> Result<catalog_pb::DetachNodeResourceResponse, UpstreamError> {
+        grpc_call!(
+            self,
+            knowledge_catalog,
+            "knowledge-catalog",
+            detach_node_resource,
+            request
+        )
+    }
+
+    pub(crate) async fn capture_resource_as_knowledge(
+        &self,
+        user_id: String,
+        resource_id: String,
+    ) -> Result<growth_pb::KnowledgeResource, UpstreamError> {
+        let resource = self.get_resource(resource_id.clone()).await?;
+        let request = public_resource_knowledge_request(&user_id, &resource)?;
+        self.create_knowledge(request).await
+    }
+
+    pub(crate) async fn accept_question_answer(
+        &self,
+        user_id: String,
+        question_id: String,
+        answer_id: String,
+    ) -> Result<bbs_link_pb::Content, UpstreamError> {
+        let question = self
+            .public_content_for_viewer(&user_id, &question_id)
+            .await?;
+        if question.content_type != bbs_link_pb::ContentType::Question as i32 {
+            return Err(route_precondition("只有问题内容可以采纳回答"));
+        }
+        if question.author_id != user_id {
+            return Err(permission_denied("只有问题作者可以采纳回答"));
+        }
+        let answer = grpc_call!(
+            self,
+            comment,
+            "comment",
+            get,
+            comment_pb::GetRequest {
+                post_id: question.id.clone(),
+                comment_id: answer_id.clone(),
+                excluded_author_ids: self.visibility(&user_id).await?,
+            }
+        )?;
+        if answer.post_id != question.id
+            || answer.parent_id.is_some()
+            || answer.status != comment_pb::CommentStatus::Published as i32
+        {
+            return Err(upstream_invalid("只能采纳该问题下已公开的一级回答"));
+        }
+        let accepted = grpc_call!(
+            self,
+            bbs_link,
+            "bbs-link",
+            accept_answer,
+            bbs_link_pb::AcceptAnswerRequest {
+                user_id: user_id.clone(),
+                question_id: question.id.clone(),
+                answer_id: answer.id.clone(),
+            }
+        )?;
+        if answer.author_id != user_id {
+            self.create_community_notification(
+                &answer.author_id,
+                notification(
+                    format!("question-answer-accepted:{}", answer.id),
+                    "你的回答被采纳了",
+                    "问题作者已将你的回答设为最佳答案",
+                    [
+                        ("post_id", question.id.as_str()),
+                        ("comment_id", answer.id.as_str()),
+                        ("interaction", "answer_accepted"),
+                    ],
+                ),
+            )
+            .await;
+        }
+        Ok(accepted)
     }
 
     pub(crate) async fn search(
@@ -688,7 +846,13 @@ impl Domain {
             .await?;
         let actor_id = request.user_id.clone();
         let post_id = request.post_id.clone();
-        let reaction = grpc_call!(self, like_status, "commonlikestatus", set_reaction, request)?;
+        let reaction = grpc_call!(
+            self,
+            interaction_status,
+            "interaction-status",
+            set_reaction,
+            request
+        )?;
         if reaction.active
             && let Ok(reaction_type) = like_pb::ReactionType::try_from(reaction.reaction)
             && let Err(error) = self
@@ -1146,14 +1310,13 @@ impl Domain {
         let report = grpc_call!(self, comment, "comment", review_report, request)?;
         if report.status == comment_pb::CommentReportStatus::Resolved as i32
             && report.action == comment_pb::CommentReportAction::RestrictComment as i32
+            && let Some(comment) = report.reported_comment.as_ref()
         {
-            if let Some(comment) = report.reported_comment.as_ref() {
-                self.create_community_notification(
-                    &comment.author_id,
-                    comment_moderation_notification(comment),
-                )
-                .await;
-            }
+            self.create_community_notification(
+                &comment.author_id,
+                comment_moderation_notification(comment),
+            )
+            .await;
         }
         Ok(report)
     }
@@ -1181,14 +1344,13 @@ impl Domain {
         let appeal = grpc_call!(self, comment, "comment", review_appeal, request)?;
         if appeal.status == comment_pb::CommentAppealStatus::Resolved as i32
             && appeal.action == comment_pb::CommentAppealAction::RestoreComment as i32
+            && let Some(comment) = appeal.appealed_comment.as_ref()
         {
-            if let Some(comment) = appeal.appealed_comment.as_ref() {
-                self.create_community_notification(
-                    &comment.author_id,
-                    comment_moderation_notification(comment),
-                )
-                .await;
-            }
+            self.create_community_notification(
+                &comment.author_id,
+                comment_moderation_notification(comment),
+            )
+            .await;
         }
         Ok(appeal)
     }
@@ -1248,6 +1410,13 @@ impl Domain {
         request: mall_pb::IdRequest,
     ) -> Result<mall_pb::MallProduct, UpstreamError> {
         grpc_call!(self, mall, "mall", product, request)
+    }
+
+    pub(crate) async fn mall_node_offers(
+        &self,
+        request: mall_pb::NodeOfferQueryRequest,
+    ) -> Result<mall_pb::NodeOfferList, UpstreamError> {
+        grpc_call!(self, mall, "mall", node_offers, request)
     }
 
     pub(crate) async fn create_mall_order(
@@ -1403,8 +1572,8 @@ impl Domain {
     ) -> Result<(), UpstreamError> {
         grpc_call!(
             self,
-            like_status,
-            "commonlikestatus",
+            interaction_status,
+            "interaction-status",
             set_reaction,
             like_pb::SetReactionRequest {
                 user_id: user_id.to_string(),
@@ -1864,11 +2033,65 @@ fn content_knowledge_request(
     })
 }
 
+fn public_resource_knowledge_request(
+    user_id: &str,
+    resource: &catalog_pb::Resource,
+) -> Result<growth_pb::CreateKnowledgeRequest, UpstreamError> {
+    if resource.status != catalog_pb::ResourceStatus::Published as i32 {
+        return Err(route_precondition("只能收集已发布的公共资源"));
+    }
+    let title = capped_knowledge_text(&resource.title, 200);
+    if title.is_empty() || resource.id.trim().is_empty() {
+        return Err(route_precondition("公共资源缺少有效标题或标识"));
+    }
+    let kind = match catalog_pb::ResourceKind::try_from(resource.kind) {
+        Ok(catalog_pb::ResourceKind::Book) => growth_pb::KnowledgeResourceKind::Book,
+        Ok(catalog_pb::ResourceKind::Course) => growth_pb::KnowledgeResourceKind::Course,
+        Ok(catalog_pb::ResourceKind::Article) => growth_pb::KnowledgeResourceKind::Article,
+        Ok(catalog_pb::ResourceKind::Podcast) => growth_pb::KnowledgeResourceKind::Link,
+        Ok(catalog_pb::ResourceKind::Tool) | Ok(catalog_pb::ResourceKind::Unspecified) | Err(_) => {
+            growth_pb::KnowledgeResourceKind::Link
+        }
+    } as i32;
+    let mut tags = Vec::new();
+    for topic in &resource.topics {
+        let topic = capped_knowledge_text(topic, 40);
+        if !topic.is_empty()
+            && !tags
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(&topic))
+        {
+            tags.push(topic);
+            if tags.len() == 20 {
+                break;
+            }
+        }
+    }
+    Ok(growth_pb::CreateKnowledgeRequest {
+        user_id: user_id.to_string(),
+        idempotency_key: Some(format!("knowledge-catalog:{}", resource.id)),
+        title,
+        creator: capped_knowledge_text(&resource.provider, 120),
+        summary: capped_knowledge_text(&resource.summary, 1_000),
+        kind,
+        status: growth_pb::KnowledgeResourceStatus::Inbox as i32,
+        source_url: (!resource.url.trim().is_empty()).then(|| resource.url.clone()),
+        body: None,
+        tags,
+        journey_id: None,
+        source_content_id: None,
+    })
+}
+
 fn knowledge_kind_for_content(content_type: i32) -> i32 {
     match bbs_link_pb::ContentType::try_from(content_type) {
         Ok(bbs_link_pb::ContentType::Article) => growth_pb::KnowledgeResourceKind::Article as i32,
         Ok(bbs_link_pb::ContentType::Video) => growth_pb::KnowledgeResourceKind::Video as i32,
         Ok(bbs_link_pb::ContentType::Note) => growth_pb::KnowledgeResourceKind::Note as i32,
+        // A milestone is a public outcome note. Saving it keeps only a live
+        // content reference, so its route evidence is never copied privately.
+        Ok(bbs_link_pb::ContentType::Milestone) => growth_pb::KnowledgeResourceKind::Note as i32,
+        Ok(bbs_link_pb::ContentType::Question) => growth_pb::KnowledgeResourceKind::Note as i32,
         // Routes stay executable through their dedicated adoption endpoint;
         // in a knowledge inbox they are a reference rather than another plan.
         Ok(bbs_link_pb::ContentType::Route) | Err(_) => {
@@ -2283,6 +2506,46 @@ mod tests {
     }
 
     #[test]
+    fn published_catalog_resource_becomes_a_metadata_only_private_reference() {
+        let request = public_resource_knowledge_request(
+            "reader-a",
+            &catalog_pb::Resource {
+                id: "resource-city-walk".to_string(),
+                title: "城市步行方法".to_string(),
+                kind: catalog_pb::ResourceKind::Course as i32,
+                provider: "Bookway Academy".to_string(),
+                summary: "从观察街区开始建立自己的步行路线".to_string(),
+                url: "https://example.test/city-walk".to_string(),
+                license: "CC BY 4.0".to_string(),
+                version: "1".to_string(),
+                citation: "Bookway Academy (2026)".to_string(),
+                topics: vec!["城市".to_string(), "步行".to_string(), "城市".to_string()],
+                status: catalog_pb::ResourceStatus::Published as i32,
+                published_at: "2026-08-18T00:00:00Z".to_string(),
+                updated_at: "2026-08-18T00:00:00Z".to_string(),
+            },
+        )
+        .expect("published resource is capturable");
+
+        assert_eq!(request.user_id, "reader-a");
+        assert_eq!(
+            request.idempotency_key.as_deref(),
+            Some("knowledge-catalog:resource-city-walk")
+        );
+        assert_eq!(
+            request.kind,
+            growth_pb::KnowledgeResourceKind::Course as i32
+        );
+        assert_eq!(
+            request.source_url.as_deref(),
+            Some("https://example.test/city-walk")
+        );
+        assert!(request.body.is_none());
+        assert!(request.source_content_id.is_none());
+        assert_eq!(request.tags, vec!["城市", "步行"]);
+    }
+
+    #[test]
     fn content_knowledge_capture_event_has_a_stable_identity() {
         let first = content_knowledge_capture_event("user-1", "post-1", None)
             .expect("current timestamp should be serializable");
@@ -2415,6 +2678,7 @@ mod tests {
                 ],
                 actions: vec![
                     bbs_link_pb::RouteTemplateAction {
+                        id: "reading-start".to_string(),
                         title: "选一本起步书".to_string(),
                         detail: "只选最相关的一本".to_string(),
                         estimated_minutes: 15,
@@ -2422,6 +2686,7 @@ mod tests {
                         stage_index: Some(0),
                     },
                     bbs_link_pb::RouteTemplateAction {
+                        id: "reading-reflect".to_string(),
                         title: "写一段回望".to_string(),
                         detail: "记录这个方法是否适合自己".to_string(),
                         estimated_minutes: 20,

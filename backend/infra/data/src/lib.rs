@@ -1,6 +1,6 @@
 use std::{env, str::FromStr, time::Duration};
 
-use redis::aio::ConnectionManager;
+use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use thiserror::Error;
 
@@ -65,9 +65,13 @@ pub async fn redis_connection() -> Result<Option<ConnectionManager>, DataError> 
     };
     let client = redis::Client::open(redis_url)?;
     let timeout_ms = env_u64("REDIS_CONNECT_TIMEOUT_MS", 1_000)?;
+    let command_timeout_ms = env_u64("REDIS_COMMAND_TIMEOUT_MS", 100)?;
+    let config = ConnectionManagerConfig::new()
+        .set_connection_timeout(Duration::from_millis(timeout_ms))
+        .set_response_timeout(Duration::from_millis(command_timeout_ms));
     let manager = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
-        ConnectionManager::new(client),
+        ConnectionManager::new_with_config(client, config),
     )
     .await
     .map_err(|_| DataError::RedisTimeout(timeout_ms))??;

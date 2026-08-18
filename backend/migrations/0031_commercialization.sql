@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS ad_campaigns (
     advertiser_id TEXT NOT NULL,
     name TEXT NOT NULL,
     placement TEXT NOT NULL,
+    route_id TEXT NOT NULL,
+    action_node_id TEXT NOT NULL,
     title TEXT NOT NULL,
     body TEXT NOT NULL DEFAULT '',
     image_url TEXT NOT NULL DEFAULT '',
@@ -24,7 +26,7 @@ CREATE TABLE IF NOT EXISTS ad_campaigns (
     CHECK (ends_at IS NULL OR starts_at IS NULL OR ends_at > starts_at)
 );
 CREATE INDEX IF NOT EXISTS idx_ad_campaigns_eligible
-    ON ad_campaigns (placement, status, starts_at, ends_at, bid_micros DESC);
+    ON ad_campaigns (placement, route_id, action_node_id, status, starts_at, ends_at, bid_micros DESC);
 
 CREATE TABLE IF NOT EXISTS ad_campaign_daily_stats (
     campaign_id TEXT NOT NULL REFERENCES ad_campaigns(id),

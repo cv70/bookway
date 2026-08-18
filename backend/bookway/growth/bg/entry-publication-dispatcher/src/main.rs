@@ -294,6 +294,8 @@ fn content_request(job: &PublicationJob) -> Result<content_pb::CreateRequest, St
         route_duration: optional_string(&job.payload, "route_duration"),
         media_asset_ids: optional_string_list(&job.payload, "media_asset_ids")?,
         route_template: None,
+        milestone: None,
+        question_context: None,
     })
 }
 

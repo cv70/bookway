@@ -8,13 +8,12 @@ pub struct DecisionRequest {
     pub placement: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "3")]
     pub domain: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(map = "string, string", tag = "4")]
-    pub context: ::std::collections::HashMap<
-        ::prost::alloc::string::String,
-        ::prost::alloc::string::String,
-    >,
-    #[prost(uint32, optional, tag = "5")]
+    #[prost(uint32, optional, tag = "4")]
     pub limit: ::core::option::Option<u32>,
+    #[prost(string, tag = "5")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub action_node_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -37,6 +36,10 @@ pub struct AdDecision {
     pub score: f64,
     #[prost(string, tag = "9")]
     pub model_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "11")]
+    pub action_node_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

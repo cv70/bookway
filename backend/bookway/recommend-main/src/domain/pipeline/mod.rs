@@ -84,8 +84,8 @@ pub(crate) enum PipelineError {
     Recall(String),
     #[error("bbs request failed: {0}")]
     Bbs(String),
-    #[error("like-status request failed: {0}")]
-    LikeStatus(String),
+    #[error("interaction-status request failed: {0}")]
+    InteractionStatus(String),
     #[error("recommend-rank request failed: {0}")]
     Model(String),
 }
@@ -329,6 +329,7 @@ impl FeedPipeline {
                 score: candidate.score,
                 source: candidate.source,
                 reasons: candidate.reasons,
+                ad: None,
             })
             .collect::<Vec<_>>();
         let selected_count = items.len();
@@ -398,6 +399,8 @@ mod tests {
                         freshness: 0.0,
                         tags: Vec::new(),
                         is_route: false,
+                        is_milestone: false,
+                        is_question: false,
                     },
                     author_id: "author-1".to_string(),
                     status: ContentStatus::Published as i32,
@@ -506,6 +509,7 @@ mod tests {
             session_id: "session-1".to_string(),
             surface: "home".to_string(),
             cursor: None,
+            action_context: None,
         }
     }
 
@@ -579,6 +583,8 @@ mod tests {
                 freshness: 0.0,
                 tags: Vec::new(),
                 is_route: false,
+                is_milestone: false,
+                is_question: false,
             },
             author_id: author_id.to_string(),
             status: ContentStatus::Published as i32,

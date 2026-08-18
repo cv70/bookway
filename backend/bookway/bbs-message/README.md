@@ -12,6 +12,8 @@
 - `Report`：只有原消息接收者可举报收到的私信；`Idempotency-Key` 在举报人范围内去重，复用到不同消息、原因或说明会冲突。
 - `ListReports` / `ReviewReport`：仅供受服务令牌保护的内部审核调用。队列以 `(created_at, id)` 稳定续页，返回原消息正文只用于可信审核上下文。审核员可标记 `reviewing`，或给出带说明的 `resolved` / `rejected` 终态决定；`resolved + restrict_sender` 会持久化限制并阻止该发送者之后的新私信写入。
 
+Gateway 暴露会话、消息、已读和偏好 REST 端点；移动端个人页提供会话中心，创作者主页提供发起私信入口，接收方可在会话中直接举报消息。客户端发送和举报都携带幂等键，审核拒绝和接收方关闭私信会显示可重试的安全提示，而不会伪造已送达状态。
+
 ## 运行
 
 HTTP 默认监听 `127.0.0.1:8106`，gRPC 默认监听 `127.0.0.1:18106`。`BBS_GRPC_URL` 默认为 `http://127.0.0.1:18002`；`CONTENT_AUDIT_GRPC_URL` 指向审核服务。生产的 `STORAGE_MODE=postgres` 必须配置后者，服务会在启动时拒绝无审核依赖的配置，运行中审核不可用同样 fail-closed。`memory` 模式仅用于无依赖本地开发，明确使用本地自动通过审核器。执行 `0054_bbs_creator_message.sql`、`0055_bbs_message_moderation.sql` 和 `0056_bbs_message_notification_delivery.sql` 后，启动服务与 `bookway-direct-message-notification-dispatcher`。

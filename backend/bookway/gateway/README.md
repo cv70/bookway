@@ -51,11 +51,11 @@
 
 ## 依赖
 
-`account`、`growth`、`bbs-feed`、`search-main`、`user-event`、`bbs-link`、`bbs`、`bbs-creator`、`bbs-message`、`comment`、`commonlikestatus`、`media`、`content-audit`、`feedback`、`ad-main`、`mall`、`mall-order`。拥有审核角色的可信用户还可使用 `GET /v1/moderation/comments` 领取待审评论，并通过 `PATCH /v1/moderation/comments/{comment_id}` 提交 `{"decision":"approve"|"restrict"}`；批准会按原评论作者（而非审核人）补齐既有的帖子/回复通知并由稳定来源键去重。
+`account`、`growth`、`bbs-feed`、`search-main`、`user-event`、`bbs-link`、`bbs`、`bbs-creator`、`bbs-message`、`comment`、`interaction-status`、`media`、`content-audit`、`feedback`、`ad-main`、`mall`、`mall-order`。拥有审核角色的可信用户还可使用 `GET /v1/moderation/comments` 领取待审评论，并通过 `PATCH /v1/moderation/comments/{comment_id}` 提交 `{"decision":"approve"|"restrict"}`；批准会按原评论作者（而非审核人）补齐既有的帖子/回复通知并由稳定来源键去重。
 
 ## 环境变量
 
-`GATEWAY_ADDR`、`STORAGE_MODE`、`DATABASE_URL`、`ACCOUNT_GRPC_URL`、`GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`BBS_LINK_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_GRPC_URL`、`BBS_CREATOR_GRPC_URL`、`BBS_MESSAGE_GRPC_URL`、`COMMENT_GRPC_URL`、`LIKE_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、`FEEDBACK_GRPC_URL`、`AD_MAIN_GRPC_URL`、`MALL_GRPC_URL`、`MALL_ORDER_GRPC_URL`、`AUTH_REQUIRED`、`AUTH_JWT_SECRET`、`SERVICE_AUTH_TOKEN`、`HTTP_CONNECT_TIMEOUT_MS`、`HTTP_REQUEST_TIMEOUT_MS`、`REDIS_URL`、`REDIS_CONNECT_TIMEOUT_MS`、`REDIS_COMMAND_TIMEOUT_MS`、`RATE_LIMIT_PER_MINUTE`。`STORAGE_MODE=postgres` 时 Gateway 需要 `DATABASE_URL` 以提交社区通知任务；审核 JWT 的 `roles` 声明是字符串数组；角色由身份系统签发，不能由客户端请求头提供。
+`GATEWAY_ADDR`、`STORAGE_MODE`、`DATABASE_URL`、`ACCOUNT_GRPC_URL`、`GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`BBS_LINK_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_GRPC_URL`、`BBS_CREATOR_GRPC_URL`、`BBS_MESSAGE_GRPC_URL`、`COMMENT_GRPC_URL`、`INTERACTION_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、`FEEDBACK_GRPC_URL`、`AD_MAIN_GRPC_URL`、`MALL_GRPC_URL`、`MALL_ORDER_GRPC_URL`、`AUTH_REQUIRED`、`AUTH_JWT_SECRET`、`SERVICE_AUTH_TOKEN`、`HTTP_CONNECT_TIMEOUT_MS`、`HTTP_REQUEST_TIMEOUT_MS`、`REDIS_URL`、`REDIS_CONNECT_TIMEOUT_MS`、`REDIS_COMMAND_TIMEOUT_MS`、`RATE_LIMIT_PER_MINUTE`。`STORAGE_MODE=postgres` 时 Gateway 需要 `DATABASE_URL` 以提交社区通知任务；审核 JWT 的 `roles` 声明是字符串数组；角色由身份系统签发，不能由客户端请求头提供。
 
 ## 生产化待办
 

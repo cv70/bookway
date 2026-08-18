@@ -7,6 +7,7 @@ enum SearchType {
   SEARCH_TYPE_JOURNEYS = 2;
   SEARCH_TYPE_USERS = 3;
   SEARCH_TYPE_TOPICS = 4;
+  SEARCH_TYPE_RESOURCES = 5;
 }
 
 enum SearchResultType {
@@ -14,6 +15,7 @@ enum SearchResultType {
   SEARCH_RESULT_TYPE_JOURNEY = 1;
   SEARCH_RESULT_TYPE_USER = 2;
   SEARCH_RESULT_TYPE_TOPIC = 3;
+  SEARCH_RESULT_TYPE_RESOURCE = 4;
 }
 
 enum GrowthDomain {
@@ -56,6 +58,21 @@ message PostSummary {
   double freshness = 12;
   repeated string tags = 13;
   bool is_route = 14;
+  bool is_milestone = 15;
+  bool is_question = 16;
+}
+
+message ResourceSummary {
+  string id = 1;
+  string kind = 2;
+  string provider = 3;
+  string url = 4;
+  string license = 5;
+  string version = 6;
+  string citation = 7;
+  repeated string topics = 8;
+  string published_at = 9;
+  string updated_at = 10;
 }
 
 message SearchResult {
@@ -70,6 +87,7 @@ message SearchResult {
   double score = 9;
   repeated string highlights = 10;
   optional PostSummary post = 11;
+  optional ResourceSummary resource = 12;
 }
 
 message SearchResponse {
@@ -86,6 +104,7 @@ message Suggestion {
   string text = 1;
   SearchResultType result_type = 2;
   double score = 3;
+  bool personal = 4;
 }
 
 message SuggestionsResponse {

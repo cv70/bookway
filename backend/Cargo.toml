@@ -16,10 +16,11 @@ members = [
   "bookway/bbs-search/job/search-index-outbox-recovery",
   "bookway/bbs-search/job/search-index-reconcile",
   "bookway/comment",
-  "bookway/commonlikestatus",
+  "bookway/interaction-status",
   "bookway/gateway",
   "bookway/gateway/bg/community-notification-dispatcher",
   "bookway/growth",
+  "bookway/knowledge-catalog",
   "bookway/growth/bg/entry-publication-dispatcher",
   "bookway/growth/bg/push-delivery-dispatcher",
   "bookway/recommend-main",
@@ -63,12 +64,14 @@ members = [
   "bookway/bbs-link/api",
   "bookway/bbs-search/api",
   "bookway/comment/api",
-  "bookway/commonlikestatus/api",
+  "bookway/interaction-status/api",
   "bookway/content-audit/api",
   "bookway/feature-main/api",
+  "bookway/feature-main/job/feature-snapshot",
   "bookway/feedback/api",
   "bookway/gateway/api",
   "bookway/growth/api",
+  "bookway/knowledge-catalog/api",
   "bookway/mall/api",
   "bookway/mall-inventory/api",
   "bookway/mall-order/api",
@@ -132,12 +135,13 @@ bookway-bbs-feed-api = { path = "bookway/bbs-feed/api" }
 bookway-bbs-link-api = { path = "bookway/bbs-link/api" }
 bookway-bbs-search-api = { path = "bookway/bbs-search/api" }
 bookway-comment-api = { path = "bookway/comment/api" }
-bookway-commonlikestatus-api = { path = "bookway/commonlikestatus/api" }
+bookway-interaction-status-api = { path = "bookway/interaction-status/api" }
 bookway-content-audit-api = { path = "bookway/content-audit/api" }
 bookway-feature-main-api = { path = "bookway/feature-main/api" }
 bookway-feedback-api = { path = "bookway/feedback/api" }
 bookway-gateway-api = { path = "bookway/gateway/api" }
 bookway-growth-api = { path = "bookway/growth/api" }
+bookway-knowledge-catalog-api = { path = "bookway/knowledge-catalog/api" }
 bookway-mall-api = { path = "bookway/mall/api" }
 bookway-mall-inventory-api = { path = "bookway/mall-inventory/api" }
 bookway-mall-order-api = { path = "bookway/mall-order/api" }

@@ -1,0 +1,7 @@
+name: bookway-interaction-status
+owner: interaction
+kind: dual-http-grpc-service
+port: 8087
+healthcheck: /health
+contracts:
+  - src/api/pb/server.proto

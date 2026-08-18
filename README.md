@@ -768,7 +768,7 @@ flowchart TB
     LINK[BBS Link :8084<br/>内容事实 / 发布]
     BBSSEARCH[BBS Search :8085<br/>检索 / 联想]
     COMMENT[Comment :8086<br/>评论]
-    LIKE[Common Like Status :8087<br/>点赞 / 收藏]
+    INTERACTION[Interaction Status :8087<br/>点赞 / 收藏]
     BBSFEED[BBS Feed :8088<br/>Feed 产品交付]
     USEREVENT[User Event :8089<br/>曝光 / 点击事件]
     SEARCHMAIN[Search Main :8090<br/>搜索编排 / 排序]
@@ -846,7 +846,7 @@ flowchart TB
 - `bbs-link`：8084，内容 Link 服务，持有内容事实、版本和发布状态。万卷行没有旧版迁移包袱，因此不沿用历史性的 `v2` 目录名。
 - `bbs-search`：8085，负责内容、路线、用户、主题检索和联想。
 - `comment`：8086，独立持有评论正文和父子关系。
-- `commonlikestatus`：8087，独立持有点赞、收藏和批量互动状态。
+- `interaction-status`：8087，独立持有点赞、收藏和批量互动状态。
 - `bbs-feed`：8088，负责 Feed 请求规范化、产品策略和结果交付，再调用推荐主服务。
 - `user-event`：8089，接收组件曝光、点击、播放、互动和搜索等批量事件。
 - `search-main`：8090，负责查询规范化、搜索流水线编排、实验和降级；`bbs-search` 保持检索能力层。

@@ -9,6 +9,7 @@
 - `GET /v1/posts/{post_id}/comments?limit=30&cursor=...`：按 `(created_at, id)` 稳定游标分页，单页最多 50 条。
 - `POST /v1/posts/{post_id}/comments`：支持 `parent_id` 回复和 `Idempotency-Key` 弱网重试去重。
 - `DELETE /v1/posts/{post_id}/comments/{comment_id}`：仅评论作者可幂等软删除自己的评论。
+- 受信内部 `get`：按帖子与评论 ID 只返回当前公开、未删除且对查看者可见的评论；Gateway 用它验证问题作者的“采纳答案”操作，避免分页窗口或客户端输入伪造回答归属。
 - 受信内部 gRPC：`list_moderation` 读取待审队列，`review` 以 `approve` 或 `restrict` 完成人审；客户端只能经 Gateway 的受角色保护审核入口访问。
 - `POST /v1/posts/{post_id}/comments/{comment_id}/report`：当前可见评论的举报，必须携带 `Idempotency-Key`。Gateway 覆盖举报人和社交可见性集合；用户响应是无正文回执。
 - `POST /v1/comments/{comment_id}/appeals`、`GET /v1/me/comment-appeals`：评论作者只能对自己当前受限且未删除的评论提交或查看申诉，提交必须携带 `Idempotency-Key`。

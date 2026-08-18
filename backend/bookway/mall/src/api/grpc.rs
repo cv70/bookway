@@ -64,6 +64,39 @@ impl Mall for GrpcServer {
                 .map_err(mall_error)?,
         ))
     }
+    async fn attach_node_offer(
+        &self,
+        request: Request<pb::AttachNodeOfferRequest>,
+    ) -> Result<Response<pb::NodeOffer>, Status> {
+        Ok(Response::new(
+            self.domain
+                .attach_node_offer(request.into_inner())
+                .await
+                .map_err(mall_error)?,
+        ))
+    }
+    async fn node_offers(
+        &self,
+        request: Request<pb::NodeOfferQueryRequest>,
+    ) -> Result<Response<pb::NodeOfferList>, Status> {
+        Ok(Response::new(
+            self.domain
+                .node_offers(request.into_inner())
+                .await
+                .map_err(mall_error)?,
+        ))
+    }
+    async fn get_node_offer(
+        &self,
+        request: Request<pb::IdRequest>,
+    ) -> Result<Response<pb::NodeOffer>, Status> {
+        Ok(Response::new(
+            self.domain
+                .node_offer(request.into_inner())
+                .await
+                .map_err(mall_error)?,
+        ))
+    }
 }
 pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();

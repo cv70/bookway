@@ -500,8 +500,26 @@ impl Domain {
             next_focus: request.next_focus.trim().to_string(),
             created_at: timestamp.clone(),
             updated_at: timestamp,
+            applied_adjustments: Vec::new(),
         };
         Ok(self.repository.save_weekly_review(user_id, review).await?)
+    }
+
+    pub(crate) async fn apply_weekly_review_adjustment(
+        &self,
+        user_id: &str,
+        request: pb::ApplyWeeklyReviewAdjustmentRequest,
+    ) -> Result<pb::ApplyWeeklyReviewAdjustmentResponse, GrowthError> {
+        Uuid::parse_str(request.review_id.trim())
+            .map_err(|_| GrowthError::Validation("复盘标识无效".to_string()))?;
+        let applied = self
+            .repository
+            .apply_weekly_review_adjustment(user_id, &request.review_id, request.suggestion_index)
+            .await?;
+        Ok(pb::ApplyWeeklyReviewAdjustmentResponse {
+            review: Some(applied.review),
+            decision: Some(applied.decision),
+        })
     }
 
     pub(crate) async fn companion_brief_for(
@@ -1325,6 +1343,7 @@ fn review_adjustment_suggestions(
                 action_id: action.id.clone(),
                 estimated_minutes: Some(suggested_minutes),
                 scheduled_label: None,
+                expected_estimated_minutes: Some(action.estimated_minutes),
             }),
             journey_patch: None,
         });
@@ -1355,6 +1374,7 @@ fn review_adjustment_suggestions(
                 journey_patch: Some(pb::ReviewJourneyPatch {
                     journey_id: journey.id.clone(),
                     status: pb::JourneyStatus::Paused as i32,
+                    expected_status: Some(pb::JourneyStatus::Active as i32),
                 }),
             });
         }
@@ -1536,6 +1556,100 @@ mod tests {
             },
             Arc::new(MemoryGrowthRepository::seeded()),
         )
+    }
+
+    async fn saved_review_with_reduce_suggestion(
+        domain: &Domain,
+        user_id: &str,
+    ) -> (pb::ReviewRecord, pb::Action, u32) {
+        let journey = domain
+            .create_journey(
+                user_id,
+                pb::CreateJourneyRequest {
+                    user_id: String::new(),
+                    title: "恢复写作节奏".to_string(),
+                    intent: "把写作重新安排回一周".to_string(),
+                    domain: pb::GrowthDomain::Learning as i32,
+                    journey_type: pb::JourneyType::Project as i32,
+                    completion_criteria: "完成四篇短文".to_string(),
+                    stages: Vec::new(),
+                    duration_label: "4 周".to_string(),
+                    first_action_title: "写 500 字".to_string(),
+                    first_action_detail: String::new(),
+                    estimated_minutes: 45,
+                    first_action_scheduled_label: None,
+                    first_action_scheduled_for: None,
+                    first_action_scheduled_timezone: None,
+                    first_action_stage_index: None,
+                    first_action_recurrence: None,
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .expect("journey should be created");
+        let first = domain
+            .get_journey(user_id, &journey.id)
+            .await
+            .expect("journey should load")
+            .actions
+            .into_iter()
+            .next()
+            .expect("first action should exist");
+        domain
+            .update_action(
+                user_id,
+                &first.id,
+                pb::UpdateActionRequest {
+                    user_id: String::new(),
+                    action_id: String::new(),
+                    state: Some(pb::ActionState::Skipped as i32),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("first action should be skippable");
+        let follow_up = domain
+            .create_action(
+                user_id,
+                pb::CreateActionRequest {
+                    user_id: String::new(),
+                    journey_id: journey.id,
+                    stage_id: None,
+                    title: "修改一段".to_string(),
+                    detail: String::new(),
+                    estimated_minutes: 30,
+                    scheduled_label: "本周".to_string(),
+                    scheduled_for: None,
+                    scheduled_timezone: None,
+                    recurrence: None,
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .expect("follow-up action should be created");
+        let review = domain
+            .save_weekly_review(
+                user_id,
+                pb::SaveWeeklyReviewRequest {
+                    user_id: String::new(),
+                    reflection: "先降低开始门槛".to_string(),
+                    next_focus: "完成一段短写".to_string(),
+                },
+            )
+            .await
+            .expect("review should be saved");
+        let suggestion_index = review
+            .summary
+            .as_ref()
+            .expect("review should keep its summary")
+            .adjustment_suggestions
+            .iter()
+            .position(|suggestion| {
+                suggestion.kind == pb::ReviewAdjustmentKind::ReduceActionDuration as i32
+            })
+            .and_then(|index| u32::try_from(index).ok())
+            .expect("review should offer a smaller next step");
+        (review, follow_up, suggestion_index)
     }
 
     #[test]
@@ -1993,6 +2107,113 @@ mod tests {
         assert_eq!(updated.summary, Some(first_summary));
         assert_eq!(updated.reflection, "午间阅读和散步一起安排更可持续");
         assert_eq!(updated.next_focus, "先完成每天 20 分钟阅读和一次散步");
+    }
+
+    #[tokio::test]
+    async fn applies_a_saved_review_suggestion_once_and_records_its_decision() {
+        let domain = domain();
+        let (review, follow_up, suggestion_index) =
+            saved_review_with_reduce_suggestion(&domain, "review-apply-user").await;
+        let applied = domain
+            .apply_weekly_review_adjustment(
+                "review-apply-user",
+                pb::ApplyWeeklyReviewAdjustmentRequest {
+                    user_id: String::new(),
+                    review_id: review.id.clone(),
+                    suggestion_index,
+                },
+            )
+            .await
+            .expect("saved suggestion should apply");
+        let decision = applied.decision.expect("decision should be returned");
+        assert_eq!(decision.suggestion_index, suggestion_index);
+        assert_eq!(
+            decision
+                .action
+                .as_ref()
+                .map(|action| action.estimated_minutes),
+            Some(10)
+        );
+        assert_eq!(
+            applied
+                .review
+                .as_ref()
+                .map(|review| review.applied_adjustments.len()),
+            Some(1)
+        );
+        let action = domain
+            .get_journey("review-apply-user", &follow_up.journey_id)
+            .await
+            .expect("journey should load")
+            .actions
+            .into_iter()
+            .find(|action| action.id == follow_up.id)
+            .expect("follow-up should remain in the journey");
+        assert_eq!(action.estimated_minutes, 10);
+
+        let retry = domain
+            .apply_weekly_review_adjustment(
+                "review-apply-user",
+                pb::ApplyWeeklyReviewAdjustmentRequest {
+                    user_id: String::new(),
+                    review_id: review.id.clone(),
+                    suggestion_index,
+                },
+            )
+            .await
+            .expect("retry should return the original decision");
+        assert_eq!(retry.decision, Some(decision));
+        assert!(matches!(
+            domain
+                .apply_weekly_review_adjustment(
+                    "another-user",
+                    pb::ApplyWeeklyReviewAdjustmentRequest {
+                        user_id: String::new(),
+                        review_id: review.id,
+                        suggestion_index,
+                    },
+                )
+                .await,
+            Err(GrowthError::Repository(
+                crate::datasource::RepositoryError::ReviewNotFound(_)
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_review_suggestion_after_its_target_changes() {
+        let domain = domain();
+        let (review, follow_up, suggestion_index) =
+            saved_review_with_reduce_suggestion(&domain, "review-stale-user").await;
+        domain
+            .update_action(
+                "review-stale-user",
+                &follow_up.id,
+                pb::UpdateActionRequest {
+                    user_id: String::new(),
+                    action_id: String::new(),
+                    estimated_minutes: Some(20),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("manual action edit should succeed");
+
+        assert!(matches!(
+            domain
+                .apply_weekly_review_adjustment(
+                    "review-stale-user",
+                    pb::ApplyWeeklyReviewAdjustmentRequest {
+                        user_id: String::new(),
+                        review_id: review.id,
+                        suggestion_index,
+                    },
+                )
+                .await,
+            Err(GrowthError::Repository(
+                crate::datasource::RepositoryError::ReviewAdjustmentStale
+            ))
+        ));
     }
 
     #[tokio::test]

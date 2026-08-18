@@ -16,6 +16,10 @@ pub struct RankRequest {
     pub domain: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "3")]
     pub candidates: ::prost::alloc::vec::Vec<::bookway_ad_center_api::pb::AdCampaign>,
+    #[prost(string, tag = "4")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub action_node_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

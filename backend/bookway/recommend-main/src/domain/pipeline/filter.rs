@@ -84,6 +84,8 @@ mod tests {
                 freshness: 0.0,
                 tags: Vec::new(),
                 is_route: false,
+                is_milestone: false,
+                is_question: false,
             },
             author_id: "author-1".to_string(),
             status: ContentStatus::Published as i32,

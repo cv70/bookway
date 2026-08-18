@@ -48,6 +48,14 @@ pub struct PostSummary {
     /// Clients must use it to decide whether an item can be adopted as a route.
     #[prost(bool, tag = "14")]
     pub is_route: bool,
+    /// This is derived from Content.content_type. A milestone is evidence of a
+    /// route in practice; it is never itself adoptable as a route.
+    #[prost(bool, tag = "15")]
+    pub is_milestone: bool,
+    /// This is derived from Content.content_type. A question is never route
+    /// adoptable, but its answers may be selected by its author.
+    #[prost(bool, tag = "16")]
+    pub is_question: bool,
 }
 /// A route template is authored as community content but copied into a user's
 /// private plan when they join. It never references the author's private data.
@@ -74,6 +82,9 @@ pub struct RouteTemplateAction {
     pub scheduled_label: ::prost::alloc::string::String,
     #[prost(uint32, optional, tag = "5")]
     pub stage_index: ::core::option::Option<u32>,
+    /// Stable key used by node-bound resources, equipment and advertisements.
+    #[prost(string, tag = "6")]
+    pub id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -88,6 +99,70 @@ pub struct RouteTemplate {
     pub actions: ::prost::alloc::vec::Vec<RouteTemplateAction>,
     #[prost(enumeration = "RouteTemplateKind", tag = "5")]
     pub journey_type: i32,
+}
+/// Client-provided progress claims. It intentionally contains no private
+/// Journey, Action, Entry, schedule, location, or identity reference.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MilestoneDraft {
+    #[prost(string, tag = "1")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(uint32, optional, tag = "2")]
+    pub stage_index: ::core::option::Option<u32>,
+    #[prost(string, tag = "3")]
+    pub effort_summary: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub outcome_summary: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub adjustment_summary: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub evidence_scope: ::prost::alloc::string::String,
+}
+/// The resolved public-route and stage snapshot recorded with a milestone.
+/// BBS Link derives route_title and stage_title from the referenced public
+/// route, so a client cannot forge the association displayed to readers.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Milestone {
+    #[prost(string, tag = "1")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub route_title: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub stage_index: u32,
+    #[prost(string, tag = "4")]
+    pub stage_title: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub effort_summary: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub outcome_summary: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub adjustment_summary: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub evidence_scope: ::prost::alloc::string::String,
+}
+/// Optional execution context for a question. The client may identify a public
+/// route and, optionally, a stage. BBS Link resolves display fields from the
+/// route at creation time and never reads a user's private Journey or actions.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QuestionContextDraft {
+    #[prost(string, tag = "1")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(uint32, optional, tag = "2")]
+    pub stage_index: ::core::option::Option<u32>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QuestionContext {
+    #[prost(string, tag = "1")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub route_title: ::prost::alloc::string::String,
+    #[prost(uint32, optional, tag = "3")]
+    pub stage_index: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "4")]
+    pub stage_title: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -118,6 +193,14 @@ pub struct Content {
     pub quality_score: f64,
     #[prost(message, optional, tag = "13")]
     pub route_template: ::core::option::Option<RouteTemplate>,
+    #[prost(message, optional, tag = "14")]
+    pub milestone: ::core::option::Option<Milestone>,
+    /// The answer is a Comment-owned fact. This stores only its stable ID after
+    /// Gateway verifies it is a published root comment on this question.
+    #[prost(string, optional, tag = "15")]
+    pub accepted_answer_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "16")]
+    pub question_context: ::core::option::Option<QuestionContext>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -222,6 +305,10 @@ pub struct CreateRequest {
     pub media_asset_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "14")]
     pub route_template: ::core::option::Option<RouteTemplate>,
+    #[prost(message, optional, tag = "15")]
+    pub milestone: ::core::option::Option<MilestoneDraft>,
+    #[prost(message, optional, tag = "16")]
+    pub question_context: ::core::option::Option<QuestionContextDraft>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -247,6 +334,8 @@ pub struct UpdateRequest {
     pub media_asset_ids: ::core::option::Option<StringList>,
     #[prost(message, optional, tag = "10")]
     pub route_template: ::core::option::Option<RouteTemplate>,
+    #[prost(message, optional, tag = "11")]
+    pub milestone: ::core::option::Option<MilestoneDraft>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -277,6 +366,16 @@ pub struct RestrictRequest {
 pub struct RestoreRequest {
     #[prost(string, tag = "1")]
     pub content_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AcceptAnswerRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub question_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub answer_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -322,6 +421,11 @@ pub enum ContentType {
     Article = 1,
     Video = 2,
     Route = 3,
+    /// A public, structured account of progress through a public route.
+    Milestone = 4,
+    /// A question whose published root comments are answers. The question author
+    /// can select one verified public answer without creating a second thread.
+    Question = 5,
 }
 impl ContentType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -334,6 +438,8 @@ impl ContentType {
             Self::Article => "CONTENT_TYPE_ARTICLE",
             Self::Video => "CONTENT_TYPE_VIDEO",
             Self::Route => "CONTENT_TYPE_ROUTE",
+            Self::Milestone => "CONTENT_TYPE_MILESTONE",
+            Self::Question => "CONTENT_TYPE_QUESTION",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -343,6 +449,8 @@ impl ContentType {
             "CONTENT_TYPE_ARTICLE" => Some(Self::Article),
             "CONTENT_TYPE_VIDEO" => Some(Self::Video),
             "CONTENT_TYPE_ROUTE" => Some(Self::Route),
+            "CONTENT_TYPE_MILESTONE" => Some(Self::Milestone),
+            "CONTENT_TYPE_QUESTION" => Some(Self::Question),
             _ => None,
         }
     }
@@ -704,6 +812,27 @@ pub mod bbs_link_client {
                 .insert(GrpcMethod::new("bookway.bbs.link.BbsLink", "Restore"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn accept_answer(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AcceptAnswerRequest>,
+        ) -> std::result::Result<tonic::Response<super::Content>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.link.BbsLink/AcceptAnswer",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.link.BbsLink", "AcceptAnswer"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -757,6 +886,10 @@ pub mod bbs_link_server {
         async fn restore(
             &self,
             request: tonic::Request<super::RestoreRequest>,
+        ) -> std::result::Result<tonic::Response<super::Content>, tonic::Status>;
+        async fn accept_answer(
+            &self,
+            request: tonic::Request<super::AcceptAnswerRequest>,
         ) -> std::result::Result<tonic::Response<super::Content>, tonic::Status>;
     }
     #[derive(Debug)]
@@ -1209,6 +1342,51 @@ pub mod bbs_link_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RestoreSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.link.BbsLink/AcceptAnswer" => {
+                    #[allow(non_camel_case_types)]
+                    struct AcceptAnswerSvc<T: BbsLink>(pub Arc<T>);
+                    impl<
+                        T: BbsLink,
+                    > tonic::server::UnaryService<super::AcceptAnswerRequest>
+                    for AcceptAnswerSvc<T> {
+                        type Response = super::Content;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AcceptAnswerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BbsLink>::accept_answer(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AcceptAnswerSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

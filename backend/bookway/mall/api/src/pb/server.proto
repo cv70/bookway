@@ -81,10 +81,44 @@ message IdRequest { string id = 1; }
 message SkuIdsRequest { repeated string ids = 1; }
 message SkuListResponse { repeated MallSku items = 1; }
 
+// A contextual offer is attached to a public route action node.  The mall
+// owns this association so content services never need to copy product facts.
+message NodeOffer {
+  string id = 1;
+  string product_id = 2;
+  string sku_id = 3;
+  string route_id = 4;
+  string action_node_id = 5;
+  string creator_id = 6;
+  uint32 commission_bps = 7;
+  string created_at = 8;
+}
+
+message AttachNodeOfferRequest {
+  string product_id = 1;
+  string sku_id = 2;
+  string route_id = 3;
+  string action_node_id = 4;
+  string creator_id = 5;
+  uint32 commission_bps = 6;
+  string idempotency_key = 7;
+}
+
+message NodeOfferQueryRequest {
+  string route_id = 1;
+  string action_node_id = 2;
+  optional uint32 limit = 3;
+}
+
+message NodeOfferList { repeated NodeOffer items = 1; }
+
 service Mall {
   rpc CreateProduct(CreateProductRequest) returns (MallProduct);
   rpc UpdateProduct(UpdateProductRequest) returns (MallProduct);
   rpc Products(ProductQueryRequest) returns (ProductPage);
   rpc Product(IdRequest) returns (MallProduct);
   rpc Skus(SkuIdsRequest) returns (SkuListResponse);
+  rpc AttachNodeOffer(AttachNodeOfferRequest) returns (NodeOffer);
+  rpc NodeOffers(NodeOfferQueryRequest) returns (NodeOfferList);
+  rpc GetNodeOffer(IdRequest) returns (NodeOffer);
 }

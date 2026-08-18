@@ -310,12 +310,79 @@ fn index_operation(mut document: Value, status: &str) -> IndexOperation {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let content_type = document.get("content_type").and_then(content_type_name);
+    let domain = document
+        .get("post")
+        .and_then(Value::as_object)
+        .and_then(|post| post.get("domain"))
+        .and_then(growth_domain_name);
     if let Some(object) = document.as_object_mut() {
         for (field, value) in fields {
             object.insert(field.to_string(), value);
         }
+        // Protobuf payloads store enum values as integers. The query path uses
+        // stable keyword names, so normalize every filterable enum at index
+        // time instead of leaking generated wire representation into search.
+        object.insert("status".to_string(), Value::String(status.to_string()));
+        if let Some(content_type) = content_type {
+            object.insert(
+                "content_type".to_string(),
+                Value::String(content_type.to_string()),
+            );
+        }
+        if let Some(domain) = domain {
+            object.insert("domain".to_string(), Value::String(domain.to_string()));
+        }
     }
     IndexOperation::Upsert(document)
+}
+
+fn content_type_name(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::Number(value) => match value.as_i64() {
+            Some(0) => Some("note"),
+            Some(1) => Some("article"),
+            Some(2) => Some("video"),
+            Some(3) => Some("route"),
+            Some(4) => Some("milestone"),
+            Some(5) => Some("question"),
+            _ => None,
+        },
+        // This keeps a rolling deployment compatible with any client that
+        // serializes the enum by name before producing an outbox document.
+        Value::String(value) => match value.as_str() {
+            "note" => Some("note"),
+            "article" => Some("article"),
+            "video" => Some("video"),
+            "route" => Some("route"),
+            "milestone" => Some("milestone"),
+            "question" => Some("question"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn growth_domain_name(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::Number(value) => match value.as_i64() {
+            Some(0) => Some("learning"),
+            Some(1) => Some("movement"),
+            Some(2) => Some("wellness"),
+            Some(3) => Some("travel"),
+            Some(4) => Some("leisure"),
+            _ => None,
+        },
+        Value::String(value) => match value.as_str() {
+            "learning" => Some("learning"),
+            "movement" => Some("movement"),
+            "wellness" => Some("wellness"),
+            "travel" => Some("travel"),
+            "leisure" => Some("leisure"),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 async fn ensure_index(client: &reqwest::Client, base_url: &str, index: &str) -> Result<(), String> {
@@ -478,11 +545,13 @@ mod tests {
         let operation = index_operation(
             json!({
                 "id": "post-1",
+                "content_type": 4,
                 "post": {
                     "title": "A useful route",
                     "summary": "Start with a small step",
                     "author_name": "author",
-                    "tags": ["learning"]
+                    "tags": ["learning"],
+                    "domain": 0
                 }
             }),
             "published",
@@ -493,6 +562,25 @@ mod tests {
         assert_eq!(document["title"], "A useful route");
         assert_eq!(document["summary"], "Start with a small step");
         assert_eq!(document["tags"], json!(["learning"]));
+        assert_eq!(document["status"], "published");
+        assert_eq!(document["content_type"], "milestone");
+        assert_eq!(document["domain"], "learning");
+    }
+
+    #[test]
+    fn question_content_type_is_preserved_for_search_filters() {
+        let operation = index_operation(
+            json!({
+                "id": "question-1",
+                "content_type": 5,
+                "post": { "domain": 0 }
+            }),
+            "published",
+        );
+        let IndexOperation::Upsert(document) = operation else {
+            panic!("published question should be indexed");
+        };
+        assert_eq!(document["content_type"], "question");
     }
 
     #[test]

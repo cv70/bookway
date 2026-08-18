@@ -299,6 +299,7 @@ dependencies = [
  "async-trait",
  "bookway-ad-center-api",
  "bookway-api",
+ "bookway-bbs-link-api",
  "bookway-data",
  "bookway-runtime",
  "prost",
@@ -688,40 +689,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bookway-commonlikestatus"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum 0.8.9",
- "bookway-api",
- "bookway-commonlikestatus-api",
- "bookway-data",
- "bookway-runtime",
- "prost",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.20",
- "tokio",
- "tonic",
- "tonic-health",
- "tower 0.5.3",
- "tower-http",
-]
-
-[[package]]
-name = "bookway-commonlikestatus-api"
-version = "0.1.0"
-dependencies = [
- "bookway-api",
- "prost",
- "serde",
- "serde_json",
- "tonic",
- "tonic-build",
-]
-
-[[package]]
 name = "bookway-community-notification-dispatcher"
 version = "0.1.0"
 dependencies = [
@@ -886,6 +853,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookway-feature-snapshot"
+version = "0.1.0"
+dependencies = [
+ "bookway-data",
+ "bookway-runtime",
+ "serde_json",
+ "sqlx",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "bookway-feedback"
 version = "0.1.0"
 dependencies = [
@@ -934,12 +915,13 @@ dependencies = [
  "bookway-bbs-message-api",
  "bookway-bbs-search-api",
  "bookway-comment-api",
- "bookway-commonlikestatus-api",
  "bookway-content-audit-api",
  "bookway-data",
  "bookway-feedback-api",
  "bookway-gateway-api",
  "bookway-growth-api",
+ "bookway-interaction-status-api",
+ "bookway-knowledge-catalog-api",
  "bookway-mall-api",
  "bookway-mall-order-api",
  "bookway-media-api",
@@ -971,10 +953,10 @@ dependencies = [
  "bookway-bbs-feed-api",
  "bookway-bbs-link-api",
  "bookway-comment-api",
- "bookway-commonlikestatus-api",
  "bookway-content-audit-api",
  "bookway-feedback-api",
  "bookway-growth-api",
+ "bookway-interaction-status-api",
  "bookway-mall-api",
  "bookway-mall-order-api",
  "bookway-media-api",
@@ -1024,11 +1006,76 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookway-interaction-status"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "bookway-api",
+ "bookway-data",
+ "bookway-interaction-status-api",
+ "bookway-runtime",
+ "prost",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tonic-health",
+ "tower 0.5.3",
+ "tower-http",
+]
+
+[[package]]
+name = "bookway-interaction-status-api"
+version = "0.1.0"
+dependencies = [
+ "bookway-api",
+ "prost",
+ "serde",
+ "serde_json",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
+name = "bookway-knowledge-catalog"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bookway-bbs-link-api",
+ "bookway-data",
+ "bookway-knowledge-catalog-api",
+ "bookway-runtime",
+ "serde",
+ "sqlx",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "tonic",
+ "tonic-health",
+ "uuid",
+]
+
+[[package]]
+name = "bookway-knowledge-catalog-api"
+version = "0.1.0"
+dependencies = [
+ "bookway-api",
+ "prost",
+ "serde",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "bookway-mall"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bookway-api",
+ "bookway-bbs-link-api",
  "bookway-data",
  "bookway-mall-api",
  "bookway-runtime",
@@ -1066,6 +1113,7 @@ dependencies = [
  "bookway-mall-inventory-api",
  "bookway-runtime",
  "prost",
+ "redis",
  "serde",
  "serde_json",
  "sqlx",
@@ -1074,6 +1122,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-health",
+ "tracing",
 ]
 
 [[package]]
@@ -1113,6 +1162,7 @@ dependencies = [
  "bookway-mall-inventory-api",
  "bookway-mall-order-api",
  "bookway-runtime",
+ "bookway-user-event-api",
  "prost",
  "serde",
  "serde_json",
@@ -1239,12 +1289,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
+ "bookway-ad-main-api",
  "bookway-api",
  "bookway-bbs-api",
  "bookway-bbs-link-api",
- "bookway-commonlikestatus-api",
  "bookway-data",
  "bookway-feature-main-api",
+ "bookway-interaction-status-api",
  "bookway-recommend-main-api",
  "bookway-recommend-rank-api",
  "bookway-recommend-recall-api",
@@ -1271,7 +1322,7 @@ dependencies = [
  "bookway-api",
  "bookway-bbs-api",
  "bookway-bbs-link-api",
- "bookway-commonlikestatus-api",
+ "bookway-interaction-status-api",
  "prost",
  "serde",
  "serde_json",
@@ -1508,6 +1559,7 @@ dependencies = [
  "bookway-bbs-link-api",
  "bookway-bbs-search-api",
  "bookway-data",
+ "bookway-knowledge-catalog-api",
  "bookway-runtime",
  "bookway-search-main-api",
  "prost",

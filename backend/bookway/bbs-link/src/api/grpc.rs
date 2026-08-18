@@ -115,6 +115,18 @@ impl BbsLink for GrpcServer {
                 .map_err(internal_error)?,
         ))
     }
+
+    async fn accept_answer(
+        &self,
+        request: Request<pb::AcceptAnswerRequest>,
+    ) -> Result<Response<pb::Content>, Status> {
+        Ok(Response::new(
+            self.domain
+                .accept_answer(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
 }
 
 pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {

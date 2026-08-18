@@ -7,6 +7,7 @@ pub(crate) struct Config {
     pub(crate) listen_addr: SocketAddr,
     pub(crate) bbs_search_url: String,
     pub(crate) bbs_link_url: String,
+    pub(crate) knowledge_catalog_url: String,
 }
 
 impl Config {
@@ -17,6 +18,8 @@ impl Config {
                 .unwrap_or_else(|_| "http://127.0.0.1:8085".to_string()),
             bbs_link_url: env::var("BBS_LINK_GRPC_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:18004".to_string()),
+            knowledge_catalog_url: env::var("KNOWLEDGE_CATALOG_GRPC_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8105".to_string()),
         })
     }
 }

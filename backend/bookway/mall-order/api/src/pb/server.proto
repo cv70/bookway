@@ -17,6 +17,7 @@ message CreateRequest {
   string user_id = 1;
   string idempotency_key = 2;
   repeated OrderItemRequest items = 3;
+  optional string node_offer_id = 4;
 }
 
 message OrderLine {
@@ -40,6 +41,9 @@ message Order {
   string expires_at = 8;
   string created_at = 9;
   string updated_at = 10;
+  optional string node_offer_id = 11;
+  optional string affiliate_creator_id = 12;
+  int64 commission_cents = 13;
 }
 
 message OrderListResponse { repeated Order items = 1; }

@@ -21,6 +21,7 @@ use bookway_comment_api::pb as comment_pb;
 use bookway_content_audit_api::pb as audit_pb;
 use bookway_feedback_api::pb as feedback_pb;
 use bookway_growth_api::pb as growth_pb;
+use bookway_knowledge_catalog_api::pb as catalog_pb;
 use bookway_mall_api::pb as mall_pb;
 use bookway_mall_order_api::pb as mall_order_pb;
 use bookway_media_api::pb as media_pb;
@@ -71,6 +72,8 @@ struct PublicAuthorContentQuery {
 #[derive(Debug, Default, Deserialize)]
 struct AdQuery {
     placement: String,
+    route_id: String,
+    action_node_id: String,
     domain: Option<String>,
     limit: Option<u32>,
 }
@@ -155,6 +158,10 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/reviews/weekly",
             get(weekly_review).put(save_weekly_review),
         )
+        .route(
+            "/v1/reviews/{review_id}/adjustments/{suggestion_index}/apply",
+            post(apply_weekly_review_adjustment),
+        )
         .route("/v1/companion", get(companion))
         .route("/v1/knowledge", get(list_knowledge).post(create_knowledge))
         .route(
@@ -167,11 +174,29 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/ads/events", post(report_ad_event))
         .route("/v1/mall/products", get(mall_products))
         .route("/v1/mall/products/{product_id}", get(mall_product))
+        .route(
+            "/v1/routes/{route_id}/nodes/{action_node_id}/offers",
+            get(route_node_offers),
+        )
+        .route(
+            "/v1/routes/{route_id}/nodes/{action_node_id}/resources",
+            get(list_route_node_resources).post(attach_route_node_resource),
+        )
+        .route(
+            "/v1/routes/{route_id}/nodes/{action_node_id}/resources/{attachment_id}",
+            delete(detach_route_node_resource),
+        )
         .route("/v1/orders", get(mall_orders).post(create_mall_order))
         .route("/v1/orders/{order_id}", get(mall_order))
         .route("/v1/orders/{order_id}/cancel", post(cancel_mall_order))
         .route("/v1/search", get(search))
         .route("/v1/search/suggestions", get(suggestions))
+        .route("/v1/resources", get(search_resources))
+        .route("/v1/resources/{resource_id}", get(get_resource))
+        .route(
+            "/v1/resources/{resource_id}/knowledge",
+            post(capture_resource_knowledge),
+        )
         .route("/v1/events", post(ingest_events))
         .route("/v1/feedback", post(create_feedback))
         .route("/v1/me/feedback", get(list_own_feedback))
@@ -245,6 +270,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/v1/posts/{post_id}/comments/{comment_id}",
             delete(delete_comment),
+        )
+        .route(
+            "/v1/posts/{post_id}/comments/{comment_id}/accept",
+            post(accept_question_answer),
         )
         .route(
             "/v1/posts/{post_id}/comments/{comment_id}/report",
@@ -767,6 +796,24 @@ async fn save_weekly_review(
     )))
 }
 
+async fn apply_weekly_review_adjustment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((review_id, suggestion_index)): Path<(String, u32)>,
+) -> Result<Json<ApiResponse<rest::ReviewAdjustmentApplication>>, HttpError> {
+    let applied = state
+        .domain
+        .apply_weekly_review_adjustment(growth_pb::ApplyWeeklyReviewAdjustmentRequest {
+            user_id: user_id(&headers),
+            review_id,
+            suggestion_index,
+        })
+        .await?;
+    Ok(Json(ApiResponse::new(
+        applied.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
 async fn companion(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -876,8 +923,9 @@ async fn ad_decisions(
                 user_id: user_id(&headers),
                 placement: query.placement,
                 domain: query.domain,
-                context: Default::default(),
                 limit: query.limit,
+                route_id: query.route_id,
+                action_node_id: query.action_node_id,
             })
             .await?,
     )))
@@ -917,6 +965,21 @@ async fn mall_product(
             .domain
             .mall_product(mall_pb::IdRequest { id: product_id })
             .await?,
+    )))
+}
+
+async fn route_node_offers(
+    State(state): State<AppState>,
+    Path((route_id, action_node_id)): Path<(String, String)>,
+    Query(query): Query<mall_pb::NodeOfferQueryRequest>,
+) -> Result<Json<ApiResponse<mall_pb::NodeOfferList>>, HttpError> {
+    let request = mall_pb::NodeOfferQueryRequest {
+        route_id,
+        action_node_id,
+        limit: query.limit,
+    };
+    Ok(Json(ApiResponse::new(
+        state.domain.mall_node_offers(request).await?,
     )))
 }
 
@@ -1003,6 +1066,105 @@ async fn suggestions(
     Ok(Json(ApiResponse::new(
         response.try_into().map_err(HttpError::Contract)?,
     )))
+}
+
+async fn search_resources(
+    State(state): State<AppState>,
+    Query(query): Query<rest::ResourceSearchQuery>,
+) -> Result<Json<ApiResponse<rest::PublicResourcePage>>, HttpError> {
+    let response = state
+        .domain
+        .search_resources(query.into_pb().map_err(HttpError::InvalidRequest)?)
+        .await?;
+    Ok(Json(ApiResponse::new(
+        response.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn list_route_node_resources(
+    State(state): State<AppState>,
+    Path((route_id, action_node_id)): Path<(String, String)>,
+    Query(query): Query<rest::RouteNodeResourceQuery>,
+) -> Result<Json<ApiResponse<rest::RouteNodeResourcePage>>, HttpError> {
+    let response = state
+        .domain
+        .list_route_node_resources(catalog_pb::ListNodeResourcesRequest {
+            route_id,
+            action_node_id,
+            include_archived: query.include_archived,
+        })
+        .await?;
+    Ok(Json(ApiResponse::new(
+        response.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn attach_route_node_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((route_id, action_node_id)): Path<(String, String)>,
+    Json(request): Json<rest::AttachRouteNodeResourceRequest>,
+) -> Result<
+    (
+        StatusCode,
+        Json<ApiResponse<rest::RouteNodeResourceAttachment>>,
+    ),
+    HttpError,
+> {
+    let request = request
+        .into_pb(
+            route_id,
+            action_node_id,
+            user_id(&headers),
+            idempotency_key(&headers),
+        )
+        .map_err(HttpError::InvalidRequest)?;
+    let attachment = state.domain.attach_route_node_resource(request).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            attachment.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
+}
+
+async fn detach_route_node_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((route_id, action_node_id, attachment_id)): Path<(String, String, String)>,
+) -> Result<Json<ApiResponse<rest::DetachRouteNodeResourceResponse>>, HttpError> {
+    let response = state
+        .domain
+        .detach_route_node_resource(catalog_pb::DetachNodeResourceRequest {
+            route_id,
+            action_node_id,
+            attachment_id,
+            operator_id: user_id(&headers),
+        })
+        .await?;
+    Ok(Json(ApiResponse::new(response.into())))
+}
+
+async fn get_resource(
+    State(state): State<AppState>,
+    Path(resource_id): Path<String>,
+) -> Result<Json<ApiResponse<rest::PublicResource>>, HttpError> {
+    let resource = state.domain.get_resource(resource_id).await?;
+    Ok(Json(ApiResponse::new(
+        resource.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
+async fn capture_resource_knowledge(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resource_id): Path<String>,
+) -> Result<(StatusCode, Json<ApiResponse<growth_pb::KnowledgeResource>>), HttpError> {
+    let resource = state
+        .domain
+        .capture_resource_as_knowledge(user_id(&headers), resource_id)
+        .await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::new(resource))))
 }
 
 async fn ingest_events(
@@ -1541,6 +1703,20 @@ async fn delete_comment(
         })
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn accept_question_answer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((post_id, comment_id)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<rest::Content>>, HttpError> {
+    let content = state
+        .domain
+        .accept_question_answer(user_id(&headers), post_id, comment_id)
+        .await?;
+    Ok(Json(ApiResponse::new(
+        content.try_into().map_err(HttpError::Contract)?,
+    )))
 }
 
 async fn report_comment(

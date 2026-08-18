@@ -3,7 +3,10 @@
 use super::pb::{self, search_main_server::SearchMain};
 use crate::domain::Domain;
 use bookway_bbs_search_api::pb as search_pb;
+use std::time::Duration;
 use tonic::{Request, Response, Status};
+
+const SEARCH_REQUEST_BUDGET: Duration = Duration::from_millis(140);
 
 #[derive(Clone)]
 struct GrpcServer {
@@ -16,24 +19,28 @@ impl SearchMain for GrpcServer {
         &self,
         request: Request<search_pb::SearchRequest>,
     ) -> Result<Response<search_pb::SearchResponse>, Status> {
-        Ok(Response::new(
-            self.domain
-                .search(request.into_inner())
-                .await
-                .map_err(internal_error)?,
-        ))
+        let response = tokio::time::timeout(
+            SEARCH_REQUEST_BUDGET,
+            self.domain.search(request.into_inner()),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("search request exceeded the 140ms budget"))?
+        .map_err(internal_error)?;
+        Ok(Response::new(response))
     }
 
     async fn suggestions(
         &self,
         request: Request<search_pb::SuggestionsRequest>,
     ) -> Result<Response<search_pb::SuggestionsResponse>, Status> {
-        Ok(Response::new(
-            self.domain
-                .suggestions(request.into_inner())
-                .await
-                .map_err(internal_error)?,
-        ))
+        let response = tokio::time::timeout(
+            SEARCH_REQUEST_BUDGET,
+            self.domain.suggestions(request.into_inner()),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("suggestions request exceeded the 140ms budget"))?
+        .map_err(internal_error)?;
+        Ok(Response::new(response))
     }
 
     async fn validate_attributions(
@@ -85,7 +92,8 @@ fn internal_error(error: crate::domain::SearchMainError) -> Status {
         }
         crate::domain::SearchMainError::Session(error) => Status::unavailable(error.to_string()),
         crate::domain::SearchMainError::Upstream { code, message }
-        | crate::domain::SearchMainError::ContentUpstream { code, message } => {
+        | crate::domain::SearchMainError::ContentUpstream { code, message }
+        | crate::domain::SearchMainError::ResourceUpstream { code, message } => {
             Status::new(code, message)
         }
         crate::domain::SearchMainError::InvalidContentSummary => {

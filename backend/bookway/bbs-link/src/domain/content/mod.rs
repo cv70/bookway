@@ -23,7 +23,7 @@ impl Domain {
         page.items = page
             .items
             .into_iter()
-            .map(normalize_route_summary)
+            .map(normalize_content_summary)
             .collect();
         Ok(page)
     }
@@ -78,11 +78,11 @@ impl Domain {
     }
 
     pub(crate) async fn get(&self, id: &str) -> Result<pb::Content, ContentError> {
-        Ok(normalize_route_summary(self.repository.get(id).await?))
+        Ok(normalize_content_summary(self.repository.get(id).await?))
     }
 
     pub(crate) async fn get_public(&self, id: &str) -> Result<pb::Content, ContentError> {
-        let content = normalize_route_summary(self.repository.get(id).await?);
+        let content = normalize_content_summary(self.repository.get(id).await?);
         if content.status != pb::ContentStatus::Published as i32 {
             return Err(ContentError::Repository(RepositoryError::NotFound(
                 id.to_string(),
@@ -114,16 +114,22 @@ impl Domain {
         reject_legacy_cover_url(request.cover_url.as_deref())?;
         validate_enum::<pb::GrowthDomain>(request.domain, "growth domain")?;
         validate_enum::<pb::ContentType>(request.content_type, "content type")?;
-        let route_template = match request.route_template.clone() {
-            Some(template) => validate_route_template(request.content_type, Some(template))?,
-            None if request.content_type == pb::ContentType::Route as i32 => {
-                validate_route_template(
-                    request.content_type,
-                    Some(legacy_route_template(&request.title, &request.summary)),
-                )?
-            }
-            None => None,
-        };
+        let route_template =
+            validate_route_template(request.content_type, request.route_template.clone())?;
+        let milestone = self
+            .resolve_milestone(
+                request.content_type,
+                request.domain,
+                request.milestone.clone(),
+            )
+            .await?;
+        let question_context = self
+            .resolve_question_context(
+                request.content_type,
+                request.domain,
+                request.question_context.clone(),
+            )
+            .await?;
         let media_asset_ids = normalize_media_asset_ids(&request.media_asset_ids)?;
         let media = self
             .owned_ready_media(request.user_id.clone(), media_asset_ids)
@@ -167,6 +173,8 @@ impl Domain {
                 freshness: 1.0,
                 tags: request.tags,
                 is_route,
+                is_milestone: request.content_type == pb::ContentType::Milestone as i32,
+                is_question: request.content_type == pb::ContentType::Question as i32,
             }),
             author_id: request.user_id,
             content_type: request.content_type,
@@ -179,8 +187,11 @@ impl Domain {
             version: 1,
             quality_score: 0.0,
             route_template,
+            milestone,
+            accepted_answer_id: None,
+            question_context,
         };
-        Ok(normalize_route_summary(
+        Ok(normalize_content_summary(
             self.repository
                 .create(content, request.idempotency_key, request_fingerprint)
                 .await?,
@@ -191,7 +202,7 @@ impl Domain {
         &self,
         request: pb::UpdateRequest,
     ) -> Result<pb::Content, ContentError> {
-        let mut content = normalize_route_summary(self.repository.get(&request.id).await?);
+        let mut content = normalize_content_summary(self.repository.get(&request.id).await?);
         if content.author_id != request.user_id {
             return Err(ContentError::Forbidden);
         }
@@ -222,8 +233,15 @@ impl Domain {
             content.topics = topics.values;
         }
         if let Some(route_template) = request.route_template {
-            content.route_template =
-                validate_route_template(content.content_type, Some(route_template))?;
+            let route_template = validate_route_template(content.content_type, Some(route_template))?;
+            if content.status == pb::ContentStatus::Published as i32
+                && action_node_ids(content.route_template.as_ref()) != action_node_ids(route_template.as_ref())
+            {
+                return Err(ContentError::Validation(
+                    "已发布路线不能变更行动节点；请新建路线版本".to_string(),
+                ));
+            }
+            content.route_template = route_template;
         }
         reject_legacy_cover_url(request.cover_url.as_deref())?;
         if let Some(media_asset_ids) = request.media_asset_ids {
@@ -238,12 +256,17 @@ impl Domain {
                 .map(|item| item.url.clone())
                 .unwrap_or_default();
         }
+        if let Some(milestone) = request.milestone {
+            content.milestone = self
+                .resolve_milestone(content.content_type, post.domain, Some(milestone))
+                .await?;
+        }
         content.version = content.version.saturating_add(1);
         if content.status == pb::ContentStatus::Published as i32 {
             content.status = pb::ContentStatus::Reviewing as i32;
             content.published_at = None;
         }
-        Ok(normalize_route_summary(
+        Ok(normalize_content_summary(
             self.repository.update(content).await?,
         ))
     }
@@ -261,9 +284,9 @@ impl Domain {
                 .published_by_idempotency_key(&request.user_id, key, &request_fingerprint)
                 .await?
         {
-            return Ok(normalize_route_summary(content));
+            return Ok(normalize_content_summary(content));
         }
-        let mut content = normalize_route_summary(self.repository.get(&request.id).await?);
+        let mut content = normalize_content_summary(self.repository.get(&request.id).await?);
         if content.author_id != request.user_id {
             return Err(ContentError::Forbidden);
         }
@@ -318,7 +341,7 @@ impl Domain {
         content.status = status;
         content.published_at = published_at;
         content.version = next_version;
-        Ok(normalize_route_summary(
+        Ok(normalize_content_summary(
             self.repository
                 .publish(content, request.idempotency_key, request_fingerprint)
                 .await?,
@@ -335,7 +358,7 @@ impl Domain {
             ));
         }
         let mut content =
-            normalize_route_summary(self.repository.get(request.content_id.trim()).await?);
+            normalize_content_summary(self.repository.get(request.content_id.trim()).await?);
         if matches!(
             pb::ContentStatus::try_from(content.status),
             Ok(pb::ContentStatus::Restricted | pb::ContentStatus::Deleted)
@@ -345,8 +368,45 @@ impl Domain {
         content.status = pb::ContentStatus::Restricted as i32;
         content.published_at = None;
         content.version = content.version.saturating_add(1);
-        Ok(normalize_route_summary(
+        Ok(normalize_content_summary(
             self.repository.update(content).await?,
+        ))
+    }
+
+    pub(crate) async fn accept_answer(
+        &self,
+        request: pb::AcceptAnswerRequest,
+    ) -> Result<pb::Content, ContentError> {
+        if request.user_id.trim().is_empty()
+            || request.question_id.trim().is_empty()
+            || request.answer_id.trim().is_empty()
+        {
+            return Err(ContentError::Validation(
+                "问题、回答和用户不能为空".to_string(),
+            ));
+        }
+        if request.answer_id.len() > 160 {
+            return Err(ContentError::Validation("回答 ID 无效".to_string()));
+        }
+        let mut question =
+            normalize_content_summary(self.repository.get(&request.question_id).await?);
+        if question.author_id != request.user_id {
+            return Err(ContentError::Forbidden);
+        }
+        if question.content_type != pb::ContentType::Question as i32
+            || question.status != pb::ContentStatus::Published as i32
+        {
+            return Err(ContentError::Validation(
+                "只能为已发布的问题采纳回答".to_string(),
+            ));
+        }
+        if question.accepted_answer_id.as_deref() == Some(request.answer_id.trim()) {
+            return Ok(question);
+        }
+        question.accepted_answer_id = Some(request.answer_id.trim().to_string());
+        question.version = question.version.saturating_add(1);
+        Ok(normalize_content_summary(
+            self.repository.update(question).await?,
         ))
     }
 
@@ -360,7 +420,7 @@ impl Domain {
             ));
         }
         let mut content =
-            normalize_route_summary(self.repository.get(request.content_id.trim()).await?);
+            normalize_content_summary(self.repository.get(request.content_id.trim()).await?);
         if content.status == pb::ContentStatus::Published as i32 {
             return Ok(content);
         }
@@ -372,21 +432,177 @@ impl Domain {
         content.status = pb::ContentStatus::Published as i32;
         content.published_at = Some(now_rfc3339());
         content.version = content.version.saturating_add(1);
-        Ok(normalize_route_summary(
+        Ok(normalize_content_summary(
             self.repository.update(content).await?,
         ))
     }
+
+    async fn resolve_milestone(
+        &self,
+        content_type: i32,
+        domain: i32,
+        milestone: Option<pb::MilestoneDraft>,
+    ) -> Result<Option<pb::Milestone>, ContentError> {
+        let content_type = pb::ContentType::try_from(content_type)
+            .map_err(|_| ContentError::Validation("invalid content type".to_string()))?;
+        let draft = match (content_type, milestone) {
+            (pb::ContentType::Milestone, Some(draft)) => draft,
+            (pb::ContentType::Milestone, None) => {
+                return Err(ContentError::Validation(
+                    "阶段成果必须关联一条公开路线和阶段".to_string(),
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(ContentError::Validation(
+                    "仅阶段成果内容可以携带阶段成果结构".to_string(),
+                ));
+            }
+            (_, None) => return Ok(None),
+        };
+        let route_id = normalize_public_reference_id(&draft.route_id, "关联路线 ID")?;
+        validate_text(&draft.effort_summary, 1, 300, "阶段投入")?;
+        validate_text(&draft.outcome_summary, 1, 1_000, "阶段结果")?;
+        validate_text(&draft.adjustment_summary, 0, 600, "阶段调整")?;
+        validate_text(&draft.evidence_scope, 1, 300, "证据范围")?;
+        let stage_index = draft.stage_index.ok_or_else(|| {
+            ContentError::Validation("阶段成果必须关联路线中的一个阶段".to_string())
+        })?;
+
+        // A milestone can only point to content that is currently public. The
+        // snapshot below is public route metadata, never a private plan read.
+        let route = match self.repository.get(&route_id).await {
+            Ok(route) => normalize_content_summary(route),
+            Err(RepositoryError::NotFound(_)) => {
+                return Err(ContentError::Validation(
+                    "关联路线不存在或当前不可公开访问".to_string(),
+                ));
+            }
+            Err(error) => return Err(ContentError::Repository(error)),
+        };
+        if route.status != pb::ContentStatus::Published as i32
+            || route.content_type != pb::ContentType::Route as i32
+        {
+            return Err(ContentError::Validation(
+                "阶段成果只能关联当前公开的路线".to_string(),
+            ));
+        }
+        let post = route.post.as_ref().ok_or_else(|| {
+            ContentError::Repository(RepositoryError::InvalidContent(
+                "public route is missing its post summary".to_string(),
+            ))
+        })?;
+        if post.domain != domain {
+            return Err(ContentError::Validation(
+                "阶段成果的成长领域必须与关联路线一致".to_string(),
+            ));
+        }
+        let route_template = route
+            .route_template
+            .as_ref()
+            .ok_or_else(|| ContentError::Validation("关联路线没有可验证的阶段模板".to_string()))?;
+        let stage = route_template
+            .stages
+            .get(stage_index as usize)
+            .ok_or_else(|| ContentError::Validation("关联路线中不存在该阶段".to_string()))?;
+        Ok(Some(pb::Milestone {
+            route_id,
+            route_title: post.title.clone(),
+            stage_index,
+            stage_title: stage.title.clone(),
+            effort_summary: draft.effort_summary.trim().to_string(),
+            outcome_summary: draft.outcome_summary.trim().to_string(),
+            adjustment_summary: draft.adjustment_summary.trim().to_string(),
+            evidence_scope: draft.evidence_scope.trim().to_string(),
+        }))
+    }
+
+    async fn resolve_question_context(
+        &self,
+        content_type: i32,
+        domain: i32,
+        question_context: Option<pb::QuestionContextDraft>,
+    ) -> Result<Option<pb::QuestionContext>, ContentError> {
+        let content_type = pb::ContentType::try_from(content_type)
+            .map_err(|_| ContentError::Validation("invalid content type".to_string()))?;
+        let draft = match (content_type, question_context) {
+            (pb::ContentType::Question, Some(draft)) => draft,
+            (_, Some(_)) => {
+                return Err(ContentError::Validation(
+                    "只有问题内容可以关联路线上下文".to_string(),
+                ));
+            }
+            (_, None) => return Ok(None),
+        };
+        let route_id = normalize_public_reference_id(&draft.route_id, "关联路线 ID")?;
+        // This is intentionally a public content read. A question may describe
+        // an execution blockage without exposing a private plan's progress.
+        let route = match self.repository.get(&route_id).await {
+            Ok(route) => normalize_content_summary(route),
+            Err(RepositoryError::NotFound(_)) => {
+                return Err(ContentError::Validation(
+                    "关联路线不存在或当前不可公开访问".to_string(),
+                ));
+            }
+            Err(error) => return Err(ContentError::Repository(error)),
+        };
+        if route.status != pb::ContentStatus::Published as i32
+            || route.content_type != pb::ContentType::Route as i32
+        {
+            return Err(ContentError::Validation(
+                "问题只能关联当前公开的路线".to_string(),
+            ));
+        }
+        let post = route.post.as_ref().ok_or_else(|| {
+            ContentError::Repository(RepositoryError::InvalidContent(
+                "public route is missing its post summary".to_string(),
+            ))
+        })?;
+        if post.domain != domain {
+            return Err(ContentError::Validation(
+                "问题的成长领域必须与关联路线一致".to_string(),
+            ));
+        }
+        let (stage_index, stage_title) = if let Some(stage_index) = draft.stage_index {
+            let route_template = route.route_template.as_ref().ok_or_else(|| {
+                ContentError::Validation("关联路线没有可验证的阶段模板".to_string())
+            })?;
+            let stage = route_template
+                .stages
+                .get(stage_index as usize)
+                .ok_or_else(|| ContentError::Validation("关联路线中不存在该阶段".to_string()))?;
+            (Some(stage_index), Some(stage.title.clone()))
+        } else {
+            (None, None)
+        };
+        Ok(Some(pb::QuestionContext {
+            route_id,
+            route_title: post.title.clone(),
+            stage_index,
+            stage_title,
+        }))
+    }
 }
 
-fn normalize_route_summary(mut content: pb::Content) -> pb::Content {
+fn normalize_content_summary(mut content: pb::Content) -> pb::Content {
     let is_route = content.content_type == pb::ContentType::Route as i32;
+    let is_milestone = content.content_type == pb::ContentType::Milestone as i32;
+    let is_question = content.content_type == pb::ContentType::Question as i32;
     if let Some(post) = content.post.as_mut() {
         post.is_route = is_route;
+        post.is_milestone = is_milestone;
+        post.is_question = is_question;
         if !is_route {
-            // Notes and articles cannot inherit a private journey's route metadata.
+            // Only reusable public routes can advertise route adoption metadata.
             post.route_title.clear();
             post.route_duration.clear();
         }
+    }
+    if !is_milestone {
+        content.milestone = None;
+    }
+    if !is_question {
+        content.accepted_answer_id = None;
+        content.question_context = None;
     }
     content
 }
@@ -457,6 +673,18 @@ fn normalize_public_summary_ids(ids: Vec<String>) -> Result<Vec<String>, Content
         .collect()
 }
 
+fn normalize_public_reference_id(value: &str, label: &str) -> Result<String, ContentError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.chars().count() > 160
+        || value.chars().any(char::is_control)
+        || value.contains(',')
+    {
+        return Err(ContentError::Validation(format!("{label}无效")));
+    }
+    Ok(value.to_string())
+}
+
 fn normalize_list_author_ids(ids: Vec<String>) -> Result<Vec<String>, ContentError> {
     const MAX_BATCH_AUTHORS: usize = 5_000;
     if ids.len() > MAX_BATCH_AUTHORS {
@@ -513,6 +741,7 @@ fn validate_route_template(
         validate_text(&stage.completion_criteria, 0, 200, "路线阶段完成标准")?;
     }
     for action in &template.actions {
+        validate_action_node_id(&action.id)?;
         validate_text(&action.title, 1, 120, "路线行动名称")?;
         validate_text(&action.detail, 0, 1_000, "路线行动说明")?;
         validate_text(&action.scheduled_label, 1, 80, "路线行动安排")?;
@@ -529,28 +758,42 @@ fn validate_route_template(
             ));
         }
     }
+    let action_ids = template
+        .actions
+        .iter()
+        .map(|action| action.id.trim())
+        .collect::<std::collections::HashSet<_>>();
+    if action_ids.len() != template.actions.len() {
+        return Err(ContentError::Validation(
+            "路线行动节点 ID 必须唯一".to_string(),
+        ));
+    }
     Ok(Some(template))
 }
 
-fn legacy_route_template(title: &str, summary: &str) -> pb::RouteTemplate {
-    let intent = if summary.trim().is_empty() {
-        title.trim().to_string()
-    } else {
-        summary.trim().to_string()
-    };
-    pb::RouteTemplate {
-        intent: intent.clone(),
-        completion_criteria: "完成路线中的必要阶段和行动".to_string(),
-        stages: Vec::new(),
-        actions: vec![pb::RouteTemplateAction {
-            title: title.trim().to_string(),
-            detail: intent,
-            estimated_minutes: 20,
-            scheduled_label: "开始时".to_string(),
-            stage_index: None,
-        }],
-        journey_type: pb::RouteTemplateKind::Project as i32,
+fn validate_action_node_id(value: &str) -> Result<(), ContentError> {
+    let raw = value;
+    let value = raw.trim();
+    if value.is_empty()
+        || raw != value
+        || value.chars().count() > 160
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    {
+        return Err(ContentError::Validation(
+            "路线行动节点 ID 只能包含字母、数字、-、_ 或 .，长度不超过 160".to_string(),
+        ));
     }
+    Ok(())
+}
+
+fn action_node_ids(template: Option<&pb::RouteTemplate>) -> std::collections::BTreeSet<String> {
+    template
+        .into_iter()
+        .flat_map(|template| template.actions.iter())
+        .map(|action| action.id.trim().to_string())
+        .collect()
 }
 
 fn validate_text(
@@ -664,6 +907,19 @@ mod tests {
             route_duration: None,
             media_asset_ids: Vec::new(),
             route_template: None,
+            milestone: None,
+            question_context: None,
+        }
+    }
+
+    fn milestone_draft(route_id: &str) -> pb::MilestoneDraft {
+        pb::MilestoneDraft {
+            route_id: route_id.to_string(),
+            stage_index: Some(0),
+            effort_summary: "连续 7 天每天阅读 20 分钟，并完成两次整理".to_string(),
+            outcome_summary: "从零散阅读转为能复述一个主题的完整观点".to_string(),
+            adjustment_summary: "把周中整理改为周末集中完成".to_string(),
+            evidence_scope: "本帖图片和正文仅覆盖本周公开的阅读产出".to_string(),
         }
     }
 
@@ -699,9 +955,130 @@ mod tests {
         assert!(post.route_duration.is_empty());
     }
 
+    #[tokio::test]
+    async fn question_author_can_select_an_answer_without_republishing() {
+        let service = domain();
+        let question = service
+            .create(pb::CreateRequest {
+                idempotency_key: Some("question-create-1".to_string()),
+                title: "跑步后膝盖不适，该怎样调整训练？".to_string(),
+                summary: "希望得到循序渐进的训练建议。".to_string(),
+                body: "连续两周跑步后出现轻微不适，想知道应该先调整哪些变量。".to_string(),
+                content_type: pb::ContentType::Question as i32,
+                ..create_request()
+            })
+            .await
+            .expect("question should be created");
+        let question = service
+            .publish(pb::PublishRequest {
+                user_id: "user-a".to_string(),
+                id: question.id,
+                idempotency_key: Some("question-publish-1".to_string()),
+            })
+            .await
+            .expect("question should publish");
+        let accepted = service
+            .accept_answer(pb::AcceptAnswerRequest {
+                user_id: "user-a".to_string(),
+                question_id: question.id,
+                answer_id: "answer-1".to_string(),
+            })
+            .await
+            .expect("question author can select an answer");
+
+        assert_eq!(accepted.accepted_answer_id.as_deref(), Some("answer-1"));
+        assert!(accepted.post.expect("question summary").is_question);
+        assert_eq!(accepted.status, pb::ContentStatus::Published as i32);
+    }
+
+    #[tokio::test]
+    async fn question_snapshots_a_public_route_stage_without_reading_private_progress() {
+        let service = domain();
+        let question = service
+            .create(pb::CreateRequest {
+                idempotency_key: Some("question-context-create-1".to_string()),
+                title: "主题阅读的起步阶段总是拖延，应该先改哪里？".to_string(),
+                summary: "想在真正放弃前调整路线。".to_string(),
+                body: "我只希望讨论路线的第一阶段，不公开自己的日程或阅读记录。".to_string(),
+                content_type: pb::ContentType::Question as i32,
+                question_context: Some(pb::QuestionContextDraft {
+                    route_id: "post-reading".to_string(),
+                    stage_index: Some(0),
+                }),
+                ..create_request()
+            })
+            .await
+            .expect("question context should resolve from a public route");
+
+        let context = question
+            .question_context
+            .expect("resolved question context");
+        assert_eq!(context.route_id, "post-reading");
+        assert_eq!(
+            context.route_title,
+            "读完 12 本书后，我留下了这套主题阅读法"
+        );
+        assert_eq!(context.stage_index, Some(0));
+        assert_eq!(context.stage_title.as_deref(), Some("从第一步开始"));
+    }
+
+    #[tokio::test]
+    async fn question_context_rejects_private_or_cross_domain_routes() {
+        let service = domain();
+        let private_route = service
+            .create(pb::CreateRequest {
+                idempotency_key: Some("private-question-route-1".to_string()),
+                content_type: pb::ContentType::Route as i32,
+                ..create_request()
+            })
+            .await
+            .expect("draft route should be created");
+        let private_result = service
+            .create(pb::CreateRequest {
+                idempotency_key: Some("question-private-context-1".to_string()),
+                content_type: pb::ContentType::Question as i32,
+                question_context: Some(pb::QuestionContextDraft {
+                    route_id: private_route.id,
+                    stage_index: None,
+                }),
+                ..create_request()
+            })
+            .await;
+        assert!(matches!(private_result, Err(ContentError::Validation(_))));
+
+        let cross_domain = service
+            .create(pb::CreateRequest {
+                idempotency_key: Some("question-domain-context-1".to_string()),
+                content_type: pb::ContentType::Question as i32,
+                domain: pb::GrowthDomain::Travel as i32,
+                question_context: Some(pb::QuestionContextDraft {
+                    route_id: "post-reading".to_string(),
+                    stage_index: None,
+                }),
+                ..create_request()
+            })
+            .await;
+        assert!(matches!(cross_domain, Err(ContentError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn only_published_question_author_can_select_an_answer() {
+        let service = domain();
+        let note = service.create(create_request()).await.expect("create note");
+        let error = service
+            .accept_answer(pb::AcceptAnswerRequest {
+                user_id: "user-a".to_string(),
+                question_id: note.id,
+                answer_id: "answer-1".to_string(),
+            })
+            .await
+            .expect_err("a draft note cannot accept an answer");
+        assert!(matches!(error, ContentError::Validation(_)));
+    }
+
     #[test]
     fn historical_notes_are_normalized_before_being_served() {
-        let content = normalize_route_summary(pb::Content {
+        let content = normalize_content_summary(pb::Content {
             content_type: pb::ContentType::Note as i32,
             post: Some(pb::PostSummary {
                 route_title: "过期路线标题".to_string(),
@@ -716,6 +1093,61 @@ mod tests {
         assert!(!post.is_route);
         assert!(post.route_title.is_empty());
         assert!(post.route_duration.is_empty());
+    }
+
+    #[tokio::test]
+    async fn milestones_snapshot_a_public_route_stage_without_copying_private_plans() {
+        let service = domain();
+        let content = service
+            .create(pb::CreateRequest {
+                idempotency_key: Some("milestone-create-1".to_string()),
+                title: "第一周终于找到了阅读节奏".to_string(),
+                summary: "完成起步阶段后，对方法做了一次小调整。".to_string(),
+                body: "我把每天的阅读缩短到二十分钟，并在周末统一整理。".to_string(),
+                content_type: pb::ContentType::Milestone as i32,
+                milestone: Some(milestone_draft("post-reading")),
+                ..create_request()
+            })
+            .await
+            .expect("public route milestone should be creatable");
+
+        let post = content.post.expect("milestone summary");
+        assert!(!post.is_route);
+        assert!(post.is_milestone);
+        assert!(post.route_title.is_empty());
+        let milestone = content.milestone.expect("resolved milestone");
+        assert_eq!(milestone.route_id, "post-reading");
+        assert_eq!(
+            milestone.route_title,
+            "读完 12 本书后，我留下了这套主题阅读法"
+        );
+        assert_eq!(milestone.stage_index, 0);
+        assert_eq!(milestone.stage_title, "从第一步开始");
+        assert!(milestone.effort_summary.contains("7 天"));
+    }
+
+    #[tokio::test]
+    async fn milestones_reject_nonpublic_routes_before_exposing_an_association() {
+        let service = domain();
+        let private_route = service
+            .create(pb::CreateRequest {
+                idempotency_key: Some("private-route-create-1".to_string()),
+                content_type: pb::ContentType::Route as i32,
+                ..create_request()
+            })
+            .await
+            .expect("draft route should be created");
+
+        let result = service
+            .create(pb::CreateRequest {
+                idempotency_key: Some("milestone-private-route-1".to_string()),
+                content_type: pb::ContentType::Milestone as i32,
+                milestone: Some(milestone_draft(&private_route.id)),
+                ..create_request()
+            })
+            .await;
+
+        assert!(matches!(result, Err(ContentError::Validation(_))));
     }
 
     #[tokio::test]
@@ -1043,6 +1475,7 @@ mod tests {
                 completion_criteria: "完成三次阅读".to_string(),
             }],
             actions: vec![pb::RouteTemplateAction {
+                id: "read-20".to_string(),
                 title: "读二十分钟".to_string(),
                 detail: "只标记一个有用观点".to_string(),
                 estimated_minutes: 20,
@@ -1074,6 +1507,7 @@ mod tests {
                 completion_criteria: "完成第一次阅读".to_string(),
             }],
             actions: vec![pb::RouteTemplateAction {
+                id: "read-20".to_string(),
                 title: "读二十分钟".to_string(),
                 detail: "只记录一个值得保留的观点".to_string(),
                 estimated_minutes: 20,

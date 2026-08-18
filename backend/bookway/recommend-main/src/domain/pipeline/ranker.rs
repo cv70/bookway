@@ -100,6 +100,10 @@ fn rank_features(features: feature::FeaturesResponse) -> rank::RankFeatures {
                 author_affinity: candidate.author_affinity,
                 impression_fatigue: candidate.impression_fatigue,
                 direct_negative_feedback: candidate.direct_negative_feedback,
+                click_through_rate: candidate.click_through_rate,
+                save_rate: candidate.save_rate,
+                action_completion_rate: candidate.action_completion_rate,
+                purchase_conversion_rate: candidate.purchase_conversion_rate,
             })
             .collect(),
     }

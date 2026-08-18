@@ -321,6 +321,20 @@ impl Growth for GrpcServer {
         ))
     }
 
+    async fn apply_weekly_review_adjustment(
+        &self,
+        request: Request<pb::ApplyWeeklyReviewAdjustmentRequest>,
+    ) -> Result<Response<pb::ApplyWeeklyReviewAdjustmentResponse>, Status> {
+        let request = request.into_inner();
+        let user_id = request.user_id.clone();
+        Ok(Response::new(
+            self.domain
+                .apply_weekly_review_adjustment(&user_id, request)
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
     async fn companion(
         &self,
         request: Request<pb::ScheduleRequest>,
@@ -421,7 +435,8 @@ fn internal_error(error: crate::domain::GrowthError) -> Status {
             | crate::datasource::RepositoryError::EntryReferenceNotFound(message)
             | crate::datasource::RepositoryError::EntryNotFound(message)
             | crate::datasource::RepositoryError::KnowledgeNotFound(message)
-            | crate::datasource::RepositoryError::KnowledgeReferenceNotFound(message),
+            | crate::datasource::RepositoryError::KnowledgeReferenceNotFound(message)
+            | crate::datasource::RepositoryError::ReviewNotFound(message),
         ) => Status::not_found(message),
         crate::domain::GrowthError::Repository(
             crate::datasource::RepositoryError::IdempotencyConflict,
@@ -434,6 +449,10 @@ fn internal_error(error: crate::domain::GrowthError) -> Status {
         crate::domain::GrowthError::Repository(
             crate::datasource::RepositoryError::EntryPublicationNotRetryable,
         ) => Status::failed_precondition("entry publication cannot be retried yet"),
+        crate::domain::GrowthError::Repository(
+            crate::datasource::RepositoryError::ReviewAdjustmentNotFound(_)
+            | crate::datasource::RepositoryError::ReviewAdjustmentStale,
+        ) => Status::failed_precondition("review adjustment is no longer applicable"),
         crate::domain::GrowthError::Repository(error) => Status::internal(error.to_string()),
     }
 }

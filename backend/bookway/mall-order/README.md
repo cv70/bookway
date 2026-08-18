@@ -9,3 +9,9 @@ confirmation; PostgreSQL enforces that a reference settles only one order.
 `ExpirePending` is consumed by `bookway-mall-order-expirer`, which turns stale
 pending orders into `expired` and retries inventory release independently of a
 customer read.
+
+When checkout references a contextual `NodeOffer`, the service revalidates the
+offer's saleable SKU and snapshots its creator and calculated commission on the
+order. Caller-provided creator IDs or commission amounts are never accepted.
+After a payment is confirmed, it emits a stable route-attributed `purchase`
+event; an event delivery outage does not change the settled order state.

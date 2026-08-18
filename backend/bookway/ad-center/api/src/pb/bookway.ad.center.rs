@@ -50,6 +50,16 @@ pub struct AdCampaign {
     pub created_at: ::prost::alloc::string::String,
     #[prost(string, tag = "21")]
     pub updated_at: ::prost::alloc::string::String,
+    #[prost(double, tag = "22")]
+    pub predicted_ctr: f64,
+    #[prost(double, tag = "23")]
+    pub predicted_cvr: f64,
+    #[prost(uint32, tag = "24")]
+    pub global_frequency_cap: u32,
+    #[prost(string, tag = "25")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "26")]
+    pub action_node_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -82,6 +92,16 @@ pub struct CreateCampaignRequest {
     pub starts_at: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "14")]
     pub ends_at: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(double, tag = "15")]
+    pub predicted_ctr: f64,
+    #[prost(double, tag = "16")]
+    pub predicted_cvr: f64,
+    #[prost(uint32, tag = "17")]
+    pub global_frequency_cap: u32,
+    #[prost(string, tag = "18")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "19")]
+    pub action_node_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -112,6 +132,12 @@ pub struct UpdateCampaignRequest {
     pub starts_at: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "13")]
     pub ends_at: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(double, optional, tag = "14")]
+    pub predicted_ctr: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "15")]
+    pub predicted_cvr: ::core::option::Option<f64>,
+    #[prost(uint32, optional, tag = "16")]
+    pub global_frequency_cap: ::core::option::Option<u32>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -130,6 +156,10 @@ pub struct EligibleRequest {
     pub domain: ::prost::alloc::string::String,
     #[prost(uint32, tag = "4")]
     pub limit: u32,
+    #[prost(string, tag = "5")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub action_node_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -162,6 +192,10 @@ pub struct RegisterDecisionRequest {
     pub placement: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "4")]
     pub campaign_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "5")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub action_node_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

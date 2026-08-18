@@ -12,6 +12,14 @@ pub struct CandidateFeatures {
     pub impression_fatigue: f64,
     #[prost(double, tag = "5")]
     pub direct_negative_feedback: f64,
+    #[prost(double, tag = "6")]
+    pub click_through_rate: f64,
+    #[prost(double, tag = "7")]
+    pub save_rate: f64,
+    #[prost(double, tag = "8")]
+    pub action_completion_rate: f64,
+    #[prost(double, tag = "9")]
+    pub purchase_conversion_rate: f64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

@@ -12,6 +12,7 @@ bookway-api.workspace = true
 bookway-data.workspace = true
 bookway-mall-api.workspace = true
 bookway-mall-inventory-api.workspace = true
+bookway-user-event-api.workspace = true
 bookway-runtime.workspace = true
 prost.workspace = true
 serde.workspace = true

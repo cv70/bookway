@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use bookway_bbs_api::pb::{self as bbs_pb, bbs_client::BbsClient};
-use bookway_commonlikestatus_api::pb::{
-    self as like_pb, common_like_status_client::CommonLikeStatusClient,
+use bookway_interaction_status_api::pb::{
+    self as like_pb, interaction_status_client::InteractionStatusClient,
 };
 use tonic::transport::Channel;
 
@@ -140,11 +140,11 @@ impl CandidateHydrator for RouteContextHydrator {
 }
 
 pub(crate) struct ReactionContextHydrator {
-    client: CommonLikeStatusClient<Channel>,
+    client: InteractionStatusClient<Channel>,
 }
 
 impl ReactionContextHydrator {
-    pub(crate) fn new(client: CommonLikeStatusClient<Channel>) -> Self {
+    pub(crate) fn new(client: InteractionStatusClient<Channel>) -> Self {
         Self { client }
     }
 }
@@ -171,7 +171,7 @@ impl CandidateHydrator for ReactionContextHydrator {
                 post_ids,
             })
             .await
-            .map_err(|error| PipelineError::LikeStatus(error.to_string()))?
+            .map_err(|error| PipelineError::InteractionStatus(error.to_string()))?
             .into_inner();
         for candidate in candidates {
             candidate.liked = context.liked_post_ids.contains(&candidate.post.id);
@@ -197,6 +197,11 @@ impl CandidateHydrator for SocialProofHydrator {
         candidates: &mut [Candidate],
     ) -> Result<(), PipelineError> {
         for candidate in candidates {
+            if candidate.post.is_milestone {
+                candidate
+                    .reasons
+                    .insert(0, "来自公开路线的阶段成果".to_string());
+            }
             if candidate.post.is_route && candidate.post.join_count > 0 {
                 candidate
                     .reasons

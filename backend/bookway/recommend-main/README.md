@@ -2,7 +2,7 @@
 
 ## 职责
 
-在线推荐引擎，负责候选编排、补全、过滤、打分、多样性重排和曝光事件，不持有内容或社交事实数据。
+在线推荐引擎，负责候选编排、补全、过滤、打分、多样性重排、场景广告混排和曝光事件，不持有内容或社交事实数据。
 
 ## 流水线
 
@@ -14,18 +14,21 @@ Query Hydration
 -> 安全与客户端已看过滤
 -> 质量/意图/多样性打分
 -> Selector（优先未曝光、受控回补）
+-> Action Node 场景广告 eCPM 混排
 -> 持久化曝光
 ```
 
 候选召回由 `recommend-recall` 提供，最终模型排序由 `recommend-rank` 提供；首页召回前会在 150ms 预算内读取 `feature-main` 的 `domain_interest.*`，将真实行为偏好的领域并入客户端兴趣，特征暂不可用时保留原始兴趣并标记降级。`surface=following` 则先从受信 BBS 图谱取得关注作者集合，并将其作为 Recall 的批量作者约束：空集合返回空时间流，绝不回退全局候选；该页面保留 BBS Link 的稳定最新顺序，不使用兴趣扩展、模型排序、服务历史回补或多样性打散。翻页 cursor 绑定规范化关注作者集合，关系变化时会从当前集合的第一页重新开始，避免将旧 offset 应用于新的社交时间窗。过滤、打分和多样性属于本服务内的编排阶段，不单独拆成网络服务。社交补全同时读取用户关系和受服务令牌保护的可见性策略，因此当前用户主动拉黑/静音的作者以及拉黑当前用户的作者都会在安全过滤前标记并剔除。
 
+只有 Feed 请求同时携带 `route_id` 和 `action_node_id` 时，服务才会向 `ad-main` 请求决策。`ad-main` 完成定向、eCPM 竞价和频控后，推荐主服务再次校验广告的路线、节点和广告位完全匹配，再以每页至多一条、最多位于第 4 位的低密度方式混入有机列表。缺失场景、上游不可用或返回不匹配广告时，一律返回纯有机 Feed，并标记 `meta.degraded=true`（仅上游故障时）。
+
 曝光会在 Feed 响应返回前同时写入 `feed_exposures` 和 `feed_exposure_items`，以及实际的 `model_version` 和 `experiment_bucket`。近期服务历史在 Selector 中优先让位给未曝光内容，但不是硬过滤：当未曝光候选不足时才受控回补旧曝光，并显式附带原因，避免小候选池出现空 Feed；客户端明确提交的 `seen`、隐藏、拉黑和静音仍是硬过滤。内部 `ValidateAttributions` gRPC 契约按批次核对可信用户、会话、`request_id`、内容和排序位置，让 User Event 只保留真实曝光产生的训练归因；持久化失败会将该 Feed 标记为降级，后续事件会安全地退化为无归因反馈。
 
 ## 依赖与环境变量
 
-- 依赖：`bbs`、`commonlikestatus`、`feature-main`、`recommend-recall`、`recommend-rank`。
+- 依赖：`bbs`、`interaction-status`、`feature-main`、`recommend-recall`、`recommend-rank`、`ad-main`。
 - `RECOMMEND_MAIN_ADDR`：默认 `127.0.0.1:8083`。
-- `BBS_GRPC_URL`、`LIKE_STATUS_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`RECOMMEND_RECALL_GRPC_URL`、`RECOMMEND_RANK_GRPC_URL`：上游 gRPC 服务地址。BBS 调用在 `SERVICE_AUTH_REQUIRED=true` 下携带 `x-service-token`。
+- `BBS_GRPC_URL`、`INTERACTION_STATUS_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`RECOMMEND_RECALL_GRPC_URL`、`RECOMMEND_RANK_GRPC_URL`、`AD_MAIN_GRPC_URL`：上游 gRPC 服务地址。BBS 与广告调用在 `SERVICE_AUTH_REQUIRED=true` 下携带 `x-service-token`。
 
 `STORAGE_MODE=postgres` 时曝光及曝光条目持久化到 PostgreSQL。远程特征、模型或曝光持久化不可用时保留流水线启发式得分，并返回 `meta.degraded=true`；但社交可见性（拉黑/静音/被拉黑）或用户隐藏状态的补全失败时，未知绝不视为允许，服务会返回空的降级 Feed 并清除翻页游标，等待下一次请求安全重试。`ValidateAttributions` 与 Feed 都是内部 gRPC，在 `SERVICE_AUTH_REQUIRED=true` 下要求服务令牌。
 

@@ -33,6 +33,10 @@ struct CandidateRankingSignals {
     author_affinity: f64,
     impression_fatigue: f64,
     direct_negative_feedback: f64,
+    click_through_rate: f64,
+    save_rate: f64,
+    action_completion_rate: f64,
+    purchase_conversion_rate: f64,
 }
 
 impl CandidateRankingSignals {
@@ -58,6 +62,22 @@ impl CandidateRankingSignals {
                 .clamp(0.0, 1.0),
             direct_negative_feedback: candidate
                 .map(|candidate| finite(candidate.direct_negative_feedback))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
+            click_through_rate: candidate
+                .map(|candidate| finite(candidate.click_through_rate))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
+            save_rate: candidate
+                .map(|candidate| finite(candidate.save_rate))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
+            action_completion_rate: candidate
+                .map(|candidate| finite(candidate.action_completion_rate))
+                .unwrap_or_default()
+                .clamp(0.0, 1.0),
+            purchase_conversion_rate: candidate
+                .map(|candidate| finite(candidate.purchase_conversion_rate))
                 .unwrap_or_default()
                 .clamp(0.0, 1.0),
         }
@@ -91,6 +111,13 @@ pub(crate) fn rank(
             + 0.22 * candidate_signals.author_affinity
             - 0.32 * candidate_signals.impression_fatigue
             - 0.80 * candidate_signals.direct_negative_feedback;
+        // WEGU and contextual commerce outcomes dominate vanity signals:
+        // a route that users actually complete is more valuable than one
+        // that only earns clicks.
+        candidate.score += 0.18 * candidate_signals.click_through_rate
+            + 0.20 * candidate_signals.save_rate
+            + 0.42 * candidate_signals.action_completion_rate
+            + 0.12 * candidate_signals.purchase_conversion_rate;
         if candidate_signals.domain_affinity >= 0.35 || candidate_signals.author_affinity >= 0.35 {
             candidate.reasons.push("符合你近期的行动偏好".to_string());
         }
@@ -175,6 +202,7 @@ mod tests {
                         author_affinity: 0.5,
                         impression_fatigue: 0.0,
                         direct_negative_feedback: 0.0,
+                        ..Default::default()
                     },
                     pb::CandidateFeatures {
                         content_id: "reported".to_string(),
@@ -182,6 +210,7 @@ mod tests {
                         author_affinity: 0.0,
                         impression_fatigue: 0.0,
                         direct_negative_feedback: 1.0,
+                        ..Default::default()
                     },
                 ],
             }),
@@ -196,5 +225,35 @@ mod tests {
                 .any(|reason| reason == "符合你近期的行动偏好")
         );
         assert!(ranked[0].score > ranked[1].score);
+    }
+
+    #[test]
+    fn completion_signal_outweighs_a_click_only_candidate() {
+        let candidate = |content_id: &str| Candidate {
+            content_id: content_id.to_string(),
+            score: 1.0,
+            ..Default::default()
+        };
+        let ranked = rank(
+            vec![candidate("click-only"), candidate("action-proven")],
+            Some(&pb::RankFeatures {
+                candidates: vec![
+                    pb::CandidateFeatures {
+                        content_id: "click-only".to_string(),
+                        click_through_rate: 1.0,
+                        ..Default::default()
+                    },
+                    pb::CandidateFeatures {
+                        content_id: "action-proven".to_string(),
+                        action_completion_rate: 1.0,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            1,
+        );
+
+        assert_eq!(ranked[0].content_id, "action-proven");
     }
 }

@@ -14,6 +14,11 @@ enum ContentType {
   CONTENT_TYPE_ARTICLE = 1;
   CONTENT_TYPE_VIDEO = 2;
   CONTENT_TYPE_ROUTE = 3;
+  // A public, structured account of progress through a public route.
+  CONTENT_TYPE_MILESTONE = 4;
+  // A question whose published root comments are answers. The question author
+  // can select one verified public answer without creating a second thread.
+  CONTENT_TYPE_QUESTION = 5;
 }
 
 enum ContentStatus {
@@ -58,6 +63,12 @@ message PostSummary {
   // This is derived from Content.content_type, not from optional display text.
   // Clients must use it to decide whether an item can be adopted as a route.
   bool is_route = 14;
+  // This is derived from Content.content_type. A milestone is evidence of a
+  // route in practice; it is never itself adoptable as a route.
+  bool is_milestone = 15;
+  // This is derived from Content.content_type. A question is never route
+  // adoptable, but its answers may be selected by its author.
+  bool is_question = 16;
 }
 
 // A route template is authored as community content but copied into a user's
@@ -74,6 +85,8 @@ message RouteTemplateAction {
   uint32 estimated_minutes = 3;
   string scheduled_label = 4;
   optional uint32 stage_index = 5;
+  // Stable key used by node-bound resources, equipment and advertisements.
+  string id = 6;
 }
 
 message RouteTemplate {
@@ -82,6 +95,46 @@ message RouteTemplate {
   repeated RouteTemplateStage stages = 3;
   repeated RouteTemplateAction actions = 4;
   RouteTemplateKind journey_type = 5;
+}
+
+// Client-provided progress claims. It intentionally contains no private
+// Journey, Action, Entry, schedule, location, or identity reference.
+message MilestoneDraft {
+  string route_id = 1;
+  optional uint32 stage_index = 2;
+  string effort_summary = 3;
+  string outcome_summary = 4;
+  string adjustment_summary = 5;
+  string evidence_scope = 6;
+}
+
+// The resolved public-route and stage snapshot recorded with a milestone.
+// BBS Link derives route_title and stage_title from the referenced public
+// route, so a client cannot forge the association displayed to readers.
+message Milestone {
+  string route_id = 1;
+  string route_title = 2;
+  uint32 stage_index = 3;
+  string stage_title = 4;
+  string effort_summary = 5;
+  string outcome_summary = 6;
+  string adjustment_summary = 7;
+  string evidence_scope = 8;
+}
+
+// Optional execution context for a question. The client may identify a public
+// route and, optionally, a stage. BBS Link resolves display fields from the
+// route at creation time and never reads a user's private Journey or actions.
+message QuestionContextDraft {
+  string route_id = 1;
+  optional uint32 stage_index = 2;
+}
+
+message QuestionContext {
+  string route_id = 1;
+  string route_title = 2;
+  optional uint32 stage_index = 3;
+  optional string stage_title = 4;
 }
 
 message Content {
@@ -98,6 +151,11 @@ message Content {
   uint32 version = 11;
   double quality_score = 12;
   optional RouteTemplate route_template = 13;
+  optional Milestone milestone = 14;
+  // The answer is a Comment-owned fact. This stores only its stable ID after
+  // Gateway verifies it is a published root comment on this question.
+  optional string accepted_answer_id = 15;
+  optional QuestionContext question_context = 16;
 }
 
 message ContentPage {
@@ -150,6 +208,8 @@ message CreateRequest {
   optional string route_duration = 12;
   repeated string media_asset_ids = 13;
   optional RouteTemplate route_template = 14;
+  optional MilestoneDraft milestone = 15;
+  optional QuestionContextDraft question_context = 16;
 }
 message UpdateRequest {
   string user_id = 1;
@@ -163,6 +223,7 @@ message UpdateRequest {
   optional string cover_url = 8;
   optional StringList media_asset_ids = 9;
   optional RouteTemplate route_template = 10;
+  optional MilestoneDraft milestone = 11;
 }
 message StringList { repeated string values = 1; }
 message PublishRequest {
@@ -174,6 +235,11 @@ message PublishRequest {
 }
 message RestrictRequest { string content_id = 1; }
 message RestoreRequest { string content_id = 1; }
+message AcceptAnswerRequest {
+  string user_id = 1;
+  string question_id = 2;
+  string answer_id = 3;
+}
 
 service BbsLink {
   rpc List(ListRequest) returns (ContentPage);
@@ -185,4 +251,5 @@ service BbsLink {
   rpc Publish(PublishRequest) returns (Content);
   rpc Restrict(RestrictRequest) returns (Content);
   rpc Restore(RestoreRequest) returns (Content);
+  rpc AcceptAnswer(AcceptAnswerRequest) returns (Content);
 }

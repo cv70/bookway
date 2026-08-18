@@ -11,10 +11,11 @@ use bookway_bbs_link_api::pb as bbs_link_pb;
 use bookway_bbs_message_api::pb as message_pb;
 use bookway_bbs_search_api::pb as search_pb;
 use bookway_comment_api::pb as comment_pb;
-use bookway_commonlikestatus_api::pb as like_pb;
 use bookway_content_audit_api::pb as audit_pb;
 use bookway_feedback_api::pb as feedback_pb;
 use bookway_growth_api::pb as growth_pb;
+use bookway_interaction_status_api::pb as like_pb;
+use bookway_knowledge_catalog_api::pb as catalog_pb;
 use bookway_media_api::pb as media_pb;
 use bookway_recommend_main_api::pb as recommend_pb;
 use bookway_user_event_api::pb as user_event_pb;
@@ -94,6 +95,8 @@ pub(crate) enum ContentType {
     Article,
     Video,
     Route,
+    Milestone,
+    Question,
 }
 
 impl ContentType {
@@ -103,6 +106,8 @@ impl ContentType {
             Some(bbs_link_pb::ContentType::Article) => Ok(Self::Article),
             Some(bbs_link_pb::ContentType::Video) => Ok(Self::Video),
             Some(bbs_link_pb::ContentType::Route) => Ok(Self::Route),
+            Some(bbs_link_pb::ContentType::Milestone) => Ok(Self::Milestone),
+            Some(bbs_link_pb::ContentType::Question) => Ok(Self::Question),
             None => Err(format!("bbs-link returned unknown content type {value}")),
         }
     }
@@ -113,6 +118,8 @@ impl ContentType {
             Self::Article => bbs_link_pb::ContentType::Article as i32,
             Self::Video => bbs_link_pb::ContentType::Video as i32,
             Self::Route => bbs_link_pb::ContentType::Route as i32,
+            Self::Milestone => bbs_link_pb::ContentType::Milestone as i32,
+            Self::Question => bbs_link_pb::ContentType::Question as i32,
         }
     }
 }
@@ -214,6 +221,7 @@ impl From<bbs_link_pb::RouteTemplateStage> for RouteTemplateStage {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct RouteTemplateAction {
+    pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) detail: String,
     pub(crate) estimated_minutes: u32,
@@ -224,6 +232,7 @@ pub(crate) struct RouteTemplateAction {
 impl From<RouteTemplateAction> for bbs_link_pb::RouteTemplateAction {
     fn from(value: RouteTemplateAction) -> Self {
         Self {
+            id: value.id,
             title: value.title,
             detail: value.detail,
             estimated_minutes: value.estimated_minutes,
@@ -236,6 +245,7 @@ impl From<RouteTemplateAction> for bbs_link_pb::RouteTemplateAction {
 impl From<bbs_link_pb::RouteTemplateAction> for RouteTemplateAction {
     fn from(value: bbs_link_pb::RouteTemplateAction) -> Self {
         Self {
+            id: value.id,
             title: value.title,
             detail: value.detail,
             estimated_minutes: value.estimated_minutes,
@@ -280,6 +290,90 @@ impl TryFrom<bbs_link_pb::RouteTemplate> for RouteTemplate {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct MilestoneDraft {
+    pub(crate) route_id: String,
+    pub(crate) stage_index: Option<u32>,
+    pub(crate) effort_summary: String,
+    pub(crate) outcome_summary: String,
+    pub(crate) adjustment_summary: String,
+    pub(crate) evidence_scope: String,
+}
+
+impl From<MilestoneDraft> for bbs_link_pb::MilestoneDraft {
+    fn from(value: MilestoneDraft) -> Self {
+        Self {
+            route_id: value.route_id,
+            stage_index: value.stage_index,
+            effort_summary: value.effort_summary,
+            outcome_summary: value.outcome_summary,
+            adjustment_summary: value.adjustment_summary,
+            evidence_scope: value.evidence_scope,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct Milestone {
+    route_id: String,
+    route_title: String,
+    stage_index: u32,
+    stage_title: String,
+    effort_summary: String,
+    outcome_summary: String,
+    adjustment_summary: String,
+    evidence_scope: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct QuestionContextDraft {
+    pub(crate) route_id: String,
+    pub(crate) stage_index: Option<u32>,
+}
+
+impl From<QuestionContextDraft> for bbs_link_pb::QuestionContextDraft {
+    fn from(value: QuestionContextDraft) -> Self {
+        Self {
+            route_id: value.route_id,
+            stage_index: value.stage_index,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct QuestionContext {
+    route_id: String,
+    route_title: String,
+    stage_index: Option<u32>,
+    stage_title: Option<String>,
+}
+
+impl From<bbs_link_pb::QuestionContext> for QuestionContext {
+    fn from(value: bbs_link_pb::QuestionContext) -> Self {
+        Self {
+            route_id: value.route_id,
+            route_title: value.route_title,
+            stage_index: value.stage_index,
+            stage_title: value.stage_title,
+        }
+    }
+}
+
+impl From<bbs_link_pb::Milestone> for Milestone {
+    fn from(value: bbs_link_pb::Milestone) -> Self {
+        Self {
+            route_id: value.route_id,
+            route_title: value.route_title,
+            stage_index: value.stage_index,
+            stage_title: value.stage_title,
+            effort_summary: value.effort_summary,
+            outcome_summary: value.outcome_summary,
+            adjustment_summary: value.adjustment_summary,
+            evidence_scope: value.evidence_scope,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct CreateContentRequest {
     pub(crate) title: String,
@@ -297,6 +391,8 @@ pub(crate) struct CreateContentRequest {
     #[serde(default)]
     pub(crate) media_asset_ids: Vec<String>,
     pub(crate) route_template: Option<RouteTemplate>,
+    pub(crate) milestone: Option<MilestoneDraft>,
+    pub(crate) question_context: Option<QuestionContextDraft>,
 }
 
 impl CreateContentRequest {
@@ -320,6 +416,8 @@ impl CreateContentRequest {
             route_duration: self.route_duration,
             media_asset_ids: self.media_asset_ids,
             route_template: self.route_template.map(Into::into),
+            milestone: self.milestone.map(Into::into),
+            question_context: self.question_context.map(Into::into),
         }
     }
 }
@@ -334,6 +432,7 @@ pub(crate) struct UpdateContentRequest {
     pub(crate) cover_url: Option<String>,
     pub(crate) media_asset_ids: Option<Vec<String>>,
     pub(crate) route_template: Option<RouteTemplate>,
+    pub(crate) milestone: Option<MilestoneDraft>,
 }
 
 impl UpdateContentRequest {
@@ -351,6 +450,7 @@ impl UpdateContentRequest {
                 .media_asset_ids
                 .map(|values| bbs_link_pb::StringList { values }),
             route_template: self.route_template.map(Into::into),
+            milestone: self.milestone.map(Into::into),
         }
     }
 }
@@ -394,6 +494,8 @@ pub(crate) struct PostSummary {
     freshness: f64,
     tags: Vec<String>,
     is_route: bool,
+    is_milestone: bool,
+    is_question: bool,
 }
 
 impl PostSummary {
@@ -413,6 +515,8 @@ impl PostSummary {
             freshness: value.freshness,
             tags: value.tags,
             is_route: value.is_route,
+            is_milestone: value.is_milestone,
+            is_question: value.is_question,
         })
     }
 
@@ -432,6 +536,8 @@ impl PostSummary {
             freshness: value.freshness,
             tags: value.tags,
             is_route: value.is_route,
+            is_milestone: value.is_milestone,
+            is_question: value.is_question,
         })
     }
 }
@@ -451,6 +557,9 @@ pub(crate) struct Content {
     version: u32,
     quality_score: f64,
     route_template: Option<RouteTemplate>,
+    milestone: Option<Milestone>,
+    accepted_answer_id: Option<String>,
+    question_context: Option<QuestionContext>,
 }
 
 impl TryFrom<bbs_link_pb::Content> for Content {
@@ -471,6 +580,9 @@ impl TryFrom<bbs_link_pb::Content> for Content {
             version: value.version,
             quality_score: value.quality_score,
             route_template: value.route_template.map(TryInto::try_into).transpose()?,
+            milestone: value.milestone.map(Into::into),
+            accepted_answer_id: value.accepted_answer_id,
+            question_context: value.question_context.map(Into::into),
         })
     }
 }
@@ -506,10 +618,31 @@ pub(crate) struct FeedQuery {
     pub(crate) session_id: Option<String>,
     pub(crate) surface: Option<String>,
     pub(crate) cursor: Option<String>,
+    pub(crate) route_id: Option<String>,
+    pub(crate) action_node_id: Option<String>,
+    pub(crate) placement: Option<String>,
+    pub(crate) action_domain: Option<String>,
 }
 
 impl FeedQuery {
     pub(crate) fn into_pb(self, user_id: String) -> Result<recommend_pb::FeedRequest, String> {
+        let surface = self.surface.unwrap_or_else(|| "home".to_string());
+        let action_context = match (self.route_id, self.action_node_id) {
+            (Some(route_id), Some(action_node_id))
+                if !route_id.trim().is_empty() && !action_node_id.trim().is_empty() =>
+            {
+                Some(recommend_pb::FeedActionContext {
+                    route_id,
+                    action_node_id,
+                    placement: self.placement.unwrap_or_else(|| surface.clone()),
+                    domain: self.action_domain,
+                })
+            }
+            (None, None) => None,
+            _ => {
+                return Err("route_id and action_node_id must be provided together".to_string());
+            }
+        };
         Ok(recommend_pb::FeedRequest {
             user_id,
             interests: parse_domains(self.interests)?
@@ -519,8 +652,9 @@ impl FeedQuery {
             seen: parse_csv(self.seen),
             limit: self.limit,
             session_id: self.session_id.unwrap_or_default(),
-            surface: self.surface.unwrap_or_else(|| "home".to_string()),
+            surface,
             cursor: self.cursor,
+            action_context,
         })
     }
 }
@@ -529,9 +663,25 @@ impl FeedQuery {
 pub(crate) struct FeedItem {
     author_id: String,
     post: Option<PostSummary>,
+    ad: Option<FeedAd>,
     score: f64,
     source: String,
     reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct FeedAd {
+    request_id: String,
+    campaign_id: String,
+    placement: String,
+    title: String,
+    body: String,
+    image_url: String,
+    landing_url: String,
+    ecpm: f64,
+    model_version: String,
+    route_id: String,
+    action_node_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -563,9 +713,29 @@ impl TryFrom<recommend_pb::FeedResponse> for FeedResponse {
                 .items
                 .into_iter()
                 .map(|item| {
+                    let post = item.post.map(PostSummary::from_link).transpose()?;
+                    let ad = item.ad.map(|ad| FeedAd {
+                        request_id: ad.request_id,
+                        campaign_id: ad.campaign_id,
+                        placement: ad.placement,
+                        title: ad.title,
+                        body: ad.body,
+                        image_url: ad.image_url,
+                        landing_url: ad.landing_url,
+                        ecpm: ad.ecpm,
+                        model_version: ad.model_version,
+                        route_id: ad.route_id,
+                        action_node_id: ad.action_node_id,
+                    });
+                    if post.is_some() == ad.is_some() {
+                        return Err(
+                            "feed item must contain exactly one post or contextual ad".to_string()
+                        );
+                    }
                     Ok(FeedItem {
                         author_id: item.author_id,
-                        post: item.post.map(PostSummary::from_link).transpose()?,
+                        post,
+                        ad,
                         score: item.score,
                         source: item.source,
                         reasons: item.reasons,
@@ -594,6 +764,7 @@ pub(crate) enum SearchType {
     Journeys,
     Users,
     Topics,
+    Resources,
 }
 
 impl SearchType {
@@ -604,6 +775,7 @@ impl SearchType {
             Self::Journeys => search_pb::SearchType::Journeys as i32,
             Self::Users => search_pb::SearchType::Users as i32,
             Self::Topics => search_pb::SearchType::Topics as i32,
+            Self::Resources => search_pb::SearchType::Resources as i32,
         }
     }
 }
@@ -638,6 +810,7 @@ enum SearchResultType {
     Journey,
     User,
     Topic,
+    Resource,
 }
 
 impl SearchResultType {
@@ -647,6 +820,7 @@ impl SearchResultType {
             Some(search_pb::SearchResultType::Journey) => Ok(Self::Journey),
             Some(search_pb::SearchResultType::User) => Ok(Self::User),
             Some(search_pb::SearchResultType::Topic) => Ok(Self::Topic),
+            Some(search_pb::SearchResultType::Resource) => Ok(Self::Resource),
             None => Err(format!("bbs-search returned unknown result type {value}")),
         }
     }
@@ -665,6 +839,21 @@ pub(crate) struct SearchResult {
     score: f64,
     highlights: Vec<String>,
     post: Option<PostSummary>,
+    resource: Option<SearchResourceSummary>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct SearchResourceSummary {
+    id: String,
+    kind: String,
+    provider: String,
+    url: String,
+    license: String,
+    version: String,
+    citation: String,
+    topics: Vec<String>,
+    published_at: String,
+    updated_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -677,6 +866,266 @@ pub(crate) struct SearchResponse {
     took_ms: u64,
     degraded: bool,
     request_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub(crate) struct ResourceSearchQuery {
+    pub(crate) query: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) topic: Option<String>,
+    pub(crate) cursor: Option<String>,
+    pub(crate) limit: Option<u32>,
+}
+
+impl ResourceSearchQuery {
+    pub(crate) fn into_pb(self) -> Result<catalog_pb::SearchRequest, String> {
+        let kind = self
+            .kind
+            .map(|value| match value.trim() {
+                "book" => Ok(catalog_pb::ResourceKind::Book as i32),
+                "course" => Ok(catalog_pb::ResourceKind::Course as i32),
+                "tool" => Ok(catalog_pb::ResourceKind::Tool as i32),
+                "article" => Ok(catalog_pb::ResourceKind::Article as i32),
+                "podcast" => Ok(catalog_pb::ResourceKind::Podcast as i32),
+                _ => Err("kind must be book, course, tool, article or podcast".to_string()),
+            })
+            .transpose()?;
+        Ok(catalog_pb::SearchRequest {
+            query: self.query.unwrap_or_default(),
+            kind,
+            topic: self.topic.unwrap_or_default(),
+            cursor: self.cursor.unwrap_or_default(),
+            limit: self.limit,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct PublicResource {
+    id: String,
+    title: String,
+    kind: String,
+    provider: String,
+    summary: String,
+    url: String,
+    license: String,
+    version: String,
+    citation: String,
+    topics: Vec<String>,
+    published_at: String,
+    updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct PublicResourcePage {
+    items: Vec<PublicResource>,
+    next_cursor: Option<String>,
+}
+
+impl TryFrom<catalog_pb::Resource> for PublicResource {
+    type Error = String;
+
+    fn try_from(value: catalog_pb::Resource) -> Result<Self, Self::Error> {
+        let kind = match catalog_pb::ResourceKind::try_from(value.kind).ok() {
+            Some(catalog_pb::ResourceKind::Book) => "book",
+            Some(catalog_pb::ResourceKind::Course) => "course",
+            Some(catalog_pb::ResourceKind::Tool) => "tool",
+            Some(catalog_pb::ResourceKind::Article) => "article",
+            Some(catalog_pb::ResourceKind::Podcast) => "podcast",
+            _ => {
+                return Err(format!(
+                    "catalog returned unknown resource kind {}",
+                    value.kind
+                ));
+            }
+        };
+        if value.url.trim().is_empty()
+            || value.license.trim().is_empty()
+            || value.citation.trim().is_empty()
+        {
+            return Err("catalog returned incomplete public resource metadata".to_string());
+        }
+        Ok(Self {
+            id: value.id,
+            title: value.title,
+            kind: kind.to_string(),
+            provider: value.provider,
+            summary: value.summary,
+            url: value.url,
+            license: value.license,
+            version: value.version,
+            citation: value.citation,
+            topics: value.topics,
+            published_at: value.published_at,
+            updated_at: value.updated_at,
+        })
+    }
+}
+
+impl TryFrom<catalog_pb::SearchResponse> for PublicResourcePage {
+    type Error = String;
+
+    fn try_from(value: catalog_pb::SearchResponse) -> Result<Self, Self::Error> {
+        Ok(Self {
+            items: value
+                .items
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            next_cursor: value.next_cursor,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub(crate) struct RouteNodeResourceQuery {
+    pub(crate) include_archived: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct AttachRouteNodeResourceRequest {
+    pub(crate) resource_id: String,
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) title_override: String,
+    #[serde(default)]
+    pub(crate) note: String,
+    #[serde(default)]
+    pub(crate) sort_rank: i32,
+    #[serde(default)]
+    pub(crate) rag_enabled: bool,
+    #[serde(default)]
+    pub(crate) retrieval_scope: String,
+}
+
+impl AttachRouteNodeResourceRequest {
+    pub(crate) fn into_pb(
+        self,
+        route_id: String,
+        action_node_id: String,
+        created_by: String,
+        idempotency_key: Option<String>,
+    ) -> Result<catalog_pb::AttachNodeResourceRequest, String> {
+        let kind = match self.kind.trim() {
+            "document" => catalog_pb::AttachmentKind::Document,
+            "pdf" => catalog_pb::AttachmentKind::Pdf,
+            "external_link" => catalog_pb::AttachmentKind::ExternalLink,
+            "tool_checklist" => catalog_pb::AttachmentKind::ToolChecklist,
+            "ai_action_guide" => catalog_pb::AttachmentKind::AiActionGuide,
+            "rag_corpus" => catalog_pb::AttachmentKind::RagCorpus,
+            _ => {
+                return Err(
+                    "kind must be document, pdf, external_link, tool_checklist, ai_action_guide or rag_corpus"
+                        .to_string(),
+                );
+            }
+        };
+        let idempotency_key = idempotency_key
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "Idempotency-Key header is required".to_string())?;
+        Ok(catalog_pb::AttachNodeResourceRequest {
+            route_id,
+            action_node_id,
+            resource_id: self.resource_id,
+            kind: kind as i32,
+            title_override: self.title_override,
+            note: self.note,
+            sort_rank: self.sort_rank,
+            rag_enabled: self.rag_enabled,
+            retrieval_scope: self.retrieval_scope,
+            idempotency_key,
+            created_by,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct RouteNodeResourceAttachment {
+    id: String,
+    route_id: String,
+    action_node_id: String,
+    resource_id: String,
+    kind: String,
+    title_override: String,
+    note: String,
+    sort_rank: i32,
+    rag_enabled: bool,
+    embedding_collection: String,
+    retrieval_scope: String,
+    created_by: String,
+    created_at: String,
+    updated_at: String,
+    resource: Option<PublicResource>,
+}
+
+impl TryFrom<catalog_pb::RouteNodeResourceAttachment> for RouteNodeResourceAttachment {
+    type Error = String;
+
+    fn try_from(value: catalog_pb::RouteNodeResourceAttachment) -> Result<Self, Self::Error> {
+        let kind = match catalog_pb::AttachmentKind::try_from(value.kind).ok() {
+            Some(catalog_pb::AttachmentKind::Document) => "document",
+            Some(catalog_pb::AttachmentKind::Pdf) => "pdf",
+            Some(catalog_pb::AttachmentKind::ExternalLink) => "external_link",
+            Some(catalog_pb::AttachmentKind::ToolChecklist) => "tool_checklist",
+            Some(catalog_pb::AttachmentKind::AiActionGuide) => "ai_action_guide",
+            Some(catalog_pb::AttachmentKind::RagCorpus) => "rag_corpus",
+            _ => {
+                return Err(format!(
+                    "catalog returned unknown attachment kind {}",
+                    value.kind
+                ));
+            }
+        };
+        Ok(Self {
+            id: value.id,
+            route_id: value.route_id,
+            action_node_id: value.action_node_id,
+            resource_id: value.resource_id,
+            kind: kind.to_string(),
+            title_override: value.title_override,
+            note: value.note,
+            sort_rank: value.sort_rank,
+            rag_enabled: value.rag_enabled,
+            embedding_collection: value.embedding_collection,
+            retrieval_scope: value.retrieval_scope,
+            created_by: value.created_by,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            resource: value.resource.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct RouteNodeResourcePage {
+    items: Vec<RouteNodeResourceAttachment>,
+}
+
+impl TryFrom<catalog_pb::ListNodeResourcesResponse> for RouteNodeResourcePage {
+    type Error = String;
+
+    fn try_from(value: catalog_pb::ListNodeResourcesResponse) -> Result<Self, Self::Error> {
+        Ok(Self {
+            items: value
+                .items
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct DetachRouteNodeResourceResponse {
+    detached: bool,
+}
+
+impl From<catalog_pb::DetachNodeResourceResponse> for DetachRouteNodeResourceResponse {
+    fn from(value: catalog_pb::DetachNodeResourceResponse) -> Self {
+        Self {
+            detached: value.detached,
+        }
+    }
 }
 
 impl TryFrom<search_pb::SearchResponse> for SearchResponse {
@@ -701,6 +1150,7 @@ impl TryFrom<search_pb::SearchResponse> for SearchResponse {
                         score: item.score,
                         highlights: item.highlights,
                         post: item.post.map(PostSummary::from_search).transpose()?,
+                        resource: item.resource.map(Into::into),
                     })
                 })
                 .collect::<Result<_, String>>()?,
@@ -711,6 +1161,23 @@ impl TryFrom<search_pb::SearchResponse> for SearchResponse {
             degraded: value.degraded,
             request_id: value.request_id,
         })
+    }
+}
+
+impl From<search_pb::ResourceSummary> for SearchResourceSummary {
+    fn from(value: search_pb::ResourceSummary) -> Self {
+        Self {
+            id: value.id,
+            kind: value.kind,
+            provider: value.provider,
+            url: value.url,
+            license: value.license,
+            version: value.version,
+            citation: value.citation,
+            topics: value.topics,
+            published_at: value.published_at,
+            updated_at: value.updated_at,
+        }
     }
 }
 
@@ -733,6 +1200,7 @@ pub(crate) struct Suggestion {
     text: String,
     result_type: SearchResultType,
     score: f64,
+    personal: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -755,6 +1223,7 @@ impl TryFrom<search_pb::SuggestionsResponse> for SuggestionsResponse {
                         text: item.text,
                         result_type: SearchResultType::from_pb(item.result_type)?,
                         score: item.score,
+                        personal: item.personal,
                     })
                 })
                 .collect::<Result<_, String>>()?,
@@ -1679,6 +2148,7 @@ pub(crate) struct WeeklyReview {
     next_focus: String,
     created_at: String,
     updated_at: String,
+    applied_adjustments: Vec<ReviewAdjustmentDecision>,
 }
 
 impl TryFrom<growth_pb::ReviewRecord> for WeeklyReview {
@@ -1695,6 +2165,57 @@ impl TryFrom<growth_pb::ReviewRecord> for WeeklyReview {
             next_focus: value.next_focus,
             created_at: value.created_at,
             updated_at: value.updated_at,
+            applied_adjustments: value
+                .applied_adjustments
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+struct ReviewAdjustmentDecision {
+    suggestion_index: u32,
+    applied_at: String,
+    action: Option<Action>,
+    journey: Option<Journey>,
+}
+
+impl TryFrom<growth_pb::ReviewAdjustmentDecision> for ReviewAdjustmentDecision {
+    type Error = String;
+
+    fn try_from(value: growth_pb::ReviewAdjustmentDecision) -> Result<Self, Self::Error> {
+        Ok(Self {
+            suggestion_index: value.suggestion_index,
+            applied_at: value.applied_at,
+            action: value.action.map(TryInto::try_into).transpose()?,
+            journey: value.journey.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct ReviewAdjustmentApplication {
+    review: WeeklyReview,
+    decision: ReviewAdjustmentDecision,
+}
+
+impl TryFrom<growth_pb::ApplyWeeklyReviewAdjustmentResponse> for ReviewAdjustmentApplication {
+    type Error = String;
+
+    fn try_from(
+        value: growth_pb::ApplyWeeklyReviewAdjustmentResponse,
+    ) -> Result<Self, Self::Error> {
+        Ok(Self {
+            review: value
+                .review
+                .ok_or_else(|| "growth adjustment response is missing its review".to_string())?
+                .try_into()?,
+            decision: value
+                .decision
+                .ok_or_else(|| "growth adjustment response is missing its decision".to_string())?
+                .try_into()?,
         })
     }
 }
@@ -2175,7 +2696,7 @@ impl ReactionType {
             Some(like_pb::ReactionType::Bookmark) => Ok(Self::Bookmark),
             Some(like_pb::ReactionType::Hide) => Ok(Self::Hide),
             None => Err(format!(
-                "commonlikestatus returned unknown reaction type {value}"
+                "interaction-status returned unknown reaction type {value}"
             )),
         }
     }
@@ -3331,7 +3852,7 @@ impl NegativeFeedbackReason {
 #[derive(Clone, Debug, Deserialize)]
 struct ClientEvent {
     event_id: String,
-    event_type: String,
+    event_type: ClientEventType,
     session_id: String,
     request_id: Option<String>,
     component_id: String,
@@ -3347,7 +3868,7 @@ impl From<ClientEvent> for user_event_pb::Event {
     fn from(value: ClientEvent) -> Self {
         Self {
             event_id: value.event_id,
-            event_type: value.event_type,
+            event_type: value.event_type.as_str().to_string(),
             session_id: value.session_id,
             request_id: value.request_id,
             component_id: value.component_id,
@@ -3362,6 +3883,47 @@ impl From<ClientEvent> for user_event_pb::Event {
             negative_feedback_reason: value
                 .negative_feedback_reason
                 .map(|reason| reason.into_pb() as i32),
+        }
+    }
+}
+
+// Payments are authoritative server-side facts.  Keeping them out of this
+// public request schema prevents a client from training recommendations with
+// a fabricated purchase conversion.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClientEventType {
+    Impression,
+    Click,
+    View,
+    Like,
+    Bookmark,
+    SaveKnowledge,
+    Share,
+    Hide,
+    Complete,
+    JoinRoute,
+    Follow,
+    Report,
+    SearchSubmit,
+}
+
+impl ClientEventType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Impression => "impression",
+            Self::Click => "click",
+            Self::View => "view",
+            Self::Like => "like",
+            Self::Bookmark => "bookmark",
+            Self::SaveKnowledge => "save_knowledge",
+            Self::Share => "share",
+            Self::Hide => "hide",
+            Self::Complete => "complete",
+            Self::JoinRoute => "join_route",
+            Self::Follow => "follow",
+            Self::Report => "report",
+            Self::SearchSubmit => "search_submit",
         }
     }
 }
@@ -4147,24 +4709,27 @@ impl CreateMediaUploadRequest {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, CommentReportReceipt, Content, ContentAppeal, ContentType, CreateActionRequest,
-        CreateCommentAppealRequest, CreateCommentReportRequest, CreateCommentRequest,
-        CreateContentRequest, CreateDirectMessageReportRequest, CreateEntryRequest,
-        CreateJourneyRequest, CreateMediaUploadRequest, DirectMessageReportReceipt, FeedQuery,
-        FeedbackItem, FollowRequest, GrowthDomain, IngestEventsRequest, KnowledgeResource,
-        ModerationCommentQuery, NotificationPage, OwnCommentAppealQuery, Reaction,
+        Action, AttachRouteNodeResourceRequest, CommentReportReceipt, Content, ContentAppeal,
+        ContentType, CreateActionRequest, CreateCommentAppealRequest, CreateCommentReportRequest,
+        CreateCommentRequest, CreateContentRequest, CreateDirectMessageReportRequest,
+        CreateEntryRequest, CreateJourneyRequest, CreateMediaUploadRequest,
+        DirectMessageReportReceipt, FeedQuery, FeedbackItem, FollowRequest, GrowthDomain,
+        IngestEventsRequest, KnowledgeResource, ModerationCommentQuery, NotificationPage,
+        OwnCommentAppealQuery, PublicResource, Reaction, ResourceSearchQuery,
         ReviewCommentReportRequest, ReviewCommentRequest, ReviewDirectMessageReportRequest,
-        RouteParticipationRequest, RouteTemplate, RouteTemplateKind, SaveWeeklyReviewRequest,
-        SearchQuery, SetReactionRequest, SetRelationshipRequest, StartKnowledgeJourneyRequest,
-        UpdateAccountProfileRequest, UpdateReminderPreferencesRequest,
+        RouteNodeResourceAttachment, RouteParticipationRequest, RouteTemplate, RouteTemplateKind,
+        SaveWeeklyReviewRequest, SearchQuery, SetReactionRequest, SetRelationshipRequest,
+        StartKnowledgeJourneyRequest, UpdateAccountProfileRequest,
+        UpdateReminderPreferencesRequest,
     };
     use bookway_bbs_link_api::pb as bbs_link_pb;
     use bookway_bbs_message_api::pb as message_pb;
     use bookway_comment_api::pb as comment_pb;
-    use bookway_commonlikestatus_api::pb as like_pb;
     use bookway_content_audit_api::pb as audit_pb;
     use bookway_feedback_api::pb as feedback_pb;
     use bookway_growth_api::pb as growth_pb;
+    use bookway_interaction_status_api::pb as like_pb;
+    use bookway_knowledge_catalog_api::pb as catalog_pb;
 
     #[test]
     fn content_creation_accepts_mobile_string_enums() {
@@ -4196,6 +4761,94 @@ mod tests {
     }
 
     #[test]
+    fn milestone_requests_and_responses_keep_route_snapshots_server_owned() {
+        let request: CreateContentRequest = serde_json::from_value(serde_json::json!({
+            "title": "第一周的阅读成果",
+            "summary": "找到适合自己的整理节奏",
+            "body": "每天二十分钟，周末统一整理。",
+            "domain": "learning",
+            "content_type": "milestone",
+            "milestone": {
+                "route_id": "public-route-1",
+                "stage_index": 0,
+                "effort_summary": "连续七天阅读并完成两次整理",
+                "outcome_summary": "能够复述一个完整主题",
+                "adjustment_summary": "把零散整理改到周末",
+                "evidence_scope": "本帖图文覆盖本周公开产出"
+            }
+        }))
+        .expect("mobile milestone JSON should deserialize");
+
+        let request = request.into_pb("user-1".to_string(), None);
+        assert_eq!(
+            request.content_type,
+            bbs_link_pb::ContentType::Milestone as i32
+        );
+        let draft = request.milestone.expect("milestone draft");
+        assert_eq!(draft.route_id, "public-route-1");
+        assert_eq!(draft.stage_index, Some(0));
+
+        let content = Content::try_from(bbs_link_pb::Content {
+            post: Some(bbs_link_pb::PostSummary {
+                id: "milestone-1".to_string(),
+                title: "第一周的阅读成果".to_string(),
+                domain: bbs_link_pb::GrowthDomain::Learning as i32,
+                is_milestone: true,
+                ..Default::default()
+            }),
+            content_type: bbs_link_pb::ContentType::Milestone as i32,
+            milestone: Some(bbs_link_pb::Milestone {
+                route_id: "public-route-1".to_string(),
+                route_title: "四周主题阅读".to_string(),
+                stage_index: 0,
+                stage_title: "起步".to_string(),
+                effort_summary: "连续七天阅读并完成两次整理".to_string(),
+                outcome_summary: "能够复述一个完整主题".to_string(),
+                adjustment_summary: "把零散整理改到周末".to_string(),
+                evidence_scope: "本帖图文覆盖本周公开产出".to_string(),
+            }),
+            ..Default::default()
+        })
+        .expect("valid milestone response");
+        let json = serde_json::to_value(content).expect("milestone JSON");
+        assert_eq!(json["content_type"], "milestone");
+        assert_eq!(json["post"]["is_milestone"], true);
+        assert_eq!(json["milestone"]["route_title"], "四周主题阅读");
+    }
+
+    #[test]
+    fn question_context_requests_and_responses_keep_public_route_snapshots_server_owned() {
+        let request: CreateContentRequest = serde_json::from_value(serde_json::json!({
+            "title": "第一阶段总是拖延，怎么调整？",
+            "summary": "想先把开始变得更轻。",
+            "body": "我只想讨论公开路线的第一阶段。",
+            "domain": "learning",
+            "content_type": "question",
+            "question_context": { "route_id": "public-route-1", "stage_index": 0 }
+        }))
+        .expect("mobile question JSON should deserialize");
+        let request = request.into_pb("user-1".to_string(), None);
+        let draft = request.question_context.expect("question context draft");
+        assert_eq!(draft.route_id, "public-route-1");
+        assert_eq!(draft.stage_index, Some(0));
+
+        let content = Content::try_from(bbs_link_pb::Content {
+            content_type: bbs_link_pb::ContentType::Question as i32,
+            question_context: Some(bbs_link_pb::QuestionContext {
+                route_id: "public-route-1".to_string(),
+                route_title: "四周主题阅读".to_string(),
+                stage_index: Some(0),
+                stage_title: Some("起步".to_string()),
+            }),
+            ..Default::default()
+        })
+        .expect("valid question response");
+        let json = serde_json::to_value(content).expect("question JSON");
+        assert_eq!(json["question_context"]["route_title"], "四周主题阅读");
+        assert_eq!(json["question_context"]["stage_title"], "起步");
+    }
+
+    #[test]
     fn content_response_serializes_named_enums() {
         let content = Content::try_from(bbs_link_pb::Content {
             id: "post-1".to_string(),
@@ -4214,6 +4867,8 @@ mod tests {
                 freshness: 0.8,
                 tags: vec!["专注".to_string()],
                 is_route: true,
+                is_milestone: false,
+                is_question: false,
             }),
             author_id: "user-1".to_string(),
             content_type: bbs_link_pb::ContentType::Route as i32,
@@ -4232,6 +4887,9 @@ mod tests {
                 actions: Vec::new(),
                 journey_type: bbs_link_pb::RouteTemplateKind::Project as i32,
             }),
+            milestone: None,
+            accepted_answer_id: None,
+            question_context: None,
         })
         .expect("valid protobuf content");
 
@@ -4259,6 +4917,30 @@ mod tests {
                 bbs_link_pb::GrowthDomain::Travel as i32,
             ]
         );
+
+        let contextual_feed: FeedQuery = serde_json::from_value(serde_json::json!({
+            "route_id": "route-1",
+            "action_node_id": "node-1",
+            "placement": "route_feed",
+            "action_domain": "movement"
+        }))
+        .expect("contextual feed query JSON");
+        let contextual_feed = contextual_feed
+            .into_pb("user-1".to_string())
+            .expect("contextual feed request");
+        assert_eq!(
+            contextual_feed
+                .action_context
+                .as_ref()
+                .map(|context| context.action_node_id.as_str()),
+            Some("node-1")
+        );
+
+        let incomplete_context: FeedQuery = serde_json::from_value(serde_json::json!({
+            "route_id": "route-1"
+        }))
+        .expect("incomplete feed query JSON");
+        assert!(incomplete_context.into_pb("user-1".to_string()).is_err());
 
         let search: SearchQuery = serde_json::from_value(serde_json::json!({
             "q": "晨跑",
@@ -4677,6 +5359,19 @@ mod tests {
             events.events[0].negative_feedback_reason,
             Some(bookway_user_event_api::pb::NegativeFeedbackReason::AlreadySeen as i32)
         );
+
+        let fabricated_purchase =
+            serde_json::from_value::<IngestEventsRequest>(serde_json::json!({
+                "events": [{
+                    "event_id": "event-purchase",
+                    "event_type": "purchase",
+                    "session_id": "session-1",
+                    "component_id": "checkout",
+                    "occurred_at": "2026-08-16T00:00:00Z",
+                    "source": "mobile"
+                }]
+            }));
+        assert!(fabricated_purchase.is_err());
     }
 
     #[test]
@@ -4883,5 +5578,163 @@ mod tests {
         }))
         .expect("own appeal query JSON");
         assert!(own_query.into_pb().author_id.is_none());
+    }
+
+    #[test]
+    fn public_resource_query_accepts_bounded_named_filters() {
+        let query: ResourceSearchQuery = serde_json::from_value(serde_json::json!({
+            "query": "开放课程",
+            "kind": "course",
+            "topic": "学习",
+            "limit": 12
+        }))
+        .expect("resource query JSON");
+        let request = query.into_pb().expect("resource query should map");
+        assert_eq!(request.query, "开放课程");
+        assert_eq!(request.kind, Some(catalog_pb::ResourceKind::Course as i32));
+        assert_eq!(request.topic, "学习");
+        assert_eq!(request.limit, Some(12));
+    }
+
+    #[test]
+    fn route_node_resource_attach_uses_gateway_identity_and_idempotency_header() {
+        let request: AttachRouteNodeResourceRequest = serde_json::from_value(serde_json::json!({
+            "resource_id": "resource-mdn-web",
+            "kind": "ai_action_guide",
+            "note": "先完成官方示例，再记录复盘",
+            "rag_enabled": true,
+            "retrieval_scope": "当前行动节点"
+        }))
+        .expect("attachment JSON should deserialize");
+        let request = request
+            .into_pb(
+                "route-1".to_string(),
+                "node-1".to_string(),
+                "creator-1".to_string(),
+                Some("attach-key-1".to_string()),
+            )
+            .expect("attachment request should map");
+
+        assert_eq!(request.route_id, "route-1");
+        assert_eq!(request.action_node_id, "node-1");
+        assert_eq!(request.created_by, "creator-1");
+        assert_eq!(request.idempotency_key, "attach-key-1");
+        assert_eq!(
+            request.kind,
+            catalog_pb::AttachmentKind::AiActionGuide as i32
+        );
+        assert!(request.rag_enabled);
+    }
+
+    #[test]
+    fn route_node_resource_attach_rejects_unknown_kind_and_missing_idempotency() {
+        let invalid_kind = AttachRouteNodeResourceRequest {
+            resource_id: "resource-1".to_string(),
+            kind: "unknown".to_string(),
+            title_override: String::new(),
+            note: String::new(),
+            sort_rank: 0,
+            rag_enabled: false,
+            retrieval_scope: String::new(),
+        };
+        assert!(
+            invalid_kind
+                .into_pb(
+                    "route-1".to_string(),
+                    "node-1".to_string(),
+                    "user-1".to_string(),
+                    Some("key-1".to_string()),
+                )
+                .is_err()
+        );
+
+        let missing_key = AttachRouteNodeResourceRequest {
+            resource_id: "resource-1".to_string(),
+            kind: "document".to_string(),
+            title_override: String::new(),
+            note: String::new(),
+            sort_rank: 0,
+            rag_enabled: false,
+            retrieval_scope: String::new(),
+        };
+        assert!(
+            missing_key
+                .into_pb(
+                    "route-1".to_string(),
+                    "node-1".to_string(),
+                    "user-1".to_string(),
+                    None,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn route_node_resource_response_preserves_public_resource_metadata() {
+        let attachment =
+            RouteNodeResourceAttachment::try_from(catalog_pb::RouteNodeResourceAttachment {
+                id: "attachment-1".to_string(),
+                route_id: "route-1".to_string(),
+                action_node_id: "node-1".to_string(),
+                resource_id: "resource-1".to_string(),
+                kind: catalog_pb::AttachmentKind::Pdf as i32,
+                title_override: "行动手册".to_string(),
+                note: "完成后复盘".to_string(),
+                sort_rank: 2,
+                rag_enabled: false,
+                embedding_collection: String::new(),
+                retrieval_scope: String::new(),
+                created_by: "creator-1".to_string(),
+                created_at: "2026-08-18T00:00:00Z".to_string(),
+                updated_at: "2026-08-18T00:00:00Z".to_string(),
+                resource: Some(catalog_pb::Resource {
+                    id: "resource-1".to_string(),
+                    title: "开放课程".to_string(),
+                    kind: catalog_pb::ResourceKind::Course as i32,
+                    provider: "官方机构".to_string(),
+                    summary: "课程简介".to_string(),
+                    url: "https://example.com/course".to_string(),
+                    license: "CC BY 4.0".to_string(),
+                    version: "1.0".to_string(),
+                    citation: "Official course. 2026.".to_string(),
+                    topics: vec!["学习".to_string()],
+                    status: catalog_pb::ResourceStatus::Published as i32,
+                    published_at: "2026-08-01T00:00:00Z".to_string(),
+                    updated_at: "2026-08-18T00:00:00Z".to_string(),
+                }),
+            })
+            .expect("attachment response should convert");
+        let json = serde_json::to_value(attachment).expect("attachment JSON");
+        assert_eq!(json["kind"], "pdf");
+        assert_eq!(json["resource"]["license"], "CC BY 4.0");
+    }
+
+    #[test]
+    fn public_resource_response_requires_citation_and_license_metadata() {
+        let resource = PublicResource::try_from(catalog_pb::Resource {
+            id: "resource-1".to_string(),
+            title: "公开课程".to_string(),
+            kind: catalog_pb::ResourceKind::Course as i32,
+            provider: "provider".to_string(),
+            summary: "summary".to_string(),
+            url: "https://example.com/course".to_string(),
+            license: "CC BY 4.0".to_string(),
+            version: "2026".to_string(),
+            citation: "Provider. Course. 2026.".to_string(),
+            topics: vec!["学习".to_string()],
+            status: catalog_pb::ResourceStatus::Published as i32,
+            published_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-08-01T00:00:00Z".to_string(),
+        })
+        .expect("complete resource metadata");
+        assert_eq!(resource.kind, "course");
+        assert_eq!(resource.license, "CC BY 4.0");
+        assert!(
+            PublicResource::try_from(catalog_pb::Resource {
+                license: String::new(),
+                ..catalog_pb::Resource::default()
+            })
+            .is_err()
+        );
     }
 }

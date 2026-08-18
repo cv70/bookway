@@ -16,7 +16,7 @@
 
 ```text
 frontend/
-└── apps/mobile/
+└── apps/bookway/
     ├── src/
     │   ├── api/          # Gateway HTTP client
     │   ├── analytics/    # 批量事件、曝光去重、重试与后台 flush
@@ -37,7 +37,7 @@ frontend/
 ## 本地运行
 
 ```bash
-cd frontend/apps/mobile
+cd frontend/apps/bookway
 npm install
 npm run typecheck
 npm run start
@@ -74,3 +74,10 @@ EXPO_PUBLIC_API_URL=http://127.0.0.1:18080 npm run web -- --port 19006
 - 资源知识库与阅读状态已接入 Gateway；EPUB/PDF/MOBI 文件导入、Foliate/WebView 渲染、离线冲突合并和增量同步仍需要独立阅读引擎与文件服务。
 - 行动留痕、周回望和陪伴简报已从客户端临时状态迁移到 Gateway；离线写入队列、冲突合并和跨设备增量同步仍需实现。创建和新增行动可选择今天/明天及具体时间，客户端会提交带 UTC 偏移量的时间戳和 IANA 时区；今日和陪伴请求也会携带本地日期上下文。通知中心已读取并确认服务端收件箱，未读数会显示在今日页铃铛上，支持游标续页、近底部加载和失败重试；含 `post_id` 的社区通知会优先打开已缓存帖子，未命中时通过公开内容接口加载，加载失败会明确显示并可重试。含 `appeal_id` 的申诉结果会改为打开创作中心，避免尝试读取受限内容的公开详情。设置页的行动提醒会持久化启用状态和设备本地时区；后端已支持提前窗口、静默时段、设备登记与去重命令，但客户端尚未接入 `expo-notifications` 获取系统权限或注册 push token，因此不会把该开关表述为已经能够发送系统通知。自动重排仍需实现。
 - 图片选择器和拉黑仍需要接入对应原生或服务能力；评论、搜索和 Feed 已支持游标续页及近底部加载。评论会显示待审或未公开状态，公开列表只展示审核通过的正文；举报可由移动端提交，服务端已提供角色受限的审核队列和下架处置 API。移动端不承载运营审核台；创作中心只通过 `/v1/me/posts` 与 `/v1/me/appeals` 读取当前作者的私有状态，受限内容可提交申诉、按各自游标继续加载内容状态和申诉历史，并查看处理结果。终态决定会与服务端投递任务同事务创建，独立调度器会重试写入通知收件箱；恢复公开的结果会等待内容已实际公开后再通知。收件箱实时刷新和离线申诉草稿同步仍需补齐。
+## Frontend apps
+
+- `apps/bookway`: Bookway's Expo mobile app.
+- `webs/merchant-admin`: merchant operations console for catalog, inventory, orders, and route offers.
+- `webs/ad-platform`: advertiser console for contextual campaign planning, delivery, and reporting.
+
+Both web consoles are independent TypeScript + React (Vite) applications. Run `npm run dev` from each project directory to start its local development server.

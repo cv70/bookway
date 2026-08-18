@@ -96,7 +96,7 @@ async fn ready(service: &'static str) -> impl IntoResponse {
         "media" => &["DATABASE_URL", "S3_ENDPOINT"],
         "bbs-search" => &["OPENSEARCH_URL"],
         "feature-main" => &["DATABASE_URL", "REDIS_URL"],
-        "bbs" | "bbs-link" | "comment" | "commonlikestatus" | "content-audit" | "gateway"
+        "bbs" | "bbs-link" | "comment" | "interaction-status" | "content-audit" | "gateway"
         | "growth" | "recommend-main" | "user-event" => &["DATABASE_URL"],
         _ => &[],
     };

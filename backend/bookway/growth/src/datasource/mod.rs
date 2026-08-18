@@ -29,6 +29,12 @@ pub(crate) enum RepositoryError {
     KnowledgeReferenceNotFound(String),
     #[error("weekly review payload is missing its summary")]
     InvalidWeeklyReview,
+    #[error("weekly review {0} was not found")]
+    ReviewNotFound(String),
+    #[error("weekly review adjustment {0} was not found")]
+    ReviewAdjustmentNotFound(u32),
+    #[error("weekly review adjustment is no longer applicable")]
+    ReviewAdjustmentStale,
     #[error("idempotency key was already used with different content")]
     IdempotencyConflict,
     #[error("database operation failed: {0}")]
@@ -158,6 +164,12 @@ pub(crate) trait GrowthRepository: Send + Sync {
         user_id: &str,
         review: pb::ReviewRecord,
     ) -> Result<pb::ReviewRecord, RepositoryError>;
+    async fn apply_weekly_review_adjustment(
+        &self,
+        user_id: &str,
+        review_id: &str,
+        suggestion_index: u32,
+    ) -> Result<AppliedReviewAdjustment, RepositoryError>;
     async fn list_knowledge(
         &self,
         user_id: &str,
@@ -188,6 +200,11 @@ pub(crate) struct ReviewSnapshot {
     pub(crate) journeys: Vec<pb::Journey>,
     pub(crate) actions: Vec<pb::Action>,
     pub(crate) entries: Vec<pb::GrowthEntry>,
+}
+
+pub(crate) struct AppliedReviewAdjustment {
+    pub(crate) review: pb::ReviewRecord,
+    pub(crate) decision: pb::ReviewAdjustmentDecision,
 }
 
 struct State {
@@ -1130,6 +1147,112 @@ impl GrowthRepository for MemoryGrowthRepository {
         }
         state.weekly_reviews.insert(key, review.clone());
         Ok(review)
+    }
+
+    async fn apply_weekly_review_adjustment(
+        &self,
+        user_id: &str,
+        review_id: &str,
+        suggestion_index: u32,
+    ) -> Result<AppliedReviewAdjustment, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (review_key, stored_review) = state
+            .weekly_reviews
+            .iter()
+            .find(|((owner, _, _), review)| owner == user_id && review.id == review_id)
+            .map(|(key, review)| (key.clone(), review.clone()))
+            .ok_or_else(|| RepositoryError::ReviewNotFound(review_id.to_string()))?;
+        if let Some(decision) = stored_review
+            .applied_adjustments
+            .iter()
+            .find(|decision| decision.suggestion_index == suggestion_index)
+            .cloned()
+        {
+            return Ok(AppliedReviewAdjustment {
+                review: stored_review,
+                decision,
+            });
+        }
+        let suggestion = stored_review
+            .summary
+            .as_ref()
+            .ok_or(RepositoryError::InvalidWeeklyReview)?
+            .adjustment_suggestions
+            .get(
+                usize::try_from(suggestion_index)
+                    .map_err(|_| RepositoryError::ReviewAdjustmentNotFound(suggestion_index))?,
+            )
+            .cloned()
+            .ok_or(RepositoryError::ReviewAdjustmentNotFound(suggestion_index))?;
+        let decision = if let Some(patch) = suggestion.action_patch {
+            let expected_minutes = patch
+                .expected_estimated_minutes
+                .ok_or(RepositoryError::ReviewAdjustmentStale)?;
+            let proposed_minutes = patch
+                .estimated_minutes
+                .ok_or(RepositoryError::ReviewAdjustmentStale)?;
+            if !state
+                .action_owners
+                .get(&patch.action_id)
+                .is_some_and(|owner| owner == user_id)
+            {
+                return Err(RepositoryError::ActionNotFound(patch.action_id));
+            }
+            let action = state
+                .actions
+                .get_mut(&patch.action_id)
+                .ok_or_else(|| RepositoryError::ActionNotFound(patch.action_id.clone()))?;
+            if action.state != pb::ActionState::Pending as i32
+                || action.estimated_minutes != expected_minutes
+            {
+                return Err(RepositoryError::ReviewAdjustmentStale);
+            }
+            action.estimated_minutes = proposed_minutes;
+            pb::ReviewAdjustmentDecision {
+                suggestion_index,
+                applied_at: current_timestamp(),
+                action: Some(action.clone()),
+                journey: None,
+            }
+        } else if let Some(patch) = suggestion.journey_patch {
+            let expected_status = patch
+                .expected_status
+                .ok_or(RepositoryError::ReviewAdjustmentStale)?;
+            if !state
+                .journey_owners
+                .get(&patch.journey_id)
+                .is_some_and(|owner| owner == user_id)
+            {
+                return Err(RepositoryError::JourneyNotFound(patch.journey_id));
+            }
+            let journey = state
+                .journeys
+                .iter_mut()
+                .find(|journey| journey.id == patch.journey_id)
+                .ok_or_else(|| RepositoryError::JourneyNotFound(patch.journey_id.clone()))?;
+            if journey.status != expected_status {
+                return Err(RepositoryError::ReviewAdjustmentStale);
+            }
+            journey.status = patch.status;
+            pb::ReviewAdjustmentDecision {
+                suggestion_index,
+                applied_at: current_timestamp(),
+                action: None,
+                journey: Some(journey.clone()),
+            }
+        } else {
+            return Err(RepositoryError::ReviewAdjustmentStale);
+        };
+        let review = state
+            .weekly_reviews
+            .get_mut(&review_key)
+            .ok_or_else(|| RepositoryError::ReviewNotFound(review_id.to_string()))?;
+        review.applied_adjustments.push(decision.clone());
+        review.updated_at = decision.applied_at.clone();
+        Ok(AppliedReviewAdjustment {
+            review: review.clone(),
+            decision,
+        })
     }
 
     async fn list_knowledge(
@@ -2255,6 +2378,143 @@ impl GrowthRepository for PostgresGrowthRepository {
             .await
             .map_err(RepositoryError::Database)?;
         Ok(existing)
+    }
+
+    async fn apply_weekly_review_adjustment(
+        &self,
+        user_id: &str,
+        review_id: &str,
+        suggestion_index: u32,
+    ) -> Result<AppliedReviewAdjustment, RepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(RepositoryError::Database)?;
+        let payload = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT payload FROM weekly_reviews WHERE id=$1 AND user_id=$2 FOR UPDATE",
+        )
+        .bind(review_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(RepositoryError::Database)?
+        .ok_or_else(|| RepositoryError::ReviewNotFound(review_id.to_string()))?;
+        let mut review: pb::ReviewRecord =
+            serde_json::from_value(payload).map_err(RepositoryError::Serialization)?;
+        if let Some(decision) = review
+            .applied_adjustments
+            .iter()
+            .find(|decision| decision.suggestion_index == suggestion_index)
+            .cloned()
+        {
+            transaction
+                .commit()
+                .await
+                .map_err(RepositoryError::Database)?;
+            return Ok(AppliedReviewAdjustment { review, decision });
+        }
+        let suggestion = review
+            .summary
+            .as_ref()
+            .ok_or(RepositoryError::InvalidWeeklyReview)?
+            .adjustment_suggestions
+            .get(
+                usize::try_from(suggestion_index)
+                    .map_err(|_| RepositoryError::ReviewAdjustmentNotFound(suggestion_index))?,
+            )
+            .cloned()
+            .ok_or(RepositoryError::ReviewAdjustmentNotFound(suggestion_index))?;
+        let decision = if let Some(patch) = suggestion.action_patch {
+            let expected_minutes = patch
+                .expected_estimated_minutes
+                .ok_or(RepositoryError::ReviewAdjustmentStale)?;
+            let proposed_minutes = patch
+                .estimated_minutes
+                .ok_or(RepositoryError::ReviewAdjustmentStale)?;
+            let payload = sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT payload FROM actions WHERE id=$1 AND user_id=$2 FOR UPDATE",
+            )
+            .bind(&patch.action_id)
+            .bind(user_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(RepositoryError::Database)?
+            .ok_or_else(|| RepositoryError::ActionNotFound(patch.action_id.clone()))?;
+            let mut action: pb::Action =
+                serde_json::from_value(payload).map_err(RepositoryError::Serialization)?;
+            if action.state != pb::ActionState::Pending as i32
+                || action.estimated_minutes != expected_minutes
+            {
+                return Err(RepositoryError::ReviewAdjustmentStale);
+            }
+            action.estimated_minutes = proposed_minutes;
+            sqlx::query(
+                "UPDATE actions SET payload=$1, updated_at=now() WHERE id=$2 AND user_id=$3",
+            )
+            .bind(serde_json::to_value(&action).map_err(RepositoryError::Serialization)?)
+            .bind(&patch.action_id)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::Database)?;
+            pb::ReviewAdjustmentDecision {
+                suggestion_index,
+                applied_at: current_timestamp(),
+                action: Some(action),
+                journey: None,
+            }
+        } else if let Some(patch) = suggestion.journey_patch {
+            let expected_status = patch
+                .expected_status
+                .ok_or(RepositoryError::ReviewAdjustmentStale)?;
+            let payload = sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT payload FROM journeys WHERE id=$1 AND user_id=$2 FOR UPDATE",
+            )
+            .bind(&patch.journey_id)
+            .bind(user_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(RepositoryError::Database)?
+            .ok_or_else(|| RepositoryError::JourneyNotFound(patch.journey_id.clone()))?;
+            let mut journey: pb::Journey =
+                serde_json::from_value(payload).map_err(RepositoryError::Serialization)?;
+            if journey.status != expected_status {
+                return Err(RepositoryError::ReviewAdjustmentStale);
+            }
+            journey.status = patch.status;
+            sqlx::query(
+                "UPDATE journeys SET payload=$1, status=$2, updated_at=now() WHERE id=$3 AND user_id=$4",
+            )
+            .bind(serde_json::to_value(&journey).map_err(RepositoryError::Serialization)?)
+            .bind(format_status(journey.status))
+            .bind(&patch.journey_id)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::Database)?;
+            pb::ReviewAdjustmentDecision {
+                suggestion_index,
+                applied_at: current_timestamp(),
+                action: None,
+                journey: Some(journey),
+            }
+        } else {
+            return Err(RepositoryError::ReviewAdjustmentStale);
+        };
+        review.applied_adjustments.push(decision.clone());
+        review.updated_at = decision.applied_at.clone();
+        sqlx::query(
+            "UPDATE weekly_reviews SET payload=$1, updated_at=$2::timestamptz WHERE id=$3 AND user_id=$4",
+        )
+        .bind(serde_json::to_value(&review).map_err(RepositoryError::Serialization)?)
+        .bind(&review.updated_at)
+        .bind(review_id)
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(RepositoryError::Database)?;
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::Database)?;
+        Ok(AppliedReviewAdjustment { review, decision })
     }
 
     async fn list_knowledge(

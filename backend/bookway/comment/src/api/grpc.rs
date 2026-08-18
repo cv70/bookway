@@ -11,6 +11,18 @@ struct GrpcServer {
 
 #[tonic::async_trait]
 impl Comment for GrpcServer {
+    async fn get(
+        &self,
+        request: Request<pb::GetRequest>,
+    ) -> Result<Response<pb::CommentItem>, Status> {
+        Ok(Response::new(
+            self.domain
+                .get(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
+
     async fn list(
         &self,
         request: Request<pb::ListRequest>,
