@@ -132,7 +132,6 @@ pub(crate) enum SearchSessionError {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RecallState {
-    #[serde(default = "default_recall_source")]
     pub(crate) source: RecallSource,
     pub(crate) query: String,
     pub(crate) source_cursor: Option<String>,
@@ -146,16 +145,11 @@ pub(crate) enum RecallSource {
     Resource,
 }
 
-fn default_recall_source() -> RecallSource {
-    RecallSource::Bbs
-}
-
 /// The main-search session mixes independently paged recalls without exposing
 /// upstream cursor tokens to clients. Source cursors remain owned by bbs-search.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SearchPipelineSession {
     pub(crate) query_fingerprint: u64,
-    #[serde(default = "legacy_query_rewrite_version")]
     pub(crate) query_rewrite_version: String,
     pub(crate) recalls: Vec<RecallState>,
     pub(crate) pending: Vec<pb::SearchResult>,
@@ -163,10 +157,6 @@ pub(crate) struct SearchPipelineSession {
     pub(crate) delivered_count: usize,
     pub(crate) source_total_estimate: usize,
     pub(crate) degraded: bool,
-}
-
-fn legacy_query_rewrite_version() -> String {
-    "legacy-unversioned".to_string()
 }
 
 #[async_trait]

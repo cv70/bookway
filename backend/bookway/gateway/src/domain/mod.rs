@@ -583,6 +583,13 @@ impl Domain {
         grpc_call!(self, bbs_link, "bbs-link", create, request)
     }
 
+    pub(crate) async fn fork_route(
+        &self,
+        request: bbs_link_pb::ForkRouteRequest,
+    ) -> Result<bbs_link_pb::Content, UpstreamError> {
+        grpc_call!(self, bbs_link, "bbs-link", fork_route, request)
+    }
+
     pub(crate) async fn update_content(
         &self,
         request: bbs_link_pb::UpdateRequest,
@@ -1459,13 +1466,6 @@ impl Domain {
         grpc_call!(self, mall, "mall", attach_node_offer, request)
     }
 
-    pub(crate) async fn mall_product(
-        &self,
-        request: mall_pb::IdRequest,
-    ) -> Result<mall_pb::MallProduct, UpstreamError> {
-        grpc_call!(self, mall, "mall", product, request)
-    }
-
     pub(crate) async fn mall_node_offers(
         &self,
         request: mall_pb::NodeOfferQueryRequest,
@@ -1504,6 +1504,40 @@ impl Domain {
         request: mall_order_pb::OrderRequest,
     ) -> Result<mall_order_pb::Order, UpstreamError> {
         grpc_call!(self, mall_order, "mall-order", cancel, request)
+    }
+
+    pub(crate) async fn merchant_mall_orders(
+        &self,
+        request: mall_order_pb::MerchantOrderRequest,
+    ) -> Result<mall_order_pb::MerchantOrderListResponse, UpstreamError> {
+        grpc_call!(self, mall_order, "mall-order", merchant_orders, request)
+    }
+
+    pub(crate) async fn update_mall_fulfillment(
+        &self,
+        request: mall_order_pb::UpdateFulfillmentRequest,
+    ) -> Result<mall_order_pb::Order, UpstreamError> {
+        grpc_call!(self, mall_order, "mall-order", update_fulfillment, request)
+    }
+
+    pub(crate) async fn affiliate_settlements(
+        &self,
+        request: mall_order_pb::AffiliateSettlementRequest,
+    ) -> Result<mall_order_pb::AffiliateSettlementListResponse, UpstreamError> {
+        grpc_call!(
+            self,
+            mall_order,
+            "mall-order",
+            affiliate_settlements,
+            request
+        )
+    }
+
+    pub(crate) async fn settle_affiliate(
+        &self,
+        request: mall_order_pb::SettleAffiliateRequest,
+    ) -> Result<mall_order_pb::AffiliateSettlement, UpstreamError> {
+        grpc_call!(self, mall_order, "mall-order", settle_affiliate, request)
     }
 
     async fn visibility(&self, user_id: &str) -> Result<Vec<String>, UpstreamError> {
@@ -2194,32 +2228,10 @@ fn route_journey_request(
     };
     let domain = growth_pb::GrowthDomain::try_from(post.domain)
         .unwrap_or(growth_pb::GrowthDomain::Learning) as i32;
-    let Some(template) = content.route_template.as_ref() else {
-        return Ok(growth_pb::CreateRouteJourneyRequest {
-            user_id: user_id.to_string(),
-            route_id: route_id.to_string(),
-            journey: Some(growth_pb::CreateJourneyRequest {
-                user_id: user_id.to_string(),
-                title: title.clone(),
-                intent: post.summary.clone(),
-                domain,
-                journey_type: growth_pb::JourneyType::Project as i32,
-                completion_criteria: "完成路线中的必要阶段和行动".to_string(),
-                stages: Vec::new(),
-                duration_label,
-                first_action_title: title,
-                first_action_detail: post.summary.clone(),
-                estimated_minutes: 20,
-                first_action_scheduled_label: None,
-                first_action_scheduled_for: None,
-                first_action_scheduled_timezone: None,
-                first_action_stage_index: None,
-                first_action_recurrence: None,
-                idempotency_key: None,
-            }),
-            additional_actions: Vec::new(),
-        });
-    };
+    let template = content
+        .route_template
+        .as_ref()
+        .ok_or_else(|| route_precondition("该路线缺少结构化行动模板"))?;
     let first_action = template
         .actions
         .first()
@@ -2738,6 +2750,7 @@ mod tests {
                         estimated_minutes: 15,
                         scheduled_label: "今天".to_string(),
                         stage_index: Some(0),
+                        scene_equipment: vec!["阅读清单".to_string()],
                     },
                     bbs_link_pb::RouteTemplateAction {
                         id: "reading-reflect".to_string(),
@@ -2746,6 +2759,7 @@ mod tests {
                         estimated_minutes: 20,
                         scheduled_label: "第四周".to_string(),
                         stage_index: Some(1),
+                        scene_equipment: vec!["复盘笔记本".to_string()],
                     },
                 ],
                 journey_type: bbs_link_pb::RouteTemplateKind::Habit as i32,
@@ -2778,14 +2792,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_public_routes_keep_the_single_action_fallback() {
-        let request = route_journey_request("user-1", "route-content", &public_route_content(None))
-            .expect("legacy route remains joinable");
-
-        let journey = request.journey.expect("journey request is populated");
-        assert_eq!(journey.first_action_title, "四周主题阅读");
-        assert!(journey.stages.is_empty());
-        assert!(request.additional_actions.is_empty());
+    fn routes_without_structured_actions_cannot_be_joined() {
+        assert!(
+            route_journey_request("user-1", "route-content", &public_route_content(None)).is_err()
+        );
     }
 
     #[test]

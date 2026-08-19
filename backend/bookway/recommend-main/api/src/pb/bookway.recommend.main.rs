@@ -10,6 +10,10 @@ pub struct FeedActionContext {
     pub placement: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "4")]
     pub domain: ::core::option::Option<::prost::alloc::string::String>,
+    /// Ads and offers are eligible only for the equipment selected in this
+    /// action context. The route template remains the authoritative vocabulary.
+    #[prost(string, optional, tag = "5")]
+    pub scene_equipment: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -60,6 +64,8 @@ pub struct FeedAd {
     pub route_id: ::prost::alloc::string::String,
     #[prost(string, tag = "11")]
     pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "12")]
+    pub scene_equipment: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

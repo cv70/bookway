@@ -23,6 +23,7 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/posts/{id}",
             get(get_public_content).patch(update_content),
         )
+        .route("/v1/posts/{id}/fork", post(fork_route))
         .route("/v1/posts/{id}/publish", post(publish_content))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
@@ -92,6 +93,23 @@ async fn publish_content(
             })
             .await?,
     )))
+}
+
+async fn fork_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(source_route_id): Path<String>,
+    Json(mut request): Json<pb::ForkRouteRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<pb::Content>>), HttpError> {
+    request.user_id = user_id(&headers);
+    request.source_route_id = source_route_id;
+    request.idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let content = state.domain.fork_route(request).await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::new(content))))
 }
 
 fn user_id(headers: &HeaderMap) -> String {

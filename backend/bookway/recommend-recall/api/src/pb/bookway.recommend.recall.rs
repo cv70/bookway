@@ -22,6 +22,13 @@ pub struct Candidate {
     pub source: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "10")]
     pub reasons: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Explicit multi-objective predictions produced by Recommend Rank.
+    #[prost(double, tag = "11")]
+    pub p_ctr: f64,
+    #[prost(double, tag = "12")]
+    pub p_cvr: f64,
+    #[prost(double, tag = "13")]
+    pub p_wegu: f64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

@@ -227,6 +227,8 @@ pub(crate) struct RouteTemplateAction {
     pub(crate) estimated_minutes: u32,
     pub(crate) scheduled_label: String,
     pub(crate) stage_index: Option<u32>,
+    #[serde(default)]
+    pub(crate) scene_equipment: Vec<String>,
 }
 
 impl From<RouteTemplateAction> for bbs_link_pb::RouteTemplateAction {
@@ -238,6 +240,7 @@ impl From<RouteTemplateAction> for bbs_link_pb::RouteTemplateAction {
             estimated_minutes: value.estimated_minutes,
             scheduled_label: value.scheduled_label,
             stage_index: value.stage_index,
+            scene_equipment: value.scene_equipment,
         }
     }
 }
@@ -251,6 +254,7 @@ impl From<bbs_link_pb::RouteTemplateAction> for RouteTemplateAction {
             estimated_minutes: value.estimated_minutes,
             scheduled_label: value.scheduled_label,
             stage_index: value.stage_index,
+            scene_equipment: value.scene_equipment,
         }
     }
 }
@@ -359,6 +363,26 @@ impl From<bbs_link_pb::QuestionContext> for QuestionContext {
     }
 }
 
+/// Immutable server-owned provenance for a route created from a public fork.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct RouteFork {
+    source_route_id: String,
+    source_route_version: u32,
+    source_route_title: String,
+    forked_at: String,
+}
+
+impl From<bbs_link_pb::RouteFork> for RouteFork {
+    fn from(value: bbs_link_pb::RouteFork) -> Self {
+        Self {
+            source_route_id: value.source_route_id,
+            source_route_version: value.source_route_version,
+            source_route_title: value.source_route_title,
+            forked_at: value.forked_at,
+        }
+    }
+}
+
 impl From<bbs_link_pb::Milestone> for Milestone {
     fn from(value: bbs_link_pb::Milestone) -> Self {
         Self {
@@ -451,6 +475,29 @@ impl UpdateContentRequest {
                 .map(|values| bbs_link_pb::StringList { values }),
             route_template: self.route_template.map(Into::into),
             milestone: self.milestone.map(Into::into),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct ForkRouteRequest {
+    pub(crate) title: Option<String>,
+    pub(crate) summary: Option<String>,
+}
+
+impl ForkRouteRequest {
+    pub(crate) fn into_pb(
+        self,
+        user_id: String,
+        source_route_id: String,
+        idempotency_key: String,
+    ) -> bbs_link_pb::ForkRouteRequest {
+        bbs_link_pb::ForkRouteRequest {
+            user_id,
+            source_route_id,
+            idempotency_key,
+            title: self.title,
+            summary: self.summary,
         }
     }
 }
@@ -560,6 +607,7 @@ pub(crate) struct Content {
     milestone: Option<Milestone>,
     accepted_answer_id: Option<String>,
     question_context: Option<QuestionContext>,
+    route_fork: Option<RouteFork>,
 }
 
 impl TryFrom<bbs_link_pb::Content> for Content {
@@ -583,6 +631,7 @@ impl TryFrom<bbs_link_pb::Content> for Content {
             milestone: value.milestone.map(Into::into),
             accepted_answer_id: value.accepted_answer_id,
             question_context: value.question_context.map(Into::into),
+            route_fork: value.route_fork.map(Into::into),
         })
     }
 }
@@ -622,6 +671,7 @@ pub(crate) struct FeedQuery {
     pub(crate) action_node_id: Option<String>,
     pub(crate) placement: Option<String>,
     pub(crate) action_domain: Option<String>,
+    pub(crate) scene_equipment: Option<String>,
 }
 
 impl FeedQuery {
@@ -636,6 +686,7 @@ impl FeedQuery {
                     action_node_id,
                     placement: self.placement.unwrap_or_else(|| surface.clone()),
                     domain: self.action_domain,
+                    scene_equipment: self.scene_equipment,
                 })
             }
             (None, None) => None,
@@ -682,6 +733,7 @@ pub(crate) struct FeedAd {
     model_version: String,
     route_id: String,
     action_node_id: String,
+    scene_equipment: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -726,6 +778,7 @@ impl TryFrom<recommend_pb::FeedResponse> for FeedResponse {
                         model_version: ad.model_version,
                         route_id: ad.route_id,
                         action_node_id: ad.action_node_id,
+                        scene_equipment: ad.scene_equipment,
                     });
                     if post.is_some() == ad.is_some() {
                         return Err(
@@ -4713,9 +4766,9 @@ mod tests {
         ContentType, CreateActionRequest, CreateCommentAppealRequest, CreateCommentReportRequest,
         CreateCommentRequest, CreateContentRequest, CreateDirectMessageReportRequest,
         CreateEntryRequest, CreateJourneyRequest, CreateMediaUploadRequest,
-        DirectMessageReportReceipt, FeedQuery, FeedbackItem, FollowRequest, GrowthDomain,
-        IngestEventsRequest, KnowledgeResource, ModerationCommentQuery, NotificationPage,
-        OwnCommentAppealQuery, PublicResource, Reaction, ResourceSearchQuery,
+        DirectMessageReportReceipt, FeedQuery, FeedbackItem, FollowRequest, ForkRouteRequest,
+        GrowthDomain, IngestEventsRequest, KnowledgeResource, ModerationCommentQuery,
+        NotificationPage, OwnCommentAppealQuery, PublicResource, Reaction, ResourceSearchQuery,
         ReviewCommentReportRequest, ReviewCommentRequest, ReviewDirectMessageReportRequest,
         RouteNodeResourceAttachment, RouteParticipationRequest, RouteTemplate, RouteTemplateKind,
         SaveWeeklyReviewRequest, SearchQuery, SetReactionRequest, SetRelationshipRequest,
@@ -4849,6 +4902,42 @@ mod tests {
     }
 
     #[test]
+    fn fork_request_and_provenance_keep_ownership_fields_server_owned() {
+        let request: ForkRouteRequest = serde_json::from_value(serde_json::json!({
+            "title": "我的阅读分支",
+            "summary": "从周末开始",
+            "user_id": "attacker",
+            "source_route_id": "attacker-route",
+            "idempotency_key": "attacker-key"
+        }))
+        .expect("fork JSON should deserialize");
+        let request = request.into_pb(
+            "member-1".to_string(),
+            "public-route-1".to_string(),
+            "fork-1".to_string(),
+        );
+        assert_eq!(request.user_id, "member-1");
+        assert_eq!(request.source_route_id, "public-route-1");
+        assert_eq!(request.idempotency_key, "fork-1");
+
+        let content = Content::try_from(bbs_link_pb::Content {
+            content_type: bbs_link_pb::ContentType::Route as i32,
+            route_fork: Some(bbs_link_pb::RouteFork {
+                source_route_id: "public-route-1".to_string(),
+                source_route_version: 4,
+                source_route_title: "四周主题阅读".to_string(),
+                forked_at: "2026-08-18T00:00:00Z".to_string(),
+            }),
+            ..Default::default()
+        })
+        .expect("valid route fork response");
+        let json = serde_json::to_value(content).expect("route fork JSON");
+        assert_eq!(json["route_fork"]["source_route_id"], "public-route-1");
+        assert_eq!(json["route_fork"]["source_route_version"], 4);
+        assert_eq!(json["route_fork"]["source_route_title"], "四周主题阅读");
+    }
+
+    #[test]
     fn content_response_serializes_named_enums() {
         let content = Content::try_from(bbs_link_pb::Content {
             id: "post-1".to_string(),
@@ -4890,6 +4979,7 @@ mod tests {
             milestone: None,
             accepted_answer_id: None,
             question_context: None,
+            route_fork: None,
         })
         .expect("valid protobuf content");
 

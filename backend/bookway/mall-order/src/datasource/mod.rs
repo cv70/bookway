@@ -44,12 +44,40 @@ pub(crate) trait OrderRepository: Send + Sync {
         status: i32,
         payment_reference: Option<String>,
     ) -> Result<pb::Order, RepositoryError>;
+    async fn merchant_orders(
+        &self,
+        merchant_id: &str,
+        status: Option<i32>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<pb::Order>, RepositoryError>;
+    async fn update_fulfillment(
+        &self,
+        merchant_id: &str,
+        order_id: &str,
+        status: i32,
+        tracking_number: &str,
+    ) -> Result<pb::Order, RepositoryError>;
+    async fn ensure_settlement(&self, order: &pb::Order) -> Result<(), RepositoryError>;
+    async fn settlements(
+        &self,
+        merchant_id: &str,
+        status: Option<i32>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<pb::AffiliateSettlement>, RepositoryError>;
+    async fn settle_affiliate(
+        &self,
+        merchant_id: &str,
+        settlement_id: &str,
+    ) -> Result<pb::AffiliateSettlement, RepositoryError>;
 }
 #[derive(Default)]
 pub(crate) struct MemoryOrderRepository {
     orders: RwLock<HashMap<String, MemoryOrder>>,
     idempotency: RwLock<HashMap<(String, String), String>>,
     payment_references: RwLock<HashMap<String, String>>,
+    settlements: RwLock<HashMap<String, pb::AffiliateSettlement>>,
 }
 #[derive(Clone)]
 struct MemoryOrder {
@@ -254,6 +282,124 @@ impl OrderRepository for MemoryOrderRepository {
         order.order.updated_at = timestamp(OffsetDateTime::now_utc());
         Ok(order.order.clone())
     }
+    async fn merchant_orders(
+        &self,
+        merchant_id: &str,
+        status: Option<i32>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<pb::Order>, RepositoryError> {
+        let cursor = cursor.unwrap_or_default();
+        let mut values = self
+            .orders
+            .read()
+            .await
+            .values()
+            .map(|stored| stored.order.clone())
+            .filter(|order| order.merchant_id == merchant_id)
+            .filter(|order| status.is_none_or(|value| order.status == value))
+            .filter(|order| cursor.is_empty() || order.id.as_str() < cursor)
+            .collect::<Vec<_>>();
+        values.sort_by(|left, right| right.id.cmp(&left.id));
+        values.truncate(limit.clamp(1, 100));
+        Ok(values)
+    }
+    async fn update_fulfillment(
+        &self,
+        merchant_id: &str,
+        order_id: &str,
+        status: i32,
+        tracking_number: &str,
+    ) -> Result<pb::Order, RepositoryError> {
+        let mut orders = self.orders.write().await;
+        let order = orders
+            .get_mut(order_id)
+            .ok_or_else(|| RepositoryError::NotFound(order_id.to_string()))?;
+        if order.order.merchant_id != merchant_id {
+            return Err(RepositoryError::NotFound(order_id.to_string()));
+        }
+        if order.order.status != pb::MallOrderStatus::Paid as i32 {
+            return Err(RepositoryError::State(
+                "only paid orders can be fulfilled".to_string(),
+            ));
+        }
+        validate_fulfillment_transition(order.order.fulfillment_status, status)?;
+        if status == pb::FulfillmentStatus::Shipped as i32 && tracking_number.trim().is_empty() {
+            return Err(RepositoryError::State(
+                "tracking number is required when shipping".to_string(),
+            ));
+        }
+        order.order.fulfillment_status = status;
+        if !tracking_number.trim().is_empty() {
+            order.order.tracking_number = tracking_number.to_string();
+        }
+        order.order.updated_at = timestamp(OffsetDateTime::now_utc());
+        Ok(order.order.clone())
+    }
+    async fn ensure_settlement(&self, order: &pb::Order) -> Result<(), RepositoryError> {
+        if order.merchant_id.is_empty() || order.affiliate_creator_id.is_empty() {
+            return Ok(());
+        }
+        let mut settlements = self.settlements.write().await;
+        settlements
+            .entry(order.id.clone())
+            .or_insert_with(|| pb::AffiliateSettlement {
+                id: uuid::Uuid::now_v7().to_string(),
+                order_id: order.id.clone(),
+                merchant_id: order.merchant_id.clone(),
+                creator_id: order.affiliate_creator_id.clone(),
+                amount_cents: order.commission_cents,
+                status: pb::AffiliateSettlementStatus::Eligible as i32,
+                eligible_at: timestamp(OffsetDateTime::now_utc()),
+                settled_at: None,
+                created_at: timestamp(OffsetDateTime::now_utc()),
+            });
+        Ok(())
+    }
+    async fn settlements(
+        &self,
+        merchant_id: &str,
+        status: Option<i32>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<pb::AffiliateSettlement>, RepositoryError> {
+        let cursor = cursor.unwrap_or_default();
+        let mut values = self
+            .settlements
+            .read()
+            .await
+            .values()
+            .filter(|item| item.merchant_id == merchant_id)
+            .filter(|item| status.is_none_or(|value| item.status == value))
+            .filter(|item| cursor.is_empty() || item.id.as_str() < cursor)
+            .cloned()
+            .collect::<Vec<_>>();
+        values.sort_by(|left, right| right.id.cmp(&left.id));
+        values.truncate(limit.clamp(1, 100));
+        Ok(values)
+    }
+    async fn settle_affiliate(
+        &self,
+        merchant_id: &str,
+        settlement_id: &str,
+    ) -> Result<pb::AffiliateSettlement, RepositoryError> {
+        let mut settlements = self.settlements.write().await;
+        let item = settlements
+            .values_mut()
+            .find(|item| item.id == settlement_id && item.merchant_id == merchant_id)
+            .ok_or_else(|| RepositoryError::NotFound(settlement_id.to_string()))?;
+        if item.status == pb::AffiliateSettlementStatus::Settled as i32 {
+            return Ok(item.clone());
+        }
+        if item.status != pb::AffiliateSettlementStatus::Eligible as i32 {
+            return Err(RepositoryError::State(
+                "settlement is not eligible".to_string(),
+            ));
+        }
+        item.status = pb::AffiliateSettlementStatus::Settled as i32;
+        item.settled_at = Some(timestamp(OffsetDateTime::now_utc()));
+        Ok(item.clone())
+    }
 }
 #[derive(Clone)]
 pub(crate) struct PostgresOrderRepository {
@@ -265,9 +411,9 @@ impl PostgresOrderRepository {
     }
     async fn load(&self, user_id: Option<&str>, id: &str) -> Result<pb::Order, RepositoryError> {
         let row = if let Some(user_id) = user_id {
-            sqlx::query_as::<_, OrderRow>("SELECT id,user_id,status,currency,total_cents,payment_reference,expires_at,created_at,updated_at,node_offer_id,affiliate_creator_id,commission_cents FROM mall_orders WHERE id=$1 AND user_id=$2").bind(id).bind(user_id).fetch_optional(&self.pool).await.map_err(database)?
+            sqlx::query_as::<_, OrderRow>("SELECT id,user_id,status,currency,total_cents,payment_reference,expires_at,created_at,updated_at,node_offer_id,affiliate_creator_id,commission_cents,merchant_id,fulfillment_status,tracking_number FROM mall_orders WHERE id=$1 AND user_id=$2").bind(id).bind(user_id).fetch_optional(&self.pool).await.map_err(database)?
         } else {
-            sqlx::query_as::<_, OrderRow>("SELECT id,user_id,status,currency,total_cents,payment_reference,expires_at,created_at,updated_at,node_offer_id,affiliate_creator_id,commission_cents FROM mall_orders WHERE id=$1").bind(id).fetch_optional(&self.pool).await.map_err(database)?
+            sqlx::query_as::<_, OrderRow>("SELECT id,user_id,status,currency,total_cents,payment_reference,expires_at,created_at,updated_at,node_offer_id,affiliate_creator_id,commission_cents,merchant_id,fulfillment_status,tracking_number FROM mall_orders WHERE id=$1").bind(id).fetch_optional(&self.pool).await.map_err(database)?
         };
         let row = row.ok_or_else(|| RepositoryError::NotFound(id.to_string()))?;
         let items = sqlx::query_as::<_, OrderLineRow>("SELECT sku_id,product_id,title,quantity,unit_price_cents,currency,line_total_cents FROM mall_order_items WHERE order_id=$1 ORDER BY sku_id").bind(id).fetch_all(&self.pool).await.map_err(database)?;
@@ -302,7 +448,7 @@ impl OrderRepository for PostgresOrderRepository {
     }
     async fn create(&self, draft: NewOrder) -> Result<CreateResult, RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(database)?;
-        let inserted = sqlx::query_scalar::<_, String>("INSERT INTO mall_orders (id,user_id,idempotency_key,request_fingerprint,status,currency,total_cents,expires_at,node_offer_id,affiliate_creator_id,commission_cents) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (user_id,idempotency_key) DO NOTHING RETURNING id").bind(&draft.order.id).bind(&draft.order.user_id).bind(&draft.idempotency_key).bind(&draft.request_fingerprint).bind(status_name(draft.order.status)?).bind(&draft.order.currency).bind(draft.order.total_cents).bind(parse_timestamp(&draft.order.expires_at)?).bind(&draft.order.node_offer_id).bind(&draft.order.affiliate_creator_id).bind(draft.order.commission_cents).fetch_optional(&mut *tx).await.map_err(database)?;
+        let inserted = sqlx::query_scalar::<_, String>("INSERT INTO mall_orders (id,user_id,idempotency_key,request_fingerprint,status,currency,total_cents,expires_at,node_offer_id,affiliate_creator_id,commission_cents,merchant_id,fulfillment_status,tracking_number) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (user_id,idempotency_key) DO NOTHING RETURNING id").bind(&draft.order.id).bind(&draft.order.user_id).bind(&draft.idempotency_key).bind(&draft.request_fingerprint).bind(status_name(draft.order.status)?).bind(&draft.order.currency).bind(draft.order.total_cents).bind(parse_timestamp(&draft.order.expires_at)?).bind(&draft.order.node_offer_id).bind(&draft.order.affiliate_creator_id).bind(draft.order.commission_cents).bind(&draft.order.merchant_id).bind(fulfillment_name(draft.order.fulfillment_status)?).bind(&draft.order.tracking_number).fetch_optional(&mut *tx).await.map_err(database)?;
         let id = if let Some(id) = inserted {
             for line in &draft.order.items {
                 sqlx::query("INSERT INTO mall_order_items (order_id,sku_id,product_id,title,quantity,unit_price_cents,currency,line_total_cents) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)").bind(&id).bind(&line.sku_id).bind(&line.product_id).bind(&line.title).bind(i64::from(line.quantity)).bind(line.unit_price_cents).bind(&line.currency).bind(line.line_total_cents).execute(&mut *tx).await.map_err(database)?;
@@ -417,6 +563,134 @@ impl OrderRepository for PostgresOrderRepository {
         }
         self.load(None, id).await
     }
+    async fn merchant_orders(
+        &self,
+        merchant_id: &str,
+        status: Option<i32>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<pb::Order>, RepositoryError> {
+        let limit = i64::try_from(limit.clamp(1, 100)).unwrap_or(100);
+        let status = status.map(status_name).transpose()?;
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM mall_orders WHERE merchant_id=$1 AND ($2::text IS NULL OR status=$2) AND ($3='' OR id < $3) ORDER BY id DESC LIMIT $4",
+        )
+        .bind(merchant_id)
+        .bind(status)
+        .bind(cursor.unwrap_or_default())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database)?;
+        let mut values = Vec::with_capacity(ids.len());
+        for id in ids {
+            values.push(self.load(None, &id).await?);
+        }
+        Ok(values)
+    }
+    async fn update_fulfillment(
+        &self,
+        merchant_id: &str,
+        order_id: &str,
+        status: i32,
+        tracking_number: &str,
+    ) -> Result<pb::Order, RepositoryError> {
+        let status_name = fulfillment_name(status)?;
+        if status == pb::FulfillmentStatus::Shipped as i32 && tracking_number.trim().is_empty() {
+            return Err(RepositoryError::State(
+                "tracking number is required when shipping".to_string(),
+            ));
+        }
+        let current = self.load(None, order_id).await?;
+        if current.merchant_id != merchant_id {
+            return Err(RepositoryError::NotFound(order_id.to_string()));
+        }
+        if current.status != pb::MallOrderStatus::Paid as i32 {
+            return Err(RepositoryError::State(
+                "only paid orders can be fulfilled".to_string(),
+            ));
+        }
+        validate_fulfillment_transition(current.fulfillment_status, status)?;
+        let changed = sqlx::query(
+            "UPDATE mall_orders SET fulfillment_status=$3,tracking_number=CASE WHEN $4='' THEN tracking_number ELSE $4 END,updated_at=now() WHERE id=$1 AND merchant_id=$2 AND fulfillment_status=$5",
+        )
+        .bind(order_id)
+        .bind(merchant_id)
+        .bind(status_name)
+        .bind(tracking_number)
+        .bind(fulfillment_name(current.fulfillment_status)? )
+        .execute(&self.pool)
+        .await
+        .map_err(database)?
+        .rows_affected();
+        if changed == 0 {
+            return self.load(None, order_id).await;
+        }
+        self.load(None, order_id).await
+    }
+    async fn ensure_settlement(&self, order: &pb::Order) -> Result<(), RepositoryError> {
+        if order.merchant_id.is_empty() || order.affiliate_creator_id.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO mall_affiliate_settlements (id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at) VALUES ($1,$2,$3,$4,$5,'eligible',now()) ON CONFLICT (order_id) DO NOTHING",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&order.id)
+        .bind(&order.merchant_id)
+        .bind(&order.affiliate_creator_id)
+        .bind(order.commission_cents)
+        .execute(&self.pool)
+        .await
+        .map_err(database)?;
+        Ok(())
+    }
+    async fn settlements(
+        &self,
+        merchant_id: &str,
+        status: Option<i32>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<pb::AffiliateSettlement>, RepositoryError> {
+        let status = status.map(settlement_status_name).transpose()?;
+        let rows = sqlx::query_as::<_, SettlementRow>(
+            "SELECT id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at,settled_at,created_at FROM mall_affiliate_settlements WHERE merchant_id=$1 AND ($2::text IS NULL OR status=$2) AND ($3='' OR id < $3) ORDER BY id DESC LIMIT $4",
+        )
+        .bind(merchant_id)
+        .bind(status)
+        .bind(cursor.unwrap_or_default())
+        .bind(i64::try_from(limit.clamp(1, 100)).unwrap_or(100))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database)?;
+        rows.into_iter().map(settlement_from_row).collect()
+    }
+    async fn settle_affiliate(
+        &self,
+        merchant_id: &str,
+        settlement_id: &str,
+    ) -> Result<pb::AffiliateSettlement, RepositoryError> {
+        let changed = sqlx::query("UPDATE mall_affiliate_settlements SET status='settled',settled_at=now(),updated_at=now() WHERE id=$1 AND merchant_id=$2 AND status='eligible'")
+            .bind(settlement_id)
+            .bind(merchant_id)
+            .execute(&self.pool)
+            .await
+            .map_err(database)?
+            .rows_affected();
+        let row = sqlx::query_as::<_, SettlementRow>("SELECT id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at,settled_at,created_at FROM mall_affiliate_settlements WHERE id=$1 AND merchant_id=$2")
+            .bind(settlement_id)
+            .bind(merchant_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(database)?
+            .ok_or_else(|| RepositoryError::NotFound(settlement_id.to_string()))?;
+        if changed == 0 && row.status != "settled" {
+            return Err(RepositoryError::State(
+                "settlement is not eligible".to_string(),
+            ));
+        }
+        settlement_from_row(row)
+    }
 }
 #[derive(FromRow)]
 struct OrderRow {
@@ -429,9 +703,12 @@ struct OrderRow {
     expires_at: OffsetDateTime,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
-    node_offer_id: Option<String>,
-    affiliate_creator_id: Option<String>,
+    node_offer_id: String,
+    affiliate_creator_id: String,
     commission_cents: i64,
+    merchant_id: String,
+    fulfillment_status: String,
+    tracking_number: String,
 }
 #[derive(FromRow)]
 struct IdempotencyRow {
@@ -447,6 +724,18 @@ struct OrderLineRow {
     unit_price_cents: i64,
     currency: String,
     line_total_cents: i64,
+}
+#[derive(FromRow)]
+struct SettlementRow {
+    id: String,
+    order_id: String,
+    merchant_id: String,
+    creator_id: String,
+    amount_cents: i64,
+    status: String,
+    eligible_at: OffsetDateTime,
+    settled_at: Option<OffsetDateTime>,
+    created_at: OffsetDateTime,
 }
 fn order_from_row(row: OrderRow, items: Vec<OrderLineRow>) -> Result<pb::Order, RepositoryError> {
     Ok(pb::Order {
@@ -478,6 +767,9 @@ fn order_from_row(row: OrderRow, items: Vec<OrderLineRow>) -> Result<pb::Order, 
         node_offer_id: row.node_offer_id,
         affiliate_creator_id: row.affiliate_creator_id,
         commission_cents: row.commission_cents,
+        merchant_id: row.merchant_id,
+        fulfillment_status: parse_fulfillment_status(&row.fulfillment_status)?,
+        tracking_number: row.tracking_number,
     })
 }
 fn status_name(value: i32) -> Result<&'static str, RepositoryError> {
@@ -498,6 +790,99 @@ fn parse_status(value: &str) -> Result<i32, RepositoryError> {
         _ => Err(RepositoryError::Failed(format!(
             "unknown order status {value}"
         ))),
+    }
+}
+fn fulfillment_name(value: i32) -> Result<&'static str, RepositoryError> {
+    match pb::FulfillmentStatus::try_from(value).ok() {
+        Some(pb::FulfillmentStatus::Pending) => Ok("pending"),
+        Some(pb::FulfillmentStatus::Processing) => Ok("processing"),
+        Some(pb::FulfillmentStatus::Shipped) => Ok("shipped"),
+        Some(pb::FulfillmentStatus::Delivered) => Ok("delivered"),
+        Some(pb::FulfillmentStatus::Cancelled) => Ok("cancelled"),
+        None => Err(RepositoryError::Failed(
+            "invalid fulfillment status".to_string(),
+        )),
+    }
+}
+fn parse_fulfillment_status(value: &str) -> Result<i32, RepositoryError> {
+    match value {
+        "pending" => Ok(pb::FulfillmentStatus::Pending as i32),
+        "processing" => Ok(pb::FulfillmentStatus::Processing as i32),
+        "shipped" => Ok(pb::FulfillmentStatus::Shipped as i32),
+        "delivered" => Ok(pb::FulfillmentStatus::Delivered as i32),
+        "cancelled" => Ok(pb::FulfillmentStatus::Cancelled as i32),
+        _ => Err(RepositoryError::Failed(format!(
+            "unknown fulfillment status {value}"
+        ))),
+    }
+}
+fn settlement_status_name(value: i32) -> Result<&'static str, RepositoryError> {
+    match pb::AffiliateSettlementStatus::try_from(value).ok() {
+        Some(pb::AffiliateSettlementStatus::Pending) => Ok("pending"),
+        Some(pb::AffiliateSettlementStatus::Eligible) => Ok("eligible"),
+        Some(pb::AffiliateSettlementStatus::Settled) => Ok("settled"),
+        Some(pb::AffiliateSettlementStatus::Reversed) => Ok("reversed"),
+        None => Err(RepositoryError::Failed(
+            "invalid settlement status".to_string(),
+        )),
+    }
+}
+fn parse_settlement_status(value: &str) -> Result<i32, RepositoryError> {
+    match value {
+        "pending" => Ok(pb::AffiliateSettlementStatus::Pending as i32),
+        "eligible" => Ok(pb::AffiliateSettlementStatus::Eligible as i32),
+        "settled" => Ok(pb::AffiliateSettlementStatus::Settled as i32),
+        "reversed" => Ok(pb::AffiliateSettlementStatus::Reversed as i32),
+        _ => Err(RepositoryError::Failed(format!(
+            "unknown settlement status {value}"
+        ))),
+    }
+}
+fn settlement_from_row(row: SettlementRow) -> Result<pb::AffiliateSettlement, RepositoryError> {
+    Ok(pb::AffiliateSettlement {
+        id: row.id,
+        order_id: row.order_id,
+        merchant_id: row.merchant_id,
+        creator_id: row.creator_id,
+        amount_cents: row.amount_cents,
+        status: parse_settlement_status(&row.status)?,
+        eligible_at: timestamp(row.eligible_at),
+        settled_at: row.settled_at.map(timestamp),
+        created_at: timestamp(row.created_at),
+    })
+}
+fn validate_fulfillment_transition(current: i32, next: i32) -> Result<(), RepositoryError> {
+    let valid = matches!(
+        (
+            pb::FulfillmentStatus::try_from(current).ok(),
+            pb::FulfillmentStatus::try_from(next).ok()
+        ),
+        (
+            Some(pb::FulfillmentStatus::Pending),
+            Some(pb::FulfillmentStatus::Processing)
+        ) | (
+            Some(pb::FulfillmentStatus::Pending),
+            Some(pb::FulfillmentStatus::Cancelled)
+        ) | (
+            Some(pb::FulfillmentStatus::Processing),
+            Some(pb::FulfillmentStatus::Shipped)
+        ) | (
+            Some(pb::FulfillmentStatus::Processing),
+            Some(pb::FulfillmentStatus::Cancelled)
+        ) | (
+            Some(pb::FulfillmentStatus::Shipped),
+            Some(pb::FulfillmentStatus::Delivered)
+        ) | (
+            Some(pb::FulfillmentStatus::Shipped),
+            Some(pb::FulfillmentStatus::Cancelled)
+        ),
+    ) || current == next;
+    if valid {
+        Ok(())
+    } else {
+        Err(RepositoryError::State(
+            "invalid fulfillment state transition".to_string(),
+        ))
     }
 }
 fn parse_timestamp(value: &str) -> Result<OffsetDateTime, RepositoryError> {
@@ -538,9 +923,12 @@ mod tests {
             expires_at: "2099-08-16T01:00:00Z".to_string(),
             created_at: "2026-08-16T00:00:00Z".to_string(),
             updated_at: "2026-08-16T00:00:00Z".to_string(),
-            node_offer_id: None,
-            affiliate_creator_id: None,
+            node_offer_id: "offer-1".to_string(),
+            affiliate_creator_id: "creator-1".to_string(),
             commission_cents: 0,
+            merchant_id: "merchant-1".to_string(),
+            fulfillment_status: pb::FulfillmentStatus::Pending as i32,
+            tracking_number: String::new(),
         }
     }
 

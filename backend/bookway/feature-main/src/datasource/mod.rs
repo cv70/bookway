@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak},
+};
 
 use serde::Serialize;
 
@@ -376,10 +379,31 @@ mod snapshot_tests {
 #[derive(Clone)]
 pub(crate) struct FeatureCache {
     redis: Option<redis::aio::ConnectionManager>,
+    miss_locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
 }
 impl FeatureCache {
     pub(crate) fn new(redis: Option<redis::aio::ConnectionManager>) -> Self {
-        Self { redis }
+        Self {
+            redis,
+            miss_locks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    pub(crate) async fn miss_lock(&self, user_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .miss_locks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(user_id).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(user_id.to_string(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
     pub(crate) async fn load(&self, user_id: &str) -> Option<HashMap<String, f64>> {
         let mut manager = self.redis.clone()?;
@@ -414,5 +438,50 @@ impl FeatureCache {
                 tracing::warn!(%error, user_id, "feature cache write degraded");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use tokio::time::{Duration, sleep};
+
+    use super::FeatureCache;
+
+    #[tokio::test]
+    async fn per_user_miss_lock_coalesces_concurrent_refreshes() {
+        let cache = FeatureCache::new(None);
+        let loads = Arc::new(AtomicUsize::new(0));
+        let loaded = Arc::new(AtomicBool::new(false));
+        let first = {
+            let cache = cache.clone();
+            let loads = loads.clone();
+            let loaded = loaded.clone();
+            tokio::spawn(async move {
+                let _guard = cache.miss_lock("user-1").await;
+                if !loaded.swap(true, Ordering::SeqCst) {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+        };
+        let second = {
+            let cache = cache.clone();
+            let loads = loads.clone();
+            let loaded = loaded.clone();
+            tokio::spawn(async move {
+                let _guard = cache.miss_lock("user-1").await;
+                if !loaded.swap(true, Ordering::SeqCst) {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+        first.await.expect("first refresh task should finish");
+        second.await.expect("second refresh task should finish");
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 }

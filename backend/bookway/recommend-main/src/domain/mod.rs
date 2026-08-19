@@ -44,6 +44,7 @@ impl FeedService {
             limit: Some(1),
             route_id: context.route_id.clone(),
             action_node_id: context.action_node_id.clone(),
+            scene_equipment: context.scene_equipment.clone(),
         }) {
             Ok(request) => request,
             Err(error) => {
@@ -74,6 +75,10 @@ fn valid_action_context(context: &pb::FeedActionContext) -> bool {
     !context.route_id.trim().is_empty()
         && !context.action_node_id.trim().is_empty()
         && !context.placement.trim().is_empty()
+        && context
+            .scene_equipment
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn mix_contextual_ad(
@@ -89,6 +94,7 @@ fn mix_contextual_ad(
         ad.route_id == context.route_id
             && ad.action_node_id == context.action_node_id
             && ad.placement == context.placement
+            && ad.scene_equipment == context.scene_equipment.clone().unwrap_or_default()
     }) else {
         if degraded {
             if let Some(meta) = &mut response.meta {
@@ -121,6 +127,7 @@ fn mix_contextual_ad(
                 model_version: ad.model_version,
                 route_id: ad.route_id,
                 action_node_id: ad.action_node_id,
+                scene_equipment: ad.scene_equipment,
             }),
         },
     );
@@ -150,6 +157,7 @@ mod tests {
             action_node_id: "node-1".to_string(),
             placement: "route_feed".to_string(),
             domain: Some("movement".to_string()),
+            scene_equipment: Some("trail shoes".to_string()),
         }
     }
 
@@ -196,6 +204,8 @@ mod tests {
                     model_version: "ecpm-v1".to_string(),
                     route_id: "route-1".to_string(),
                     action_node_id: "node-1".to_string(),
+                    scene_equipment: "trail shoes".to_string(),
+                    ecpm: 42.0,
                 }],
                 degraded: false,
             },
@@ -220,5 +230,48 @@ mod tests {
         let mut invalid = context();
         invalid.action_node_id.clear();
         assert!(!valid_action_context(&invalid));
+    }
+
+    #[test]
+    fn equipment_mismatch_never_enters_the_contextual_slot() {
+        let mut response = pb::FeedResponse {
+            request_id: "feed-2".to_string(),
+            items: (0..4).map(|index| organic(&index.to_string())).collect(),
+            meta: Some(pb::FeedMeta {
+                sourced: 4,
+                filtered: 0,
+                selected: 4,
+                next_cursor: None,
+                pipeline_id: "test".to_string(),
+                degraded: false,
+                model_version: None,
+                experiment_bucket: None,
+            }),
+        };
+        let mut decision = ad_pb::DecisionResponse {
+            request_id: "ad-request-2".to_string(),
+            items: vec![ad_pb::AdDecision {
+                request_id: "ad-request-2".to_string(),
+                campaign_id: "campaign-2".to_string(),
+                placement: "route_feed".to_string(),
+                route_id: "route-1".to_string(),
+                action_node_id: "node-1".to_string(),
+                scene_equipment: "different equipment".to_string(),
+                ..Default::default()
+            }],
+            degraded: false,
+        };
+        mix_contextual_ad(&mut response, decision.clone(), &context(), 4);
+        assert!(response.items.iter().all(|item| item.ad.is_none()));
+        decision.items[0].scene_equipment = "trail shoes".to_string();
+        mix_contextual_ad(&mut response, decision, &context(), 4);
+        assert_eq!(
+            response
+                .items
+                .iter()
+                .filter(|item| item.ad.is_some())
+                .count(),
+            1
+        );
     }
 }

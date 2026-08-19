@@ -19,6 +19,7 @@ members = [
   "bookway/interaction-status",
   "bookway/gateway",
   "bookway/gateway/bg/community-notification-dispatcher",
+  "bookway/gateway/job/slo-loadtest",
   "bookway/growth",
   "bookway/knowledge-catalog",
   "bookway/growth/bg/entry-publication-dispatcher",

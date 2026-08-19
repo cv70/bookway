@@ -27,6 +27,9 @@ pub(crate) fn candidate_from_content(
         score: 0.0,
         source: format!("recall:{source}"),
         reasons,
+        p_ctr: 0.0,
+        p_cvr: 0.0,
+        p_wegu: 0.0,
     })
 }
 
@@ -57,9 +60,62 @@ pub(crate) fn seen(values: &[String]) -> HashSet<String> {
     values.iter().cloned().collect()
 }
 
+/// A small, deterministic two-tower contract for the online recall stage.
+/// The user tower is an interest vector and the item tower is a domain vector;
+/// production model artifacts can replace the encoders without changing the
+/// candidate protocol or cursor semantics.
+pub(crate) fn apply_two_tower_score(candidate: &mut pb::Candidate, interests: &[i32]) {
+    let user_tower = user_tower(interests);
+    let item_tower = item_tower(candidate.post.as_ref());
+    let similarity = user_tower
+        .iter()
+        .zip(item_tower)
+        .map(|(user, item)| user * item)
+        .sum::<f64>();
+    candidate.recall_score = (0.75 * similarity
+        + 0.15 * candidate.quality_score.clamp(0.0, 1.0)
+        + 0.10 * candidate.freshness.clamp(0.0, 1.0))
+    .clamp(0.0, 1.0);
+    candidate.score = candidate.recall_score;
+    candidate.reasons.insert(0, "双塔语义召回".to_string());
+}
+
+fn user_tower(interests: &[i32]) -> [f64; 5] {
+    let mut vector = [0.2; 5];
+    for interest in interests {
+        if let Ok(index) = usize::try_from(*interest)
+            && let Some(value) = vector.get_mut(index)
+        {
+            *value += 0.8;
+        }
+    }
+    normalize(vector)
+}
+
+fn item_tower(post: Option<&bookway_bbs_link_api::pb::PostSummary>) -> [f64; 5] {
+    let mut vector = [0.0; 5];
+    if let Some(post) = post
+        && let Ok(index) = usize::try_from(post.domain)
+        && let Some(value) = vector.get_mut(index)
+    {
+        *value = 1.0;
+    }
+    normalize(vector)
+}
+
+fn normalize(mut vector: [f64; 5]) -> [f64; 5] {
+    let norm = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if norm > f64::EPSILON {
+        vector.iter_mut().for_each(|value| *value /= norm);
+    }
+    vector
+}
+
 #[cfg(test)]
 mod tests {
-    use super::recall_details;
+    use bookway_bbs_link_api::pb::{GrowthDomain, PostSummary};
+
+    use super::{apply_two_tower_score, recall_details};
 
     #[test]
     fn interest_source_boosts_matching_content_and_keeps_user_reason() {
@@ -75,5 +131,32 @@ mod tests {
 
         assert!((score - 0.8).abs() < f64::EPSILON);
         assert_eq!(reasons, ["来自关注时间流"]);
+    }
+
+    #[test]
+    fn two_tower_recall_prefers_the_user_interest_domain() {
+        let mut matching = super::candidate_from_content(
+            bookway_bbs_link_api::pb::Content {
+                post: Some(PostSummary {
+                    domain: GrowthDomain::Movement as i32,
+                    ..Default::default()
+                }),
+                quality_score: 0.4,
+                ..Default::default()
+            },
+            "two-tower",
+        )
+        .expect("candidate");
+        let mut unrelated = matching.clone();
+        unrelated.post.as_mut().unwrap().domain = GrowthDomain::Learning as i32;
+        apply_two_tower_score(&mut matching, &[GrowthDomain::Movement as i32]);
+        apply_two_tower_score(&mut unrelated, &[GrowthDomain::Movement as i32]);
+        assert!(matching.recall_score > unrelated.recall_score);
+        assert!(
+            matching
+                .reasons
+                .iter()
+                .any(|reason| reason == "双塔语义召回")
+        );
     }
 }

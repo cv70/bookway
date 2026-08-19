@@ -18,7 +18,7 @@
 - `BBS_SEARCH_ADDR`：默认 `127.0.0.1:8085`。
 - `BBS_LINK_GRPC_URL`：内容服务地址；生产环境在 `SERVICE_AUTH_REQUIRED=true` 下自动携带 `x-service-token`。
 - `OPENSEARCH_URL`：OpenSearch 地址；生产环境必须配置。
-- `OPENSEARCH_READ_ALIAS`：读取端使用的逻辑别名，例如 `bookway-content`。新生产部署必须显式配置。
+- `OPENSEARCH_READ_ALIAS`：读取端使用的逻辑别名，例如 `bookway-content`。配置 `OPENSEARCH_URL` 时必须显式配置。
 - `OPENSEARCH_WRITE_INDEX`：`bbs-indexer` 唯一可写的物理索引，例如 `bookway-content-v2`。Worker 在启动时通过 `_resolve/index` 验证它是精确的物理索引；别名和数据流会 fail-closed。
 - `OPENSEARCH_SHADOW_WRITE_INDEX`：仅在全量重建期间启用的第二个物理写索引。每个 Outbox 变更必须同时写入主、影子索引才会被确认，避免构建期间漏掉并发变更。
 - `OPENSEARCH_REBUILD_INDEX`：`search-index-rebuild` 的显式重建目标，通常与影子写索引相同。
@@ -28,7 +28,6 @@
 - `SEARCH_INDEX_RECONCILE_RUN_ID`：对账运行 ID。失败或中断后以同一 ID 续跑，任务从受限数据库内的持久检查点继续，不把游标内容 ID 输出到普通日志。
 - `SEARCH_INDEX_RECONCILE_LEASE_SECONDS`：新对账运行的租约，默认 `600` 秒；续跑沿用已持久化的原值，运行中的同一 ID 不可被并发接续。
 - `SEARCH_INDEX_RECOVERY_ACTION`：索引 Outbox 恢复任务的动作，默认只读 `report`；`requeue_dead` 必须同时设置具名操作者和恢复原因，才会把满足最小死信年龄的任务重新排队。
-- `OPENSEARCH_INDEX`：已弃用的兼容回退。未设置新变量时，读取端和索引器分别回退到它（默认 `bookway-content-v1`）；它即使指向别名也不会被作为写目标。
 
 `0022_search_sessions.sql` 必须在生产发布前执行；会话默认 5 分钟过期，创建会话时会利用 `idx_search_sessions_expiry` 清理已过期状态。
 

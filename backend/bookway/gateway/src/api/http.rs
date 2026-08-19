@@ -74,6 +74,7 @@ struct AdQuery {
     placement: String,
     route_id: String,
     action_node_id: String,
+    scene_equipment: String,
     domain: Option<String>,
     limit: Option<u32>,
 }
@@ -180,7 +181,6 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/admin/ads/campaigns/{campaign_id}",
             get(admin_ad_campaign).patch(admin_update_ad_campaign),
         )
-        .route("/v1/mall/products", get(mall_products))
         .route(
             "/v1/admin/mall/products",
             get(admin_mall_products).post(admin_create_mall_product),
@@ -193,7 +193,19 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/admin/routes/{route_id}/nodes/{action_node_id}/offers",
             post(admin_attach_mall_node_offer),
         )
-        .route("/v1/mall/products/{product_id}", get(mall_product))
+        .route("/v1/admin/mall/orders", get(admin_mall_orders))
+        .route(
+            "/v1/admin/mall/orders/{order_id}/fulfillment",
+            post(admin_update_mall_fulfillment),
+        )
+        .route(
+            "/v1/admin/mall/affiliate-settlements",
+            get(admin_affiliate_settlements),
+        )
+        .route(
+            "/v1/admin/mall/affiliate-settlements/{settlement_id}/settle",
+            post(admin_settle_affiliate),
+        )
         .route(
             "/v1/routes/{route_id}/nodes/{action_node_id}/offers",
             get(route_node_offers),
@@ -230,6 +242,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/media/{id}/complete", post(complete_media_upload))
         .route("/v1/posts", post(create_content))
         .route("/v1/posts/{id}", get(get_content).patch(update_content))
+        .route("/v1/posts/{id}/fork", post(fork_route))
         .route("/v1/posts/{id}/publish", post(publish_content))
         .route(
             "/v1/posts/{id}/knowledge",
@@ -946,6 +959,7 @@ async fn ad_decisions(
                 limit: query.limit,
                 route_id: query.route_id,
                 action_node_id: query.action_node_id,
+                scene_equipment: Some(query.scene_equipment),
             })
             .await?,
     )))
@@ -1016,22 +1030,6 @@ async fn admin_update_ad_campaign(
     )))
 }
 
-async fn mall_products(
-    State(state): State<AppState>,
-    Query(mut request): Query<mall_pb::ProductQueryRequest>,
-) -> Result<Json<ApiResponse<mall_pb::ProductPage>>, HttpError> {
-    request = public_product_query(request);
-    Ok(Json(ApiResponse::new(
-        state.domain.mall_products(request).await?,
-    )))
-}
-
-fn public_product_query(mut request: mall_pb::ProductQueryRequest) -> mall_pb::ProductQueryRequest {
-    request.merchant_id = None;
-    request.include_inactive = false;
-    request
-}
-
 async fn admin_mall_products(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1081,18 +1079,6 @@ async fn admin_attach_mall_node_offer(
     Ok((StatusCode::CREATED, Json(ApiResponse::new(offer))))
 }
 
-async fn mall_product(
-    State(state): State<AppState>,
-    Path(product_id): Path<String>,
-) -> Result<Json<ApiResponse<mall_pb::MallProduct>>, HttpError> {
-    Ok(Json(ApiResponse::new(
-        state
-            .domain
-            .mall_product(mall_pb::IdRequest { id: product_id })
-            .await?,
-    )))
-}
-
 async fn route_node_offers(
     State(state): State<AppState>,
     Path((route_id, action_node_id)): Path<(String, String)>,
@@ -1105,6 +1091,55 @@ async fn route_node_offers(
     };
     Ok(Json(ApiResponse::new(
         state.domain.mall_node_offers(request).await?,
+    )))
+}
+
+async fn admin_mall_orders(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut query): Query<mall_order_pb::MerchantOrderRequest>,
+) -> Result<Json<ApiResponse<mall_order_pb::MerchantOrderListResponse>>, HttpError> {
+    query.merchant_id = merchant_admin_id(&headers)?;
+    Ok(Json(ApiResponse::new(
+        state.domain.merchant_mall_orders(query).await?,
+    )))
+}
+
+async fn admin_update_mall_fulfillment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+    Json(mut request): Json<mall_order_pb::UpdateFulfillmentRequest>,
+) -> Result<Json<ApiResponse<mall_order_pb::Order>>, HttpError> {
+    request.merchant_id = merchant_admin_id(&headers)?;
+    request.order_id = order_id;
+    Ok(Json(ApiResponse::new(
+        state.domain.update_mall_fulfillment(request).await?,
+    )))
+}
+
+async fn admin_affiliate_settlements(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut query): Query<mall_order_pb::AffiliateSettlementRequest>,
+) -> Result<Json<ApiResponse<mall_order_pb::AffiliateSettlementListResponse>>, HttpError> {
+    query.merchant_id = merchant_admin_id(&headers)?;
+    Ok(Json(ApiResponse::new(
+        state.domain.affiliate_settlements(query).await?,
+    )))
+}
+
+async fn admin_settle_affiliate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(settlement_id): Path<String>,
+) -> Result<Json<ApiResponse<mall_order_pb::AffiliateSettlement>>, HttpError> {
+    let request = mall_order_pb::SettleAffiliateRequest {
+        merchant_id: merchant_admin_id(&headers)?,
+        settlement_id,
+    };
+    Ok(Json(ApiResponse::new(
+        state.domain.settle_affiliate(request).await?,
     )))
 }
 
@@ -1430,6 +1465,26 @@ async fn create_content(
         .domain
         .create_content(request.into_pb(user_id(&headers), idempotency_key(&headers)))
         .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            content.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
+}
+
+async fn fork_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(source_route_id): Path<String>,
+    Json(request): Json<rest::ForkRouteRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::Content>>), HttpError> {
+    let request = request.into_pb(
+        user_id(&headers),
+        source_route_id,
+        required_idempotency_key(&headers)?,
+    );
+    let content = state.domain.fork_route(request).await?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::new(
@@ -2091,6 +2146,12 @@ fn idempotency_key(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+fn required_idempotency_key(headers: &HeaderMap) -> Result<String, HttpError> {
+    idempotency_key(headers)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| HttpError::InvalidRequest("Idempotency-Key header is required".to_string()))
+}
+
 enum HttpError {
     Upstream(UpstreamError),
     InvalidRequest(String),
@@ -2165,9 +2226,9 @@ fn error_response(status: StatusCode, code: &'static str, message: String) -> Re
 mod tests {
     use super::{
         has_advertiser_admin_role, has_merchant_admin_role, has_moderator_role,
-        public_product_query,
+        required_idempotency_key, user_id,
     };
-    use bookway_mall_api::pb as mall_pb;
+    use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
     fn moderator_roles_are_explicitly_allowlisted() {
@@ -2194,13 +2255,19 @@ mod tests {
     }
 
     #[test]
-    fn public_product_query_cannot_request_merchant_drafts() {
-        let request = public_product_query(mall_pb::ProductQueryRequest {
-            merchant_id: Some("merchant-a".to_string()),
-            include_inactive: true,
-            ..Default::default()
-        });
-        assert_eq!(request.merchant_id, None);
-        assert!(!request.include_inactive);
+    fn fork_identity_and_idempotency_come_from_trusted_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-user-id", HeaderValue::from_static("member-1"));
+        headers.insert("idempotency-key", HeaderValue::from_static("fork-1"));
+
+        assert_eq!(user_id(&headers), "member-1");
+        let key = match required_idempotency_key(&headers) {
+            Ok(key) => key,
+            Err(_) => panic!("idempotency key is present"),
+        };
+        assert_eq!(key, "fork-1");
+
+        let missing_key = HeaderMap::new();
+        assert!(required_idempotency_key(&missing_key).is_err());
     }
 }

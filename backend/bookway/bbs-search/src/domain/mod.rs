@@ -667,6 +667,30 @@ fn content_suggestions(
                 1.0 + base,
             );
         }
+        if content.content_type == bbs_link_pb::ContentType::Route as i32 {
+            for action in content
+                .route_template
+                .iter()
+                .flat_map(|template| &template.actions)
+            {
+                push_suggestion(
+                    &mut items,
+                    &query,
+                    &action.title,
+                    pb::SearchResultType::Journey,
+                    1.2 + base,
+                );
+                for equipment in &action.scene_equipment {
+                    push_suggestion(
+                        &mut items,
+                        &query,
+                        equipment,
+                        pb::SearchResultType::Journey,
+                        1.1 + base,
+                    );
+                }
+            }
+        }
     }
     items
 }
@@ -771,7 +795,12 @@ fn content_results(
         })
         .filter_map(|content| {
             let post = content.post.as_ref()?;
-            let metadata = format!("{} {}", post.tags.join(" "), content.topics.join(" "));
+            let metadata = format!(
+                "{} {} {}",
+                post.tags.join(" "),
+                content.topics.join(" "),
+                route_action_search_context(content),
+            );
             let (mut score, highlights) = if source_ranked {
                 // A revalidated OpenSearch hit may match its current body,
                 // which is deliberately absent from the compact public read.
@@ -813,6 +842,26 @@ fn content_results(
             })
         })
         .collect()
+}
+
+// Route actions are first-class search context. This mirrors the flattened
+// OpenSearch document fields so fallback reads can find the same routes when
+// OpenSearch is unavailable.
+fn route_action_search_context(content: &bbs_link_pb::Content) -> String {
+    content
+        .route_template
+        .iter()
+        .flat_map(|template| &template.actions)
+        .flat_map(|action| {
+            std::iter::once(action.id.as_str())
+                .chain(std::iter::once(action.title.as_str()))
+                .chain(std::iter::once(action.detail.as_str()))
+                .chain(std::iter::once(action.scheduled_label.as_str()))
+                .chain(action.scene_equipment.iter().map(String::as_str))
+        })
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn user_results(contents: &[&bbs_link_pb::Content], query: &str) -> Vec<pb::SearchResult> {
@@ -1622,6 +1671,39 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn fallback_search_matches_route_action_nodes_and_equipment() {
+        let mut route = content("route-1", "领路人", "力量入门路线", "训练");
+        route.content_type = bbs_link_pb::ContentType::Route as i32;
+        route.route_template = Some(bbs_link_pb::RouteTemplate {
+            actions: vec![bbs_link_pb::RouteTemplateAction {
+                id: "action-kettlebell".to_string(),
+                title: "壶铃硬拉".to_string(),
+                detail: "用壶铃完成基础髋铰链".to_string(),
+                scheduled_label: "周二".to_string(),
+                scene_equipment: vec!["壶铃".to_string(), "瑜伽垫".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let service = SearchService::new(Arc::new(StaticSearchSource {
+            items: vec![route],
+            degraded: false,
+        }));
+
+        for query in ["壶铃", "action-kettlebell"] {
+            let response = service
+                .search(request(query, pb::SearchType::Journeys, None, None))
+                .await
+                .expect("route action context should be searchable");
+            assert_eq!(
+                response.items.first().map(|item| item.id.as_str()),
+                Some("route-1"),
+                "{query} should resolve the owning route"
+            );
+        }
+    }
+
     fn request(
         query: &str,
         search_type: pb::SearchType,
@@ -1692,6 +1774,7 @@ mod tests {
             route_template: None,
             milestone: None,
             accepted_answer_id: None,
+            route_fork: None,
         }
     }
 

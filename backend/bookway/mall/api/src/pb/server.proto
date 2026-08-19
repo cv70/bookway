@@ -96,6 +96,13 @@ message NodeOffer {
   string creator_id = 6;
   uint32 commission_bps = 7;
   string created_at = 8;
+  // Equipment is part of the action context, never an optional marketing tag.
+  string scene_equipment = 9;
+  // Public offer queries resolve display data here so clients cannot fall back
+  // to a context-free catalog endpoint.
+  optional MallProduct product = 10;
+  // Immutable merchant ownership used by order and settlement snapshots.
+  string merchant_id = 11;
 }
 
 message AttachNodeOfferRequest {
@@ -107,6 +114,7 @@ message AttachNodeOfferRequest {
   string creator_id = 6;
   uint32 commission_bps = 7;
   string idempotency_key = 8;
+  string scene_equipment = 9;
 }
 
 message NodeOfferQueryRequest {
@@ -125,5 +133,8 @@ service Mall {
   rpc Skus(SkuIdsRequest) returns (SkuListResponse);
   rpc AttachNodeOffer(AttachNodeOfferRequest) returns (NodeOffer);
   rpc NodeOffers(NodeOfferQueryRequest) returns (NodeOfferList);
+  // Checkout must resolve a currently public route action and declared scene
+  // equipment. Historical settlement reads use GetNodeOffer instead.
+  rpc GetCheckoutNodeOffer(IdRequest) returns (NodeOffer);
   rpc GetNodeOffer(IdRequest) returns (NodeOffer);
 }

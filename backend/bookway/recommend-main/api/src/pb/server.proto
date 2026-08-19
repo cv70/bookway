@@ -8,6 +8,9 @@ message FeedActionContext {
   string action_node_id = 2;
   string placement = 3;
   optional string domain = 4;
+  // Ads and offers are eligible only for the equipment selected in this
+  // action context. The route template remains the authoritative vocabulary.
+  optional string scene_equipment = 5;
 }
 message FeedRequest {
   string user_id = 1;
@@ -31,6 +34,7 @@ message FeedAd {
   string model_version = 9;
   string route_id = 10;
   string action_node_id = 11;
+  string scene_equipment = 12;
 }
 message FeedItem {
   string author_id = 1;

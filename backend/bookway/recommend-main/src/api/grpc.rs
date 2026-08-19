@@ -1,6 +1,10 @@
 use super::pb::{self, recommend_main_server::RecommendMain};
 use crate::domain::Domain;
+use std::{future::Future, time::Duration};
 use tonic::{Request, Response, Status};
+
+// Leave a small transport margin under the product's 150ms P99 objective.
+const FEED_REQUEST_BUDGET: Duration = Duration::from_millis(140);
 
 #[derive(Clone)]
 struct GrpcServer {
@@ -13,9 +17,8 @@ impl RecommendMain for GrpcServer {
         &self,
         request: Request<pb::FeedRequest>,
     ) -> Result<Response<pb::FeedResponse>, Status> {
-        Ok(Response::new(
-            self.domain.recommend(request.into_inner()).await,
-        ))
+        let response = within_feed_budget(self.domain.recommend(request.into_inner())).await?;
+        Ok(Response::new(response))
     }
 
     async fn validate_attributions(
@@ -38,6 +41,12 @@ impl RecommendMain for GrpcServer {
     }
 }
 
+async fn within_feed_budget<T>(operation: impl Future<Output = T>) -> Result<T, Status> {
+    tokio::time::timeout(FEED_REQUEST_BUDGET, operation)
+        .await
+        .map_err(|_| Status::deadline_exceeded("feed request exceeded the 140ms budget"))
+}
+
 pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
@@ -55,4 +64,24 @@ pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
         )
         .serve(domain.config.listen_addr)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::within_feed_budget;
+
+    #[tokio::test]
+    async fn feed_deadline_is_enforced_before_the_p99_limit() {
+        let result = within_feed_budget(async {
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        assert_eq!(
+            result
+                .expect_err("slow feed operation must time out")
+                .code(),
+            tonic::Code::DeadlineExceeded
+        );
+    }
 }

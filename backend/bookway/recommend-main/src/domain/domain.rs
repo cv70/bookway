@@ -15,11 +15,11 @@ use crate::{
         SharedExposureDataSource,
     },
     domain::pipeline::{
-        AuthorDiversityScorer, DefaultQueryHydrator, DiversitySelector, ExposureSideEffect,
-        FeedPipeline, FeedPipelineComponents, FollowingOnlyFilter, IntentScorer, QualityScorer,
-        ReactionContextHydrator, RecommendRanker, RecommendRecallSource, RouteContextHydrator,
-        SafetyFilter, SeenFilter, ServedHistoryHydrator, SocialContextHydrator,
-        SocialProofHydrator,
+        AuthorDiversityScorer, CoarseRanker, DefaultQueryHydrator, DiversitySelector,
+        ExposureSideEffect, FeedPipeline, FeedPipelineComponents, FollowingOnlyFilter,
+        IntentScorer, QualityScorer, ReactionContextHydrator, RecommendRanker,
+        RecommendRecallSource, RouteContextHydrator, SafetyFilter, SeenFilter,
+        ServedHistoryHydrator, SocialContextHydrator, SocialProofHydrator,
     },
 };
 
@@ -92,6 +92,7 @@ impl Domain {
                 Arc::new(IntentScorer),
                 Arc::new(AuthorDiversityScorer),
             ],
+            coarse_ranker: Arc::new(CoarseRanker),
             ranker: Some(Arc::new(RecommendRanker::new(
                 rank_client.clone(),
                 feature_client.clone(),

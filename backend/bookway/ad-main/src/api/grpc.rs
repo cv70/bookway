@@ -3,7 +3,9 @@
 use super::pb::{self, ad_main_server::AdMain};
 use crate::Domain;
 use bookway_ad_center_api::pb as center;
+use std::time::Duration;
 use tonic::{Request, Response, Status};
+const AD_REQUEST_BUDGET: Duration = Duration::from_millis(140);
 #[derive(Clone)]
 struct GrpcServer {
     domain: Domain,
@@ -14,12 +16,12 @@ impl AdMain for GrpcServer {
         &self,
         request: Request<pb::DecisionRequest>,
     ) -> Result<Response<pb::DecisionResponse>, Status> {
-        Ok(Response::new(
-            self.domain
-                .decide(request.into_inner())
+        let response =
+            tokio::time::timeout(AD_REQUEST_BUDGET, self.domain.decide(request.into_inner()))
                 .await
-                .map_err(ad_error)?,
-        ))
+                .map_err(|_| Status::deadline_exceeded("ad decision exceeded the 140ms budget"))?
+                .map_err(ad_error)?;
+        Ok(Response::new(response))
     }
     async fn report_event(
         &self,

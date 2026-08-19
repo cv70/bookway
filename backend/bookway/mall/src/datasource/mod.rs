@@ -180,6 +180,9 @@ impl CatalogRepository for MemoryCatalogRepository {
             creator_id: request.creator_id,
             commission_bps: request.commission_bps,
             created_at: timestamp(OffsetDateTime::now_utc()),
+            scene_equipment: request.scene_equipment,
+            product: None,
+            merchant_id: request.merchant_id,
         };
         idempotency.insert(request.idempotency_key, offer.id.clone());
         self.node_offers
@@ -193,6 +196,7 @@ impl CatalogRepository for MemoryCatalogRepository {
         request: pb::NodeOfferQueryRequest,
     ) -> Result<Vec<pb::NodeOffer>, RepositoryError> {
         let limit = usize::try_from(request.limit.unwrap_or(20).clamp(1, 50)).unwrap_or(50);
+        let products = self.products.read().await;
         let mut offers = self
             .node_offers
             .read()
@@ -200,7 +204,19 @@ impl CatalogRepository for MemoryCatalogRepository {
             .values()
             .filter(|offer| offer.route_id == request.route_id)
             .filter(|offer| offer.action_node_id == request.action_node_id)
-            .cloned()
+            .filter_map(|offer| {
+                let product = products.get(&offer.product_id)?;
+                let saleable = product.status == pb::MallProductStatus::Active as i32
+                    && product
+                        .skus
+                        .iter()
+                        .any(|sku| sku.id == offer.sku_id && sku.saleable);
+                saleable.then(|| {
+                    let mut offer = offer.clone();
+                    offer.product = Some(product.clone());
+                    offer
+                })
+            })
             .collect::<Vec<_>>();
         offers.sort_by(|left, right| left.id.cmp(&right.id));
         offers.truncate(limit);
@@ -366,7 +382,7 @@ impl CatalogRepository for PostgresCatalogRepository {
         }
         let id = Uuid::now_v7().to_string();
         let row = sqlx::query_as::<_, NodeOfferRow>(
-            "INSERT INTO mall_node_offers (id,merchant_id,product_id,sku_id,route_id,action_node_id,creator_id,commission_bps,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING id,product_id,sku_id,route_id,action_node_id,creator_id,commission_bps,created_at",
+            "INSERT INTO mall_node_offers (id,merchant_id,product_id,sku_id,route_id,action_node_id,scene_equipment,creator_id,commission_bps,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING id,merchant_id,product_id,sku_id,route_id,action_node_id,scene_equipment,creator_id,commission_bps,created_at",
         )
         .bind(id)
         .bind(request.merchant_id)
@@ -374,6 +390,7 @@ impl CatalogRepository for PostgresCatalogRepository {
         .bind(request.sku_id)
         .bind(request.route_id)
         .bind(request.action_node_id)
+        .bind(request.scene_equipment)
         .bind(request.creator_id)
         .bind(i32::try_from(request.commission_bps).map_err(|_| RepositoryError::Failed("commission exceeds supported range".to_string()))?)
         .bind(request.idempotency_key)
@@ -388,7 +405,7 @@ impl CatalogRepository for PostgresCatalogRepository {
     ) -> Result<Vec<pb::NodeOffer>, RepositoryError> {
         let limit = i64::from(request.limit.unwrap_or(20).clamp(1, 50));
         let rows = sqlx::query_as::<_, NodeOfferRow>(
-            "SELECT o.id,o.product_id,o.sku_id,o.route_id,o.action_node_id,o.creator_id,o.commission_bps,o.created_at FROM mall_node_offers o INNER JOIN mall_products p ON p.id=o.product_id INNER JOIN mall_skus s ON s.id=o.sku_id AND s.product_id=o.product_id WHERE o.route_id=$1 AND o.action_node_id=$2 AND p.status='active' AND s.saleable=true ORDER BY o.id LIMIT $3",
+            "SELECT o.id,o.merchant_id,o.product_id,o.sku_id,o.route_id,o.action_node_id,o.scene_equipment,o.creator_id,o.commission_bps,o.created_at FROM mall_node_offers o INNER JOIN mall_products p ON p.id=o.product_id INNER JOIN mall_skus s ON s.id=o.sku_id AND s.product_id=o.product_id WHERE o.route_id=$1 AND o.action_node_id=$2 AND p.status='active' AND s.saleable=true ORDER BY o.id LIMIT $3",
         )
         .bind(request.route_id)
         .bind(request.action_node_id)
@@ -396,13 +413,20 @@ impl CatalogRepository for PostgresCatalogRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(database)?;
-        Ok(rows.into_iter().map(NodeOfferRow::into_proto).collect())
+        let mut offers = Vec::with_capacity(rows.len());
+        for row in rows {
+            let product = self.load_internal(&row.product_id).await?;
+            let mut offer = row.into_proto();
+            offer.product = Some(product);
+            offers.push(offer);
+        }
+        Ok(offers)
     }
     async fn node_offer(&self, id: &str) -> Result<pb::NodeOffer, RepositoryError> {
         // Internal order settlement needs the original route association even
         // after a SKU is withdrawn; customer-facing NodeOffers remains active-only.
         let row = sqlx::query_as::<_, NodeOfferRow>(
-            "SELECT id,product_id,sku_id,route_id,action_node_id,creator_id,commission_bps,created_at FROM mall_node_offers WHERE id=$1",
+            "SELECT id,merchant_id,product_id,sku_id,route_id,action_node_id,scene_equipment,creator_id,commission_bps,created_at FROM mall_node_offers WHERE id=$1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -466,10 +490,12 @@ impl SkuRow {
 #[derive(FromRow)]
 struct NodeOfferRow {
     id: String,
+    merchant_id: String,
     product_id: String,
     sku_id: String,
     route_id: String,
     action_node_id: String,
+    scene_equipment: String,
     creator_id: String,
     commission_bps: i32,
     created_at: OffsetDateTime,
@@ -478,6 +504,7 @@ impl NodeOfferRow {
     fn into_proto(self) -> pb::NodeOffer {
         pb::NodeOffer {
             id: self.id,
+            merchant_id: self.merchant_id,
             product_id: self.product_id,
             sku_id: self.sku_id,
             route_id: self.route_id,
@@ -485,6 +512,8 @@ impl NodeOfferRow {
             creator_id: self.creator_id,
             commission_bps: self.commission_bps.max(0) as u32,
             created_at: timestamp(self.created_at),
+            scene_equipment: self.scene_equipment,
+            product: None,
         }
     }
 }
@@ -700,13 +729,14 @@ mod tests {
             .expect("product should be created");
         let request = pb::AttachNodeOfferRequest {
             merchant_id: "merchant-a".to_string(),
-            product_id: product.id,
+            product_id: product.id.clone(),
             sku_id: product.skus[0].id.clone(),
             route_id: "route-1".to_string(),
             action_node_id: "node-1".to_string(),
             creator_id: "creator-1".to_string(),
             commission_bps: 500,
             idempotency_key: "offer-key".to_string(),
+            scene_equipment: "trail-running shoes".to_string(),
         };
         let first = repository
             .attach_node_offer(request.clone())
@@ -718,6 +748,7 @@ mod tests {
             .expect("retry should return the same offer");
         assert_eq!(first.id, retry.id);
         assert_eq!(first.commission_bps, 500);
+        assert_eq!(first.scene_equipment, "trail-running shoes");
         let offers = repository
             .node_offers(pb::NodeOfferQueryRequest {
                 route_id: "route-1".to_string(),
@@ -726,6 +757,11 @@ mod tests {
             })
             .await
             .expect("node offers should be queryable");
-        assert_eq!(offers, vec![first]);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].id, first.id);
+        assert_eq!(
+            offers[0].product.as_ref().map(|product| &product.id),
+            Some(&product.id)
+        );
     }
 }

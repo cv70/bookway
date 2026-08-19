@@ -1,3 +1,4 @@
+mod coarse;
 mod filter;
 mod hydrator;
 mod query_hydrator;
@@ -21,6 +22,7 @@ use bookway_bbs_link_api::pb as bbs_link_pb;
 
 use crate::api::pb;
 
+pub(crate) use coarse::CoarseRanker;
 pub(crate) use filter::{DuplicateFilter, FollowingOnlyFilter, SafetyFilter, SeenFilter};
 pub(crate) use hydrator::{
     ReactionContextHydrator, RouteContextHydrator, ServedHistoryHydrator, SocialContextHydrator,
@@ -52,6 +54,9 @@ pub(crate) struct Candidate {
     pub(crate) author_id: String,
     pub(crate) status: i32,
     pub(crate) quality_score: f64,
+    // Retain the recall-stage signal separately from heuristic and model
+    // scores so every ranker receives the same retrieval evidence.
+    pub(crate) recall_score: f64,
     pub(crate) score: f64,
     pub(crate) source: String,
     pub(crate) reasons: Vec<String>,
@@ -154,6 +159,7 @@ pub(crate) struct FeedPipeline {
     hydrators: Vec<Arc<dyn CandidateHydrator>>,
     filters: Vec<Arc<dyn CandidateFilter>>,
     scorers: Vec<Arc<dyn CandidateScorer>>,
+    coarse_ranker: Arc<dyn CandidateSelector>,
     ranker: Option<Arc<dyn CandidateRanker>>,
     selector: Arc<dyn CandidateSelector>,
     post_selection_filters: Vec<Arc<dyn CandidateFilter>>,
@@ -166,6 +172,7 @@ pub(crate) struct FeedPipelineComponents {
     pub(crate) hydrators: Vec<Arc<dyn CandidateHydrator>>,
     pub(crate) filters: Vec<Arc<dyn CandidateFilter>>,
     pub(crate) scorers: Vec<Arc<dyn CandidateScorer>>,
+    pub(crate) coarse_ranker: Arc<dyn CandidateSelector>,
     pub(crate) ranker: Option<Arc<dyn CandidateRanker>>,
     pub(crate) selector: Arc<dyn CandidateSelector>,
     pub(crate) post_selection_filters: Vec<Arc<dyn CandidateFilter>>,
@@ -180,6 +187,7 @@ impl FeedPipeline {
             hydrators,
             filters,
             scorers,
+            coarse_ranker,
             ranker,
             selector,
             post_selection_filters,
@@ -191,6 +199,7 @@ impl FeedPipeline {
             hydrators,
             filters,
             scorers,
+            coarse_ranker,
             ranker,
             selector,
             post_selection_filters,
@@ -267,6 +276,11 @@ impl FeedPipeline {
                 for scorer in &self.scorers {
                     scorer.score(&query, &mut candidates);
                 }
+                // The coarse stage bounds expensive feature/model work while
+                // retaining a broad enough pool for the final diversity pass.
+                candidates = self
+                    .coarse_ranker
+                    .select(candidates, CoarseRanker::candidate_limit(query.limit));
             }
             if !candidates.is_empty()
                 && let Some(ranker) = &self.ranker
@@ -405,6 +419,7 @@ mod tests {
                     author_id: "author-1".to_string(),
                     status: ContentStatus::Published as i32,
                     quality_score: 0.0,
+                    recall_score: 1.0,
                     score: 1.0,
                     source: "test".to_string(),
                     reasons: Vec::new(),
@@ -479,6 +494,7 @@ mod tests {
             hydrators: vec![Arc::new(FailingHydrator(policy))],
             filters: Vec::new(),
             scorers: Vec::new(),
+            coarse_ranker: Arc::new(super::CoarseRanker),
             ranker: None,
             selector: Arc::new(DiversitySelector),
             post_selection_filters: Vec::new(),
@@ -493,6 +509,7 @@ mod tests {
             hydrators: Vec::new(),
             filters: Vec::new(),
             scorers: Vec::new(),
+            coarse_ranker: Arc::new(super::CoarseRanker),
             ranker: None,
             selector: Arc::new(DiversitySelector),
             post_selection_filters: Vec::new(),
@@ -589,6 +606,7 @@ mod tests {
             author_id: author_id.to_string(),
             status: ContentStatus::Published as i32,
             quality_score: 0.0,
+            recall_score: score,
             score,
             source: "test".to_string(),
             reasons: Vec::new(),

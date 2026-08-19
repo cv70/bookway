@@ -80,7 +80,7 @@ impl Domain {
     ) -> Result<pb::ListNodeResourcesResponse, DomainError> {
         let route_id = bounded_required("route_id", &request.route_id, 160)?;
         let action_node_id = bounded_required("action_node_id", &request.action_node_id, 160)?;
-        self.validate_public_action_node(&route_id, &action_node_id)
+        self.validate_public_action_node(&route_id, &action_node_id, None)
             .await?;
         Ok(self
             .repository
@@ -94,11 +94,11 @@ impl Domain {
     ) -> Result<pb::RouteNodeResourceAttachment, DomainError> {
         let route_id = bounded_required("route_id", &request.route_id, 160)?;
         let action_node_id = bounded_required("action_node_id", &request.action_node_id, 160)?;
-        self.validate_public_action_node(&route_id, &action_node_id)
-            .await?;
         let resource_id = bounded_required("resource_id", &request.resource_id, 160)?;
         let idempotency_key = bounded_required("idempotency_key", &request.idempotency_key, 220)?;
         let created_by = bounded_required("created_by", &request.created_by, 160)?;
+        self.validate_public_action_node(&route_id, &action_node_id, Some(&created_by))
+            .await?;
         let kind = pb::AttachmentKind::try_from(request.kind)
             .ok()
             .filter(|kind| *kind != pb::AttachmentKind::Unspecified)
@@ -141,8 +141,8 @@ impl Domain {
         let route_id = bounded_required("route_id", &request.route_id, 160)?;
         let action_node_id = bounded_required("action_node_id", &request.action_node_id, 160)?;
         let attachment_id = bounded_required("attachment_id", &request.attachment_id, 160)?;
-        let _operator_id = bounded_required("operator_id", &request.operator_id, 160)?;
-        self.validate_public_action_node(&route_id, &action_node_id)
+        let operator_id = bounded_required("operator_id", &request.operator_id, 160)?;
+        self.validate_public_action_node(&route_id, &action_node_id, Some(&operator_id))
             .await?;
         Ok(pb::DetachNodeResourceResponse {
             detached: self
@@ -159,7 +159,7 @@ impl Domain {
         let route_id = bounded_required("route_id", &request.route_id, 160)?;
         let action_node_id = bounded_required("action_node_id", &request.action_node_id, 160)?;
         let question = bounded_required("question", &request.question, 600)?;
-        self.validate_public_action_node(&route_id, &action_node_id)
+        self.validate_public_action_node(&route_id, &action_node_id, None)
             .await?;
         let limit = usize::try_from(request.limit.unwrap_or(6).clamp(1, 12)).unwrap_or(6);
         let mut contexts = self
@@ -200,6 +200,7 @@ impl Domain {
         &self,
         route_id: &str,
         action_node_id: &str,
+        expected_owner_id: Option<&str>,
     ) -> Result<(), DomainError> {
         let Some(client) = &self.bbs_link else {
             return Ok(());
@@ -220,20 +221,33 @@ impl Domain {
                 _ => DomainError::Upstream(error.to_string()),
             })?
             .into_inner();
-        if route.content_type != bbs_link::ContentType::Route as i32
-            || !route.route_template.as_ref().is_some_and(|template| {
-                template
-                    .actions
-                    .iter()
-                    .any(|action| action.id == action_node_id)
-            })
-        {
-            return Err(DomainError::Validation(
-                "resource attachment must target an action node on a public route".to_string(),
-            ));
-        }
-        Ok(())
+        validate_route_action_node(&route, action_node_id, expected_owner_id)
     }
+}
+
+fn validate_route_action_node(
+    route: &bbs_link::Content,
+    action_node_id: &str,
+    expected_owner_id: Option<&str>,
+) -> Result<(), DomainError> {
+    if route.content_type != bbs_link::ContentType::Route as i32
+        || !route.route_template.as_ref().is_some_and(|template| {
+            template
+                .actions
+                .iter()
+                .any(|action| action.id == action_node_id)
+        })
+    {
+        return Err(DomainError::Validation(
+            "resource attachment must target an action node on a public route".to_string(),
+        ));
+    }
+    if expected_owner_id.is_some_and(|owner_id| route.author_id != owner_id) {
+        return Err(DomainError::Validation(
+            "only the route author may attach or detach node resources".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn bounded_required(name: &str, value: &str, max_chars: usize) -> Result<String, DomainError> {
@@ -275,12 +289,57 @@ fn rag_relevance(
         resource.topics.join(" ")
     )
     .to_lowercase();
-    let matches = question
-        .split_whitespace()
-        .map(str::to_lowercase)
-        .filter(|term| term.len() > 1 && haystack.contains(term))
+    let matches = rag_terms(question)
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
         .count();
     matches as f64 + f64::from((-attachment.sort_rank).max(0)) / 10_000.0
+}
+
+fn rag_terms(value: &str) -> Vec<String> {
+    let mut terms = std::collections::BTreeSet::new();
+    let mut ascii_word = String::new();
+    let mut cjk_run = Vec::new();
+    let flush_ascii = |word: &mut String, terms: &mut std::collections::BTreeSet<String>| {
+        if word.len() > 1 {
+            terms.insert(std::mem::take(word));
+        } else {
+            word.clear();
+        }
+    };
+    let flush_cjk = |run: &mut Vec<char>, terms: &mut std::collections::BTreeSet<String>| {
+        if run.len() == 1 {
+            terms.insert(run[0].to_string());
+        } else {
+            for pair in run.windows(2) {
+                terms.insert(pair.iter().collect());
+            }
+        }
+        run.clear();
+    };
+
+    for character in value.to_lowercase().chars() {
+        if character.is_ascii_alphanumeric() {
+            flush_cjk(&mut cjk_run, &mut terms);
+            ascii_word.push(character);
+        } else if is_cjk(character) {
+            flush_ascii(&mut ascii_word, &mut terms);
+            cjk_run.push(character);
+        } else {
+            flush_ascii(&mut ascii_word, &mut terms);
+            flush_cjk(&mut cjk_run, &mut terms);
+        }
+    }
+    flush_ascii(&mut ascii_word, &mut terms);
+    flush_cjk(&mut cjk_run, &mut terms);
+    terms.into_iter().collect()
+}
+
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+    )
 }
 
 fn rag_excerpt(attachment: &pb::RouteNodeResourceAttachment, resource: &pb::Resource) -> String {
@@ -296,9 +355,12 @@ fn rag_excerpt(attachment: &pb::RouteNodeResourceAttachment, resource: &pb::Reso
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use bookway_bbs_link_api::pb as bbs_link;
     use bookway_knowledge_catalog_api::pb;
 
-    use super::{Domain, bounded_required, stable_token};
+    use super::{
+        Domain, bounded_required, rag_relevance, stable_token, validate_route_action_node,
+    };
     use crate::domain::DomainError;
     use crate::{conf::Config, datasource::MemoryResourceRepository};
 
@@ -318,6 +380,55 @@ mod tests {
     fn route_node_embedding_collection_is_safe_for_identifiers() {
         assert_eq!(stable_token("route/one"), "route_one");
         assert_eq!(stable_token("node-1_v2"), "node-1_v2");
+    }
+
+    #[test]
+    fn node_resource_mutations_require_the_public_route_author() {
+        let route = bbs_link::Content {
+            author_id: "route-author".to_string(),
+            content_type: bbs_link::ContentType::Route as i32,
+            route_template: Some(bbs_link::RouteTemplate {
+                actions: vec![bbs_link::RouteTemplateAction {
+                    id: "action-1".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        validate_route_action_node(&route, "action-1", Some("route-author"))
+            .expect("route author may mutate an attached resource");
+        assert!(matches!(
+            validate_route_action_node(&route, "action-1", Some("another-user")),
+            Err(DomainError::Validation(message))
+                if message == "only the route author may attach or detach node resources"
+        ));
+        assert!(matches!(
+            validate_route_action_node(&route, "missing-action", Some("route-author")),
+            Err(DomainError::Validation(message))
+                if message == "resource attachment must target an action node on a public route"
+        ));
+    }
+
+    #[test]
+    fn rag_lexical_fallback_ranks_cjk_terms_without_whitespace() {
+        let attachment = pb::RouteNodeResourceAttachment::default();
+        let running = pb::Resource {
+            title: "跑步装备清单".to_string(),
+            summary: "适合入门跑步训练的鞋服与补给选择。".to_string(),
+            ..Default::default()
+        };
+        let reading = pb::Resource {
+            title: "阅读复盘方法".to_string(),
+            summary: "建立长期阅读与笔记习惯。".to_string(),
+            ..Default::default()
+        };
+
+        assert!(
+            rag_relevance("跑步装备怎么选", &attachment, &running)
+                > rag_relevance("跑步装备怎么选", &attachment, &reading)
+        );
     }
 
     #[tokio::test]

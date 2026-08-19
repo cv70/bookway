@@ -66,11 +66,27 @@ export function useMerchantAdmin(notify: (message: string) => void) {
   useEffect(() => {
     if (!isMerchantAdminApiConfigured()) return;
     let cancelled = false;
-    merchantAdminApi
-      .listProducts()
-      .then(({ items }) => {
+    Promise.all([merchantAdminApi.listProducts(), merchantAdminApi.listOrders()])
+      .then(([catalog, remoteOrders]) => {
         if (cancelled) return;
-        setProducts(productsFromMall(items));
+        setProducts(productsFromMall(catalog.items));
+        setOrders(
+          remoteOrders.items.map((order) => ({
+            id: order.id,
+            date: order.created_at,
+            product: order.items.map((item) => `${item.title} ×${item.quantity}`).join("、"),
+            recipient: "—",
+            city: "—",
+            amount: `¥${(order.total_cents / 100).toFixed(2)}`,
+            status:
+              order.fulfillment_status === 3
+                ? "已完成"
+                : order.fulfillment_status === 2
+                  ? "运输中"
+                  : "待发货",
+            tracking: order.tracking_number || undefined,
+          })),
+        );
         setRemoteStatus("ready");
         setRemoteMessage("");
       })
@@ -87,7 +103,7 @@ export function useMerchantAdmin(notify: (message: string) => void) {
     return () => {
       cancelled = true;
     };
-  }, [setProducts]);
+  }, [setProducts, setOrders]);
 
   useEffect(() => {
     setProducts((current) => {
@@ -294,12 +310,20 @@ export function useMerchantAdmin(notify: (message: string) => void) {
       `“${product.name}”可售库存已${quantity > 0 ? "增加" : "扣减"} ${Math.abs(quantity)} 件。`,
     );
   };
-  const confirmShip = (event: FormEvent<HTMLFormElement>) => {
+  const confirmShip = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!shippingOrder) return;
     const data = new FormData(event.currentTarget);
     const carrier = String(data.get("carrier") || "顺丰速运");
     const tracking = String(data.get("tracking") || "").trim();
+    if (isMerchantAdminApiConfigured()) {
+      try {
+        await merchantAdminApi.updateFulfillment(shippingOrder.id, 2, tracking);
+      } catch (error) {
+        notify(error instanceof AdminApiError ? error.message : "发货状态同步失败。");
+        return;
+      }
+    }
     setOrders((current) =>
       current.map((order) =>
         order.id === shippingOrder.id

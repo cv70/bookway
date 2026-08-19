@@ -336,6 +336,32 @@ pub mod bbs_link_client {
                 .insert(GrpcMethod::new("bookway.bbs.link.BbsLink", "AcceptAnswer"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn fork_route(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                ::bookway_bbs_link_api::pb::ForkRouteRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_bbs_link_api::pb::Content>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.link.BbsLink/ForkRoute",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.link.BbsLink", "ForkRoute"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -419,6 +445,13 @@ pub mod bbs_link_server {
         async fn accept_answer(
             &self,
             request: tonic::Request<::bookway_bbs_link_api::pb::AcceptAnswerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_bbs_link_api::pb::Content>,
+            tonic::Status,
+        >;
+        async fn fork_route(
+            &self,
+            request: tonic::Request<::bookway_bbs_link_api::pb::ForkRouteRequest>,
         ) -> std::result::Result<
             tonic::Response<::bookway_bbs_link_api::pb::Content>,
             tonic::Status,
@@ -963,6 +996,54 @@ pub mod bbs_link_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = AcceptAnswerSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.link.BbsLink/ForkRoute" => {
+                    #[allow(non_camel_case_types)]
+                    struct ForkRouteSvc<T: BbsLink>(pub Arc<T>);
+                    impl<
+                        T: BbsLink,
+                    > tonic::server::UnaryService<
+                        ::bookway_bbs_link_api::pb::ForkRouteRequest,
+                    > for ForkRouteSvc<T> {
+                        type Response = ::bookway_bbs_link_api::pb::Content;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                ::bookway_bbs_link_api::pb::ForkRouteRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BbsLink>::fork_route(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ForkRouteSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

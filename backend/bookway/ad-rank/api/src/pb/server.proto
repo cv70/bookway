@@ -2,6 +2,6 @@ syntax = "proto3";
 package bookway.ad.rank;
 import "ad-center/api/src/pb/server.proto";
 message RankedCampaign { bookway.ad.center.AdCampaign campaign = 1; double score = 2; }
-message RankRequest { string user_id = 1; string domain = 2; repeated bookway.ad.center.AdCampaign candidates = 3; string route_id = 4; string action_node_id = 5; }
+message RankRequest { string user_id = 1; string domain = 2; repeated bookway.ad.center.AdCampaign candidates = 3; string route_id = 4; string action_node_id = 5; string scene_equipment = 6; }
 message RankResponse { repeated RankedCampaign items = 1; string model_version = 2; bool degraded = 3; }
 service AdRank { rpc Rank(RankRequest) returns (RankResponse); }

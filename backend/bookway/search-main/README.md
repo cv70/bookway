@@ -20,7 +20,7 @@
 
 公开游标格式为 `sm1-{fingerprint}-{uuid}`，只包含查询、搜索类型、可信查看者和排序后的排除作者集合的指纹；游标不能跨查询、用户、搜索类型或可见性集合复用。
 
-会话保存各 recall 的 `bbs-search` 私有游标、候选 pending 队列、已见结果和退化状态，TTL 为 5 分钟。它不会把 OpenSearch PIT 或底层 `bbs-search` token 返回给客户端。每次从 pending 队列返回帖子或路线前，Search Main 都会以 1.5 秒预算向 `bbs-link` 批量回读权威公开摘要；已限制、删除或不再公开的 ID 会被丢弃，展示字段会以当前摘要重建，异常或不可信的摘要批次会失败关闭。用户和话题候选不经过内容回读。`0028_search_main_sessions.sql` 提供 PostgreSQL 存储；`STORAGE_MODE=memory` 用于本地演示。旧版 `v3-...` 单路游标会被安全地转为只含精确召回的新会话，下一页起返回 `sm1-...`。
+会话保存各 recall 的 `bbs-search` 私有游标、候选 pending 队列、已见结果和退化状态，TTL 为 5 分钟。它不会把 OpenSearch PIT 或底层 `bbs-search` token 返回给客户端。每次从 pending 队列返回帖子或路线前，Search Main 会批量回读 `bbs-link` 的权威公开摘要；已限制、删除或不再公开的 ID 会被丢弃，展示字段会以当前摘要重建，异常或不可信的摘要批次会失败关闭。用户和话题候选不经过内容回读。`0028_search_main_sessions.sql` 提供 PostgreSQL 存储；`STORAGE_MODE=memory` 用于本地演示。只接受当前 `sm1-...` 会话游标，其他版本均以 `INVALID_ARGUMENT` 拒绝。
 
 会话过期返回 `FAILED_PRECONDITION`，无效或不匹配游标返回 `INVALID_ARGUMENT`，存储和底层可用性故障返回 `UNAVAILABLE`。
 
@@ -52,7 +52,7 @@ cargo run -p bookway-search-evaluator
 
 ## 可观测性与边界
 
-完成日志只记录稳定查询 hash、召回变体数、调用数、候选数、耗时和降级状态，不记录搜索明文。每个 `bbs-search` 搜索或联想 RPC，以及 pending 内容的 `bbs-link` 权威回读，最多使用 1.5 秒预算；精确召回或内容回读超时以 `DEADLINE_EXCEEDED` 失败，扩展召回超时只标记 `degraded` 并保留精确结果。每个响应最多向底层取 8 个 recall page，单页最多返回 50 项，避免去重风暴或异常翻页放大下游压力。
+完成日志只记录稳定查询 hash、召回变体数、调用数、候选数、耗时和降级状态，不记录搜索明文。Search Main 的 gRPC 入口对搜索和联想统一执行 140ms 预算，为 150ms P99 留出传输余量；任一等待中的下游请求会随之取消。精确召回或内容回读超时以 `DEADLINE_EXCEEDED` 失败，扩展召回超时只标记 `degraded` 并保留精确结果。每个响应最多向底层取 8 个 recall page，单页最多返回 50 项，避免去重风暴或异常翻页放大下游压力。
 
 ## 接口与环境变量
 

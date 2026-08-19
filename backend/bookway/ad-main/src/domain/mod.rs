@@ -42,9 +42,14 @@ impl Domain {
             || request.placement.trim().is_empty()
             || request.route_id.trim().is_empty()
             || request.action_node_id.trim().is_empty()
+            || request
+                .scene_equipment
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
         {
             return Err(AdMainError::Validation(
-                "user_id, placement, route_id and action_node_id are required".to_string(),
+                "user_id, placement, route_id, action_node_id and scene_equipment are required"
+                    .to_string(),
             ));
         }
         let limit = request.limit.unwrap_or(1).clamp(
@@ -62,6 +67,7 @@ impl Domain {
                     limit: u32::try_from(limit.saturating_mul(4)).unwrap_or(u32::MAX),
                     route_id: request.route_id.clone(),
                     action_node_id: request.action_node_id.clone(),
+                    scene_equipment: request.scene_equipment.clone().unwrap_or_default(),
                 },
             )?)
             .await
@@ -77,6 +83,7 @@ impl Domain {
                     candidates: candidates.items,
                     route_id: request.route_id.clone(),
                     action_node_id: request.action_node_id.clone(),
+                    scene_equipment: request.scene_equipment.clone().unwrap_or_default(),
                 },
             )?)
             .await
@@ -100,6 +107,8 @@ impl Domain {
                     model_version: ranked.model_version.clone(),
                     route_id: campaign.route_id,
                     action_node_id: campaign.action_node_id,
+                    scene_equipment: campaign.scene_equipment,
+                    ecpm: item.score,
                 })
             })
             .collect::<Vec<_>>();
@@ -115,6 +124,7 @@ impl Domain {
                         campaign_ids: items.iter().map(|item| item.campaign_id.clone()).collect(),
                         route_id: request.route_id.clone(),
                         action_node_id: request.action_node_id.clone(),
+                        scene_equipment: request.scene_equipment.clone().unwrap_or_default(),
                     },
                 )?)
                 .await

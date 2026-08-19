@@ -587,6 +587,7 @@ export type RouteTemplateStage = Pick<JourneyStage, 'title' | 'detail' | 'comple
 
 export type RouteTemplateAction = Pick<Action, 'title' | 'detail' | 'estimated_minutes' | 'scheduled_label'> & {
   stage_index?: number;
+  scene_equipment?: string[];
 };
 
 export type RouteTemplate = {

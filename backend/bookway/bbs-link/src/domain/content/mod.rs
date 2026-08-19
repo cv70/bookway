@@ -190,10 +190,132 @@ impl Domain {
             milestone,
             accepted_answer_id: None,
             question_context,
+            route_fork: None,
         };
         Ok(normalize_content_summary(
             self.repository
                 .create(content, request.idempotency_key, request_fingerprint)
+                .await?,
+        ))
+    }
+
+    pub(crate) async fn fork_route(
+        &self,
+        request: pb::ForkRouteRequest,
+    ) -> Result<pb::Content, ContentError> {
+        let user_id = request.user_id.trim();
+        let source_route_id = request.source_route_id.trim();
+        let idempotency_key = request.idempotency_key.trim();
+        if user_id.is_empty() || source_route_id.is_empty() || idempotency_key.is_empty() {
+            return Err(ContentError::Validation(
+                "用户、来源路线和幂等键不能为空".to_string(),
+            ));
+        }
+        if idempotency_key.chars().count() > 200 {
+            return Err(ContentError::Validation(
+                "Fork 幂等键不能超过 200 个字符".to_string(),
+            ));
+        }
+
+        let source = self.get_public(source_route_id).await?;
+        if source.content_type != pb::ContentType::Route as i32 {
+            return Err(ContentError::Validation(
+                "只能 Fork 当前公开的路线".to_string(),
+            ));
+        }
+        if source.author_id == user_id {
+            return Err(ContentError::Validation(
+                "不能 Fork 自己的路线；请直接编辑原路线".to_string(),
+            ));
+        }
+        let source_post = source.post.as_ref().ok_or_else(|| {
+            ContentError::Repository(RepositoryError::InvalidContent(
+                "public route is missing its post summary".to_string(),
+            ))
+        })?;
+        let route_template =
+            validate_route_template(pb::ContentType::Route as i32, source.route_template.clone())?;
+        let title = request
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{}（分支）", source_post.title));
+        validate_text(&title, 1, 120, "Fork 路线标题")?;
+        let summary = request
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_string)
+            .unwrap_or_else(|| source_post.summary.clone());
+        validate_text(&summary, 0, 300, "Fork 路线摘要")?;
+        if source.body.trim().is_empty() {
+            return Err(ContentError::Validation(
+                "来源路线没有可 Fork 的正文".to_string(),
+            ));
+        }
+        let source_route_title = source_post.title.clone();
+        let source_domain = source_post.domain;
+        let source_duration = source_post.route_duration.clone();
+        let source_tags = source_post.tags.clone();
+        let source_route_id = source.id.clone();
+        let source_route_version = source.version;
+
+        let request_fingerprint = serde_json::to_string(&request)
+            .map_err(|error| ContentError::Validation(error.to_string()))?;
+        let id = Uuid::now_v7().to_string();
+        let forked_at = now_rfc3339();
+        let content = pb::Content {
+            id: id.clone(),
+            post: Some(pb::PostSummary {
+                id,
+                author_name: user_id.to_string(),
+                author_avatar_url: String::new(),
+                title: title.clone(),
+                summary,
+                domain: source_domain,
+                cover_url: String::new(),
+                route_title: title,
+                route_duration: source_duration,
+                join_count: 0,
+                like_count: 0,
+                freshness: 1.0,
+                tags: source_tags,
+                is_route: true,
+                is_milestone: false,
+                is_question: false,
+            }),
+            author_id: user_id.to_string(),
+            content_type: pb::ContentType::Route as i32,
+            status: pb::ContentStatus::Draft as i32,
+            body: source.body,
+            // Source media is owned by another author. A Fork copies public
+            // route structure and text, never an asset ownership reference.
+            media: Vec::new(),
+            topics: source.topics,
+            created_at: forked_at.clone(),
+            published_at: None,
+            version: 1,
+            quality_score: 0.0,
+            route_template,
+            milestone: None,
+            accepted_answer_id: None,
+            question_context: None,
+            route_fork: Some(pb::RouteFork {
+                source_route_id,
+                source_route_version,
+                source_route_title,
+                forked_at,
+            }),
+        };
+        Ok(normalize_content_summary(
+            self.repository
+                .create(
+                    content,
+                    Some(idempotency_key.to_string()),
+                    request_fingerprint,
+                )
                 .await?,
         ))
     }
@@ -233,12 +355,14 @@ impl Domain {
             content.topics = topics.values;
         }
         if let Some(route_template) = request.route_template {
-            let route_template = validate_route_template(content.content_type, Some(route_template))?;
+            let route_template =
+                validate_route_template(content.content_type, Some(route_template))?;
             if content.status == pb::ContentStatus::Published as i32
-                && action_node_ids(content.route_template.as_ref()) != action_node_ids(route_template.as_ref())
+                && action_node_commercial_context(content.route_template.as_ref())
+                    != action_node_commercial_context(route_template.as_ref())
             {
                 return Err(ContentError::Validation(
-                    "已发布路线不能变更行动节点；请新建路线版本".to_string(),
+                    "已发布路线不能变更行动节点或其场景装备；请新建路线版本".to_string(),
                 ));
             }
             content.route_template = route_template;
@@ -604,6 +728,9 @@ fn normalize_content_summary(mut content: pb::Content) -> pb::Content {
         content.accepted_answer_id = None;
         content.question_context = None;
     }
+    if !is_route {
+        content.route_fork = None;
+    }
     content
 }
 
@@ -757,6 +884,7 @@ fn validate_route_template(
                 "路线行动关联了不存在的阶段".to_string(),
             ));
         }
+        validate_scene_equipment(&action.scene_equipment)?;
     }
     let action_ids = template
         .actions
@@ -777,9 +905,9 @@ fn validate_action_node_id(value: &str) -> Result<(), ContentError> {
     if value.is_empty()
         || raw != value
         || value.chars().count() > 160
-        || !value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
     {
         return Err(ContentError::Validation(
             "路线行动节点 ID 只能包含字母、数字、-、_ 或 .，长度不超过 160".to_string(),
@@ -788,12 +916,43 @@ fn validate_action_node_id(value: &str) -> Result<(), ContentError> {
     Ok(())
 }
 
-fn action_node_ids(template: Option<&pb::RouteTemplate>) -> std::collections::BTreeSet<String> {
+fn action_node_commercial_context(
+    template: Option<&pb::RouteTemplate>,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
     template
         .into_iter()
         .flat_map(|template| template.actions.iter())
-        .map(|action| action.id.trim().to_string())
+        .map(|action| {
+            let equipment = action
+                .scene_equipment
+                .iter()
+                .map(|value| scene_equipment_key(value))
+                .collect();
+            (action.id.trim().to_string(), equipment)
+        })
         .collect()
+}
+
+fn validate_scene_equipment(values: &[String]) -> Result<(), ContentError> {
+    if values.len() > 12 {
+        return Err(ContentError::Validation(
+            "每个行动节点最多配置 12 项场景装备".to_string(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(values.len());
+    for value in values {
+        validate_text(value, 1, 80, "场景装备")?;
+        if value.trim() != value || !seen.insert(scene_equipment_key(value)) {
+            return Err(ContentError::Validation(
+                "场景装备必须去重且不能包含首尾空白".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn scene_equipment_key(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 fn validate_text(
@@ -923,6 +1082,28 @@ mod tests {
         }
     }
 
+    fn route_template() -> pb::RouteTemplate {
+        pb::RouteTemplate {
+            intent: "用小步建立阅读节奏".to_string(),
+            completion_criteria: "完成四周的主题阅读和三次复盘".to_string(),
+            stages: vec![pb::RouteTemplateStage {
+                title: "起步".to_string(),
+                detail: "先找到可持续的时段".to_string(),
+                completion_criteria: "完成三次阅读".to_string(),
+            }],
+            actions: vec![pb::RouteTemplateAction {
+                id: "read-20".to_string(),
+                title: "读二十分钟".to_string(),
+                detail: "只标记一个有用观点".to_string(),
+                estimated_minutes: 20,
+                scheduled_label: "今晚".to_string(),
+                stage_index: Some(0),
+                scene_equipment: vec!["阅读灯".to_string()],
+            }],
+            journey_type: pb::RouteTemplateKind::Project as i32,
+        }
+    }
+
     #[tokio::test]
     async fn idempotency_returns_the_same_draft() {
         let service = domain();
@@ -936,6 +1117,88 @@ mod tests {
             .expect("retry create");
         assert_eq!(first.id, second.id);
         assert_eq!(first.status, pb::ContentStatus::Draft as i32);
+    }
+
+    #[tokio::test]
+    async fn fork_copies_a_public_route_snapshot_into_an_editable_draft() {
+        let service = domain();
+        let request = pb::ForkRouteRequest {
+            user_id: "user-a".to_string(),
+            source_route_id: "post-reading".to_string(),
+            idempotency_key: "fork-reading-1".to_string(),
+            title: Some("我自己的主题阅读分支".to_string()),
+            summary: None,
+        };
+
+        let first = service
+            .fork_route(request.clone())
+            .await
+            .expect("public route should be forkable");
+        let retry = service
+            .fork_route(request)
+            .await
+            .expect("fork retry should replay the draft");
+
+        assert_eq!(first.id, retry.id);
+        assert_eq!(first.author_id, "user-a");
+        assert_eq!(first.status, pb::ContentStatus::Draft as i32);
+        assert!(first.media.is_empty(), "a fork cannot copy another user's media");
+        assert_eq!(
+            first
+                .route_fork
+                .as_ref()
+                .map(|fork| fork.source_route_id.as_str()),
+            Some("post-reading")
+        );
+        assert_eq!(
+            first
+                .route_template
+                .as_ref()
+                .map(|template| template.actions[0].scene_equipment.as_slice()),
+            Some(["行动记录工具".to_string()].as_slice())
+        );
+        assert_eq!(
+            service
+                .get_public("post-reading")
+                .await
+                .expect("source remains public")
+                .author_id,
+            "author-yice"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_rejects_a_private_or_self_owned_route() {
+        let service = domain();
+        let private_route = service
+            .create(pb::CreateRequest {
+                content_type: pb::ContentType::Route as i32,
+                route_template: Some(route_template()),
+                ..create_request()
+            })
+            .await
+            .expect("draft route should be created");
+        let private_fork = service
+            .fork_route(pb::ForkRouteRequest {
+                user_id: "user-b".to_string(),
+                source_route_id: private_route.id,
+                idempotency_key: "fork-private-1".to_string(),
+                title: None,
+                summary: None,
+            })
+            .await;
+        assert!(matches!(private_fork, Err(ContentError::Repository(RepositoryError::NotFound(_)))));
+
+        let own_fork = service
+            .fork_route(pb::ForkRouteRequest {
+                user_id: "author-yice".to_string(),
+                source_route_id: "post-reading".to_string(),
+                idempotency_key: "fork-own-1".to_string(),
+                title: None,
+                summary: None,
+            })
+            .await;
+        assert!(matches!(own_fork, Err(ContentError::Validation(_))));
     }
 
     #[tokio::test]
@@ -1029,6 +1292,7 @@ mod tests {
             .create(pb::CreateRequest {
                 idempotency_key: Some("private-question-route-1".to_string()),
                 content_type: pb::ContentType::Route as i32,
+                route_template: Some(route_template()),
                 ..create_request()
             })
             .await
@@ -1133,6 +1397,7 @@ mod tests {
             .create(pb::CreateRequest {
                 idempotency_key: Some("private-route-create-1".to_string()),
                 content_type: pb::ContentType::Route as i32,
+                route_template: Some(route_template()),
                 ..create_request()
             })
             .await
@@ -1466,24 +1731,7 @@ mod tests {
 
     #[test]
     fn route_templates_require_valid_stages_and_actions() {
-        let template = pb::RouteTemplate {
-            intent: "用小步建立阅读节奏".to_string(),
-            completion_criteria: "完成四周的主题阅读和三次复盘".to_string(),
-            stages: vec![pb::RouteTemplateStage {
-                title: "起步".to_string(),
-                detail: "先找到可持续的时段".to_string(),
-                completion_criteria: "完成三次阅读".to_string(),
-            }],
-            actions: vec![pb::RouteTemplateAction {
-                id: "read-20".to_string(),
-                title: "读二十分钟".to_string(),
-                detail: "只标记一个有用观点".to_string(),
-                estimated_minutes: 20,
-                scheduled_label: "今晚".to_string(),
-                stage_index: Some(0),
-            }],
-            journey_type: pb::RouteTemplateKind::Project as i32,
-        };
+        let template = route_template();
         assert!(validate_route_template(pb::ContentType::Route as i32, Some(template)).is_ok());
         assert!(validate_route_template(pb::ContentType::Route as i32, None).is_err());
         assert!(
@@ -1492,6 +1740,13 @@ mod tests {
                 Some(pb::RouteTemplate::default()),
             )
             .is_err()
+        );
+        let mut duplicate_equipment = route_template();
+        duplicate_equipment.actions[0].scene_equipment =
+            vec!["阅读灯".to_string(), "阅读灯".to_string()];
+        assert!(
+            validate_route_template(pb::ContentType::Route as i32, Some(duplicate_equipment),)
+                .is_err()
         );
     }
 
@@ -1513,6 +1768,7 @@ mod tests {
                 estimated_minutes: 20,
                 scheduled_label: "今晚".to_string(),
                 stage_index: Some(0),
+                scene_equipment: vec!["阅读笔记本".to_string()],
             }],
             journey_type: pb::RouteTemplateKind::Habit as i32,
         };
@@ -1535,20 +1791,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_route_creation_receives_a_safe_single_action_template() {
+    async fn route_creation_requires_a_structured_action_template() {
         let service = domain();
-        let content = service
+        let result = service
             .create(pb::CreateRequest {
                 content_type: pb::ContentType::Route as i32,
                 ..create_request()
             })
-            .await
-            .expect("legacy route content should remain creatable");
-
-        let template = content
-            .route_template
-            .expect("a legacy template is generated");
-        assert_eq!(template.actions.len(), 1);
-        assert_eq!(template.actions[0].title, "一个新练习");
+            .await;
+        assert!(matches!(result, Err(ContentError::Validation(_))));
     }
 }

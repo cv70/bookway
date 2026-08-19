@@ -177,6 +177,16 @@ pub struct NodeOffer {
     pub commission_bps: u32,
     #[prost(string, tag = "8")]
     pub created_at: ::prost::alloc::string::String,
+    /// Equipment is part of the action context, never an optional marketing tag.
+    #[prost(string, tag = "9")]
+    pub scene_equipment: ::prost::alloc::string::String,
+    /// Public offer queries resolve display data here so clients cannot fall back
+    /// to a context-free catalog endpoint.
+    #[prost(message, optional, tag = "10")]
+    pub product: ::core::option::Option<MallProduct>,
+    /// Immutable merchant ownership used by order and settlement snapshots.
+    #[prost(string, tag = "11")]
+    pub merchant_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -197,6 +207,8 @@ pub struct AttachNodeOfferRequest {
     pub commission_bps: u32,
     #[prost(string, tag = "8")]
     pub idempotency_key: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub scene_equipment: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -481,6 +493,29 @@ pub mod mall_client {
                 .insert(GrpcMethod::new("bookway.mall.Mall", "NodeOffers"));
             self.inner.unary(req, path, codec).await
         }
+        /// Checkout must resolve a currently public route action and declared scene
+        /// equipment. Historical settlement reads use GetNodeOffer instead.
+        pub async fn get_checkout_node_offer(
+            &mut self,
+            request: impl tonic::IntoRequest<super::IdRequest>,
+        ) -> std::result::Result<tonic::Response<super::NodeOffer>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.mall.Mall/GetCheckoutNodeOffer",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.mall.Mall", "GetCheckoutNodeOffer"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn get_node_offer(
             &mut self,
             request: impl tonic::IntoRequest<super::IdRequest>,
@@ -545,6 +580,12 @@ pub mod mall_server {
             &self,
             request: tonic::Request<super::NodeOfferQueryRequest>,
         ) -> std::result::Result<tonic::Response<super::NodeOfferList>, tonic::Status>;
+        /// Checkout must resolve a currently public route action and declared scene
+        /// equipment. Historical settlement reads use GetNodeOffer instead.
+        async fn get_checkout_node_offer(
+            &self,
+            request: tonic::Request<super::IdRequest>,
+        ) -> std::result::Result<tonic::Response<super::NodeOffer>, tonic::Status>;
         async fn get_node_offer(
             &self,
             request: tonic::Request<super::IdRequest>,
@@ -920,6 +961,49 @@ pub mod mall_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = NodeOffersSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.mall.Mall/GetCheckoutNodeOffer" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCheckoutNodeOfferSvc<T: Mall>(pub Arc<T>);
+                    impl<T: Mall> tonic::server::UnaryService<super::IdRequest>
+                    for GetCheckoutNodeOfferSvc<T> {
+                        type Response = super::NodeOffer;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::IdRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Mall>::get_checkout_node_offer(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetCheckoutNodeOfferSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

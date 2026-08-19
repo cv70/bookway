@@ -10,7 +10,7 @@ use bookway_knowledge_catalog_api::pb::{
     self as catalog_pb, knowledge_catalog_client::KnowledgeCatalogClient,
 };
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -76,6 +76,9 @@ struct QueryRewriteCacheState {
 struct QueryRewriteCache {
     repository: SharedQueryRewriteRepository,
     state: RwLock<Option<QueryRewriteCacheState>>,
+    // Only one request refreshes the dictionary after expiry; concurrent
+    // readers reuse the refreshed state instead of stampeding the database.
+    refresh_lock: Mutex<()>,
 }
 
 impl QueryRewriteCache {
@@ -83,6 +86,7 @@ impl QueryRewriteCache {
         Self {
             repository,
             state: RwLock::new(None),
+            refresh_lock: Mutex::new(()),
         }
     }
 
@@ -100,6 +104,20 @@ impl QueryRewriteCache {
                 None => None,
             }
         };
+        let _refresh_guard = self.refresh_lock.lock().await;
+        // Another request may have completed the refresh while this request
+        // waited for the singleflight lock.
+        {
+            let state = self.state.read().await;
+            if let Some(state) = state.as_ref()
+                && state.refreshed_at.elapsed() < QUERY_REWRITE_REFRESH_INTERVAL
+            {
+                return QueryRewriteResolution {
+                    dictionary: state.dictionary.clone(),
+                    degraded: state.degraded,
+                };
+            }
+        }
         match self.repository.active().await {
             Ok(Some(dictionary)) => match sanitize_dictionary(dictionary) {
                 Some(dictionary) => {
@@ -146,11 +164,6 @@ impl QueryRewriteCache {
             degraded: true,
         }
     }
-}
-
-enum PublicCursor {
-    New(String),
-    Legacy(String),
 }
 
 #[derive(Debug, Error)]
@@ -274,28 +287,14 @@ impl Domain {
             request.user_id.as_deref(),
             &request.excluded_author_ids,
         );
-        let cursor = parse_cursor(
-            request.cursor.as_deref(),
-            fingerprint,
-            &plan.original_query,
-            search_type,
-            request.user_id.as_deref(),
-            &request.excluded_author_ids,
-        )?;
-        let session_id = cursor.as_ref().and_then(|cursor| match cursor {
-            PublicCursor::New(id) => Some(id.clone()),
-            PublicCursor::Legacy(_) => None,
-        });
-        let mut session = match cursor {
-            Some(PublicCursor::New(id)) => self
+        let session_id = parse_cursor(request.cursor.as_deref(), fingerprint)?;
+        let mut session = match session_id.as_deref() {
+            Some(id) => self
                 .sessions
-                .load(&id)
+                .load(id)
                 .await?
                 .filter(|session| session.query_fingerprint == fingerprint)
                 .ok_or(SearchMainError::CursorExpired)?,
-            Some(PublicCursor::Legacy(source_cursor)) => {
-                legacy_session(fingerprint, plan.original_query.clone(), source_cursor)
-            }
             None => new_session(fingerprint, &plan),
         };
         session.degraded |= rewrite_resolution.degraded;
@@ -1009,24 +1008,6 @@ fn new_session(fingerprint: u64, plan: &SearchPlan) -> SearchPipelineSession {
     }
 }
 
-fn legacy_session(fingerprint: u64, query: String, source_cursor: String) -> SearchPipelineSession {
-    SearchPipelineSession {
-        query_fingerprint: fingerprint,
-        query_rewrite_version: "legacy-unversioned".to_string(),
-        recalls: vec![RecallState {
-            source: RecallSource::Bbs,
-            query,
-            source_cursor: Some(source_cursor),
-            exhausted: false,
-        }],
-        pending: Vec::new(),
-        seen_result_ids: HashSet::new(),
-        delivered_count: 0,
-        source_total_estimate: 0,
-        degraded: false,
-    }
-}
-
 fn all_recalls_exhausted(session: &SearchPipelineSession) -> bool {
     session.recalls.iter().all(|recall| recall.exhausted)
 }
@@ -1142,14 +1123,7 @@ fn make_cursor(fingerprint: u64, session_id: &str) -> String {
     format!("sm1-{fingerprint:016x}-{session_id}")
 }
 
-fn parse_cursor(
-    cursor: Option<&str>,
-    fingerprint: u64,
-    query: &str,
-    search_type: pb::SearchType,
-    viewer_id: Option<&str>,
-    excluded_author_ids: &[String],
-) -> Result<Option<PublicCursor>, SearchMainError> {
+fn parse_cursor(cursor: Option<&str>, fingerprint: u64) -> Result<Option<String>, SearchMainError> {
     let Some(cursor) = cursor else {
         return Ok(None);
     };
@@ -1166,39 +1140,9 @@ fn parse_cursor(
         if uuid::Uuid::parse_str(session_id).is_err() {
             return Err(invalid_cursor("搜索游标无效"));
         }
-        return Ok(Some(PublicCursor::New(session_id.to_string())));
-    }
-    if cursor.starts_with("v3-") {
-        validate_legacy_cursor(cursor, query, search_type, viewer_id, excluded_author_ids)?;
-        return Ok(Some(PublicCursor::Legacy(cursor.to_string())));
+        return Ok(Some(session_id.to_string()));
     }
     Err(invalid_cursor("搜索游标已过期，请重新搜索"))
-}
-
-fn validate_legacy_cursor(
-    cursor: &str,
-    query: &str,
-    search_type: pb::SearchType,
-    viewer_id: Option<&str>,
-    excluded_author_ids: &[String],
-) -> Result<(), SearchMainError> {
-    let Some(value) = cursor.strip_prefix("v3-") else {
-        return Err(invalid_cursor("搜索游标无效"));
-    };
-    let Some((cursor_fingerprint, session_id)) = value.split_once('-') else {
-        return Err(invalid_cursor("搜索游标无效"));
-    };
-    let expected = format!(
-        "{:016x}",
-        query_fingerprint(query, search_type, viewer_id, excluded_author_ids)
-    );
-    if cursor_fingerprint != expected {
-        return Err(invalid_cursor("搜索游标与当前查询不匹配"));
-    }
-    if uuid::Uuid::parse_str(session_id).is_err() {
-        return Err(invalid_cursor("搜索游标无效"));
-    }
-    Ok(())
 }
 
 fn invalid_cursor(message: &str) -> SearchMainError {
@@ -1507,6 +1451,13 @@ mod tests {
         async fn accept_answer(
             &self,
             _request: Request<bbs_link_pb::AcceptAnswerRequest>,
+        ) -> Result<Response<bbs_link_pb::Content>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
+
+        async fn fork_route(
+            &self,
+            _request: Request<bbs_link_pb::ForkRouteRequest>,
         ) -> Result<Response<bbs_link_pb::Content>, Status> {
             Err(Status::unimplemented("not used by Search Main"))
         }
@@ -2295,31 +2246,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_cursor_keeps_a_single_exact_recall_and_returns_sm1() {
+    async fn legacy_search_cursor_is_rejected() {
         let source = Arc::new(RecordingSearchSource::default());
-        let legacy_id = uuid::Uuid::now_v7();
-        let fingerprint = query_fingerprint("跑步", pb::SearchType::All, None, &[]);
-        let legacy_cursor = format!("v3-{fingerprint:016x}-{legacy_id}");
-        source
-            .respond(
-                "跑步",
-                Some(&legacy_cursor),
-                response(vec![item("a", "跑步", 1.0)], Some("v3-next")),
-            )
-            .await;
-        let service = service(source.clone()).await;
+        let service = service(source).await;
         let mut request = request("跑步");
-        request.cursor = Some(legacy_cursor);
-        request.limit = Some(1);
-        let result = service.search(request).await.expect("legacy page works");
-
-        assert!(
-            result
-                .next_cursor
-                .as_deref()
-                .is_some_and(|cursor| cursor.starts_with("sm1-"))
-        );
-        assert_eq!(source.requests.lock().await.len(), 1);
+        request.cursor =
+            Some("v3-0000000000000000-018f5e6e-f3e6-7b5f-8e16-5c93f8f5ba88".to_string());
+        assert!(matches!(
+            service.search(request).await,
+            Err(SearchMainError::InvalidCursor(_))
+        ));
     }
 
     #[tokio::test]

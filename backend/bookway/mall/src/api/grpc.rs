@@ -92,7 +92,18 @@ impl Mall for GrpcServer {
     ) -> Result<Response<pb::NodeOffer>, Status> {
         Ok(Response::new(
             self.domain
-                .node_offer(request.into_inner())
+                .settlement_node_offer(request.into_inner())
+                .await
+                .map_err(mall_error)?,
+        ))
+    }
+    async fn get_checkout_node_offer(
+        &self,
+        request: Request<pb::IdRequest>,
+    ) -> Result<Response<pb::NodeOffer>, Status> {
+        Ok(Response::new(
+            self.domain
+                .checkout_node_offer(request.into_inner())
                 .await
                 .map_err(mall_error)?,
         ))

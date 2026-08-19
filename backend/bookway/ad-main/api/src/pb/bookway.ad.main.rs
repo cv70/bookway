@@ -14,6 +14,8 @@ pub struct DecisionRequest {
     pub route_id: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "7")]
+    pub scene_equipment: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -40,6 +42,10 @@ pub struct AdDecision {
     pub route_id: ::prost::alloc::string::String,
     #[prost(string, tag = "11")]
     pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "12")]
+    pub scene_equipment: ::prost::alloc::string::String,
+    #[prost(double, tag = "13")]
+    pub ecpm: f64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

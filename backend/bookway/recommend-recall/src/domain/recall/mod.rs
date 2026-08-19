@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 use crate::domain::Domain;
 use crate::{api::pb, conf::SourceBlend};
 
-const CURSOR_V1_PREFIX: &str = "v1:";
 const CURSOR_V2_PREFIX: &str = "v2:";
 const MAX_CURSOR_BYTES: usize = 1_024;
 const MAX_FOLLOWING_AUTHORS: usize = 5_000;
@@ -29,7 +28,7 @@ impl Domain {
         let limit = (request.limit as usize).clamp(1, self.max_candidates);
         let seen = candidate::seen(&request.seen);
         let sources = recall_sources(&request.interests);
-        let cursor_states = decode_cursor(&request.cursor, &sources);
+        let cursor_states = decode_cursor(&request.cursor);
         let source_names = sources
             .iter()
             .map(|source| format!("recall:{}", source.name))
@@ -84,6 +83,13 @@ impl Domain {
                         if let Some(candidate) =
                             candidate::candidate_from_content(content, &source.name)
                         {
+                            let mut candidate = candidate;
+                            if source.name == "two-tower" {
+                                candidate::apply_two_tower_score(
+                                    &mut candidate,
+                                    &request.interests,
+                                );
+                            }
                             if !seen.contains(&candidate.content_id) {
                                 batch.push(SourcedCandidate {
                                     content_id: candidate.content_id.clone(),
@@ -187,19 +193,11 @@ impl Domain {
         }
         let source_cursor = cursor_states.get(&source.name).cloned().flatten();
         let mut client = self.content_client.clone();
-        let request = match bookway_runtime::grpc_service_request(bbs_link_pb::ListRequest {
-            cursor: source_cursor.clone(),
-            // Never advance past candidates that this chronological surface
-            // has not returned to its caller yet.
-            limit: Some(limit as u32),
-            status: Some(bbs_link_pb::ContentStatus::Published as i32),
-            strategy: Some(source.content_strategy.to_string()),
-            ids: None,
-            author_id: None,
-            content_type: None,
-            domain: None,
-            author_ids: following_author_ids,
-        }) {
+        let request = match bookway_runtime::grpc_service_request(following_list_request(
+            source_cursor.clone(),
+            limit,
+            following_author_ids,
+        )) {
             Ok(request) => request,
             Err(error) => {
                 tracing::warn!(%error, "following recall request could not be authenticated");
@@ -259,6 +257,26 @@ impl Domain {
     }
 }
 
+fn following_list_request(
+    cursor: Option<String>,
+    limit: usize,
+    following_author_ids: Vec<String>,
+) -> bbs_link_pb::ListRequest {
+    bbs_link_pb::ListRequest {
+        cursor,
+        // Never advance past candidates that this chronological surface
+        // has not returned to its caller yet.
+        limit: Some(limit as u32),
+        status: Some(bbs_link_pb::ContentStatus::Published as i32),
+        strategy: Some(following_recall_source().content_strategy.to_string()),
+        ids: None,
+        author_id: None,
+        content_type: None,
+        domain: None,
+        author_ids: following_author_ids,
+    }
+}
+
 #[derive(Clone)]
 struct RecallSource {
     name: String,
@@ -286,7 +304,7 @@ struct RecallCursor {
     following_author_set_fingerprint: Option<String>,
 }
 
-fn decode_cursor(cursor: &str, sources: &[RecallSource]) -> BTreeMap<String, Option<String>> {
+fn decode_cursor(cursor: &str) -> BTreeMap<String, Option<String>> {
     if cursor.trim().is_empty() {
         return BTreeMap::new();
     }
@@ -297,10 +315,7 @@ fn decode_cursor(cursor: &str, sources: &[RecallSource]) -> BTreeMap<String, Opt
         );
         return BTreeMap::new();
     }
-    if let Some(value) = cursor
-        .strip_prefix(CURSOR_V2_PREFIX)
-        .or_else(|| cursor.strip_prefix(CURSOR_V1_PREFIX))
-    {
+    if let Some(value) = cursor.strip_prefix(CURSOR_V2_PREFIX) {
         return serde_json::from_str::<RecallCursor>(value)
             .map(|cursor| cursor.sources)
             .unwrap_or_else(|error| {
@@ -308,12 +323,8 @@ fn decode_cursor(cursor: &str, sources: &[RecallSource]) -> BTreeMap<String, Opt
                 BTreeMap::new()
             });
     }
-    // Pre-v1 clients receive the same source offset for every source. This
-    // keeps an in-flight pagination chain usable during a rolling deployment.
-    sources
-        .iter()
-        .map(|source| (source.name.clone(), Some(cursor.to_string())))
-        .collect()
+    tracing::warn!("recall cursor uses an unsupported version; restarting recall");
+    BTreeMap::new()
 }
 
 fn encode_cursor(states: &BTreeMap<String, Option<String>>) -> String {
@@ -362,8 +373,8 @@ fn decode_following_cursor(
         return (BTreeMap::new(), true);
     }
     let Some(value) = cursor.strip_prefix(CURSOR_V2_PREFIX) else {
-        // A legacy, general-feed, or malformed cursor has no author-set
-        // binding, so it cannot safely continue a Following timeline.
+        // Any cursor without the current version and author-set binding cannot
+        // safely continue a Following timeline.
         return (BTreeMap::new(), true);
     };
     match serde_json::from_str::<RecallCursor>(value) {
@@ -385,6 +396,11 @@ fn recall_sources(interests: &[i32]) -> Vec<RecallSource> {
     let mut sources = vec![
         RecallSource {
             name: "quality".to_string(),
+            content_strategy: "quality",
+            domain: None,
+        },
+        RecallSource {
+            name: "two-tower".to_string(),
             content_strategy: "quality",
             domain: None,
         },
@@ -557,12 +573,13 @@ fn take_next_source_candidate(
 }
 
 fn is_exploration_source(source: &RecallSource) -> bool {
-    source.name == "fresh" || source.name.starts_with("interest:")
+    source.name == "fresh" || source.name == "two-tower" || source.name.starts_with("interest:")
 }
 
 fn source_mix_weight(source: &RecallSource) -> usize {
     match source.name.as_str() {
         "quality" => QUALITY_SOURCE_WEIGHT,
+        "two-tower" => 2,
         "fresh" => FRESH_SOURCE_WEIGHT,
         _ if source.name.starts_with("interest:") => 1,
         _ => 1,
@@ -609,150 +626,18 @@ fn domain_name(domain: bbs_link_pb::GrowthDomain) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{BTreeMap, HashMap},
-        sync::{Arc, Mutex},
-    };
+    use std::collections::{BTreeMap, HashMap};
 
-    use bookway_bbs_link_api::pb::{
-        self as bbs_link_pb, ContentStatus, GrowthDomain, bbs_link_client::BbsLinkClient,
-        bbs_link_server::BbsLink,
-    };
-    use tokio::net::TcpListener;
-    use tokio_stream::wrappers::TcpListenerStream;
-    use tonic::{
-        Request, Response, Status,
-        transport::{Endpoint, Server},
-    };
+    use bookway_bbs_link_api::pb::{GrowthDomain, bbs_link_client::BbsLinkClient};
+    use tonic::transport::Endpoint;
 
     use super::{
         Domain, SourcedCandidate, decode_cursor, decode_following_cursor, encode_cursor,
-        encode_following_cursor, following_author_set_fingerprint, following_recall_source,
-        merge_candidate, normalize_following_author_ids, recall_sources,
+        encode_following_cursor, following_author_set_fingerprint, following_list_request,
+        following_recall_source, merge_candidate, normalize_following_author_ids, recall_sources,
         select_source_mixed_candidates, sort_and_deduplicate_batch, source_is_exhausted,
     };
     use crate::{api::pb, conf::Config};
-
-    #[derive(Clone, Default)]
-    struct RecordingBbsLink {
-        list_requests: Arc<Mutex<Vec<bbs_link_pb::ListRequest>>>,
-    }
-
-    #[tonic::async_trait]
-    impl BbsLink for RecordingBbsLink {
-        async fn list(
-            &self,
-            request: Request<bbs_link_pb::ListRequest>,
-        ) -> Result<Response<bbs_link_pb::ContentPage>, Status> {
-            let request = request.into_inner();
-            self.list_requests
-                .lock()
-                .expect("recording BBS Link lock")
-                .push(request.clone());
-            let author_id = request
-                .author_ids
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "missing-author".to_string());
-            Ok(Response::new(bbs_link_pb::ContentPage {
-                items: vec![bbs_link_pb::Content {
-                    id: format!("post-{author_id}"),
-                    author_id: author_id.clone(),
-                    status: ContentStatus::Published as i32,
-                    post: Some(bbs_link_pb::PostSummary {
-                        id: format!("post-{author_id}"),
-                        freshness: 1.0,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }],
-                next_cursor: Some("page-2".to_string()),
-                total_estimate: 2,
-            }))
-        }
-
-        async fn get_public_summaries(
-            &self,
-            _request: Request<bbs_link_pb::PublicContentSummariesRequest>,
-        ) -> Result<Response<bbs_link_pb::PublicContentSummaries>, Status> {
-            Err(Status::unimplemented("not used by following recall"))
-        }
-
-        async fn get(
-            &self,
-            _request: Request<bbs_link_pb::IdRequest>,
-        ) -> Result<Response<bbs_link_pb::Content>, Status> {
-            Err(Status::unimplemented("not used by following recall"))
-        }
-
-        async fn get_public(
-            &self,
-            _request: Request<bbs_link_pb::IdRequest>,
-        ) -> Result<Response<bbs_link_pb::Content>, Status> {
-            Err(Status::unimplemented("not used by following recall"))
-        }
-
-        async fn create(
-            &self,
-            _request: Request<bbs_link_pb::CreateRequest>,
-        ) -> Result<Response<bbs_link_pb::Content>, Status> {
-            Err(Status::unimplemented("not used by following recall"))
-        }
-
-        async fn update(
-            &self,
-            _request: Request<bbs_link_pb::UpdateRequest>,
-        ) -> Result<Response<bbs_link_pb::Content>, Status> {
-            Err(Status::unimplemented("not used by following recall"))
-        }
-
-        async fn publish(
-            &self,
-            _request: Request<bbs_link_pb::PublishRequest>,
-        ) -> Result<Response<bbs_link_pb::Content>, Status> {
-            Err(Status::unimplemented("not used by following recall"))
-        }
-
-        async fn restrict(
-            &self,
-            _request: Request<bbs_link_pb::RestrictRequest>,
-        ) -> Result<Response<bbs_link_pb::Content>, Status> {
-            Err(Status::unimplemented("not used by following recall"))
-        }
-
-        async fn restore(
-            &self,
-            _request: Request<bbs_link_pb::RestoreRequest>,
-        ) -> Result<Response<bbs_link_pb::Content>, Status> {
-            Err(Status::unimplemented("not used by following recall"))
-        }
-
-        async fn accept_answer(
-            &self,
-            _request: Request<bbs_link_pb::AcceptAnswerRequest>,
-        ) -> Result<Response<bbs_link_pb::Content>, Status> {
-            Err(Status::unimplemented("not used by following recall"))
-        }
-    }
-
-    async fn recording_bbs_link() -> (RecordingBbsLink, String, tokio::task::JoinHandle<()>) {
-        let service = RecordingBbsLink::default();
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test BBS Link server");
-        let address = listener.local_addr().expect("test BBS Link address");
-        let server_service = service.clone();
-        let server = tokio::spawn(async move {
-            Server::builder()
-                .add_service(bbs_link_pb::bbs_link_server::BbsLinkServer::new(
-                    server_service,
-                ))
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-                .expect("serve test BBS Link");
-        });
-        (service, format!("http://{address}"), server)
-    }
 
     fn recall_domain(bbs_link_url: &str) -> Domain {
         Domain {
@@ -803,8 +688,8 @@ mod tests {
         let sources =
             recall_sources(&[GrowthDomain::Travel as i32, GrowthDomain::Travel as i32, 99]);
 
-        assert_eq!(sources.len(), 3);
-        assert_eq!(sources[2].domain, Some(GrowthDomain::Travel));
+        assert_eq!(sources.len(), 4);
+        assert_eq!(sources[3].domain, Some(GrowthDomain::Travel));
     }
 
     #[test]
@@ -980,27 +865,22 @@ mod tests {
         let sources = recall_sources(&[GrowthDomain::Learning as i32, GrowthDomain::Travel as i32]);
         let cursor = encode_cursor(&BTreeMap::from([
             ("quality".to_string(), Some("60".to_string())),
+            ("two-tower".to_string(), None),
             ("fresh".to_string(), None),
             ("interest:learning".to_string(), Some("20".to_string())),
         ]));
 
-        let states = decode_cursor(&cursor, &sources);
+        let states = decode_cursor(&cursor);
         assert_eq!(states["quality"].as_deref(), Some("60"));
         assert_eq!(states["interest:learning"].as_deref(), Some("20"));
-        assert!(source_is_exhausted(&states, &sources[1]));
-        assert!(!source_is_exhausted(&states, &sources[3]));
+        assert!(source_is_exhausted(&states, &sources[2]));
+        assert!(!source_is_exhausted(&states, &sources[4]));
     }
 
     #[test]
-    fn accepts_legacy_shared_cursors_during_rollout() {
-        let sources = recall_sources(&[GrowthDomain::Learning as i32]);
-        let states = decode_cursor("80", &sources);
-
-        assert!(
-            states
-                .values()
-                .all(|cursor| cursor.as_deref() == Some("80"))
-        );
+    fn unsupported_cursor_versions_restart_from_the_current_recall_contract() {
+        assert!(decode_cursor("80").is_empty());
+        assert!(decode_cursor("v1:{\"sources\":{}}").is_empty());
     }
 
     #[test]
@@ -1063,53 +943,35 @@ mod tests {
         assert!(reset);
         assert!(states.is_empty());
 
-        // A legacy offset has no author-set binding and must not be reused.
+        // An unversioned offset has no author-set binding and must not be reused.
         let (states, reset) = decode_following_cursor("20", &current_fingerprint);
         assert!(reset);
         assert!(states.is_empty());
     }
 
-    #[tokio::test]
-    async fn following_cursor_restart_uses_a_new_bbs_link_window_after_relationship_mutation() {
-        let (bbs_link, bbs_link_url, server) = recording_bbs_link().await;
-        let domain = recall_domain(&bbs_link_url);
-        let first_page = domain
-            .recall(pb::RecallRequest {
-                user_id: "reader-1".to_string(),
-                following_only: true,
-                following_author_ids: vec!["author-b".to_string(), "author-a".to_string()],
-                limit: 1,
-                ..Default::default()
-            })
-            .await;
-        assert!(!first_page.next_cursor.is_empty());
+    #[test]
+    fn following_cursor_restart_builds_a_new_bbs_link_window_after_relationship_mutation() {
+        let previous_authors =
+            normalize_following_author_ids(vec!["author-b".to_string(), "author-a".to_string()])
+                .expect("valid following authors");
+        let cursor = encode_following_cursor(
+            &BTreeMap::from([("following-fresh".to_string(), Some("page-2".to_string()))]),
+            &following_author_set_fingerprint(&previous_authors),
+        );
+        let current_authors =
+            normalize_following_author_ids(vec!["author-c".to_string(), "author-a".to_string()])
+                .expect("valid following authors");
+        let (states, reset) =
+            decode_following_cursor(&cursor, &following_author_set_fingerprint(&current_authors));
+        assert!(reset);
+        let request = following_list_request(
+            states.get("following-fresh").cloned().flatten(),
+            1,
+            current_authors,
+        );
 
-        let second_page = domain
-            .recall(pb::RecallRequest {
-                user_id: "reader-1".to_string(),
-                following_only: true,
-                following_author_ids: vec!["author-c".to_string(), "author-a".to_string()],
-                cursor: first_page.next_cursor,
-                limit: 1,
-                ..Default::default()
-            })
-            .await;
-
-        assert!(!second_page.degraded);
-        assert_eq!(second_page.candidates[0].author_id, "author-a");
-        let requests = bbs_link
-            .list_requests
-            .lock()
-            .expect("recording BBS Link lock")
-            .clone();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].author_ids, ["author-a", "author-b"]);
-        assert_eq!(requests[0].cursor, None);
-        assert_eq!(requests[1].author_ids, ["author-a", "author-c"]);
-        assert_eq!(requests[1].cursor, None);
-
-        server.abort();
-        let _ = server.await;
+        assert_eq!(request.author_ids, ["author-a", "author-c"]);
+        assert_eq!(request.cursor, None);
     }
 
     #[tokio::test]

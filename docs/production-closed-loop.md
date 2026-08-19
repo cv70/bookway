@@ -85,7 +85,8 @@ Feed 保持两个语义清晰的面：`home` 是探索型个性化发现，`foll
 复制路线正文或私有行动。Offer 只能引用在售 SKU，佣金限制在 0-3000 basis points，且
 通过幂等键创建。Gateway 只按路线节点读取当前在售 Offer。
 
-`mall-order` 在创建订单时回读 Offer，验证其 SKU 确实位于订单内，并固化
+`mall-order` 在创建订单时回读 Offer，只接受该 Offer 的单一 SKU，避免用一个
+Offer 伪装任意商品购物车，并固化
 `node_offer_id`、创作者和基于订单行金额计算的 `commission_cents`。客户端不能直接
 提交佣金或创作者身份；取消和过期订单不会产生结算。支付完成后的订单行和佣金快照
 是后续结算任务的唯一输入。受服务令牌保护的支付确认完成后，`mall-order` 以订单
@@ -93,8 +94,10 @@ Feed 保持两个语义清晰的面：`home` 是探索型个性化发现，`foll
 
 ### 广告体验护栏
 
-`ad-center` 保留 Campaign、预算、决策回执和曝光/点击事实；`ad-main` 仅编排召回和
-投放，`ad-rank` 以受版本控制的 `bid * pCTR * pCVR` 排序。Campaign 同时有用户级和
+`ad-center` 保留 Campaign、预算、决策回执和曝光/点击事实；每条广告必须绑定公开路线、
+Action Node 和该节点声明的 `scene_equipment`，召回、竞价、决策登记与回执都校验同一
+上下文；`ad-main` 仅编排召回和投放，`ad-rank` 以受版本控制的 `bid * pCTR * pCVR` 排序。
+Campaign 同时有用户级和
 全局日频控：每次曝光回执在 Campaign 锁内复核两个上限和预算，失败回执不消耗预算。
 广告只能由显式广告位请求并带可验证的 `request_id` 回执，不能覆盖基础行动、私密
 记录或数据导出路径。

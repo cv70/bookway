@@ -152,6 +152,7 @@ fn candidate_to_domain(candidate: recall::Candidate) -> Option<Candidate> {
         author_id: candidate.author_id,
         status: candidate.status,
         quality_score: candidate.quality_score,
+        recall_score: candidate.recall_score,
         score: candidate.recall_score,
         source: candidate.source,
         reasons: candidate.reasons,

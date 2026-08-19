@@ -69,6 +69,50 @@ impl MallOrder for GrpcServer {
                 .map_err(order_error)?,
         ))
     }
+    async fn merchant_orders(
+        &self,
+        request: Request<pb::MerchantOrderRequest>,
+    ) -> Result<Response<pb::MerchantOrderListResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .merchant_orders(request.into_inner())
+                .await
+                .map_err(order_error)?,
+        ))
+    }
+    async fn update_fulfillment(
+        &self,
+        request: Request<pb::UpdateFulfillmentRequest>,
+    ) -> Result<Response<pb::Order>, Status> {
+        Ok(Response::new(
+            self.domain
+                .update_fulfillment(request.into_inner())
+                .await
+                .map_err(order_error)?,
+        ))
+    }
+    async fn affiliate_settlements(
+        &self,
+        request: Request<pb::AffiliateSettlementRequest>,
+    ) -> Result<Response<pb::AffiliateSettlementListResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .affiliate_settlements(request.into_inner())
+                .await
+                .map_err(order_error)?,
+        ))
+    }
+    async fn settle_affiliate(
+        &self,
+        request: Request<pb::SettleAffiliateRequest>,
+    ) -> Result<Response<pb::AffiliateSettlement>, Status> {
+        Ok(Response::new(
+            self.domain
+                .settle_affiliate(request.into_inner())
+                .await
+                .map_err(order_error)?,
+        ))
+    }
 }
 pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();

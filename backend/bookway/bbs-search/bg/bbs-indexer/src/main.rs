@@ -6,7 +6,6 @@ use uuid::Uuid;
 const INDEXER_BATCH_SIZE: i64 = 500;
 const JOB_LEASE_SECONDS: i32 = 300;
 const MAX_ATTEMPTS: i32 = 10;
-const DEFAULT_WRITE_INDEX: &str = "bookway-content-v1";
 
 #[derive(Debug)]
 struct IndexJob {
@@ -29,13 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "http://127.0.0.1:9200".to_string())
         .trim_end_matches('/')
         .to_string();
-    let (write_indices, using_legacy_index) = configured_write_indices()?;
-    if using_legacy_index {
-        tracing::warn!(
-            write_index = %write_indices[0],
-            "OPENSEARCH_WRITE_INDEX is not configured; using deprecated OPENSEARCH_INDEX fallback"
-        );
-    }
+    let write_indices = configured_write_indices()?;
     for index in &write_indices {
         ensure_index(&client, &url, index).await?;
     }
@@ -70,18 +63,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn configured_write_indices() -> Result<(Vec<String>, bool), String> {
-    let (primary, using_legacy_index) = if let Some(index) = non_empty_env("OPENSEARCH_WRITE_INDEX")
-    {
-        (index, false)
-    } else {
-        (
-            non_empty_env("OPENSEARCH_INDEX").unwrap_or_else(|| DEFAULT_WRITE_INDEX.to_string()),
-            true,
-        )
-    };
+fn configured_write_indices() -> Result<Vec<String>, String> {
+    let primary = non_empty_env("OPENSEARCH_WRITE_INDEX")
+        .ok_or_else(|| "OPENSEARCH_WRITE_INDEX is required".to_string())?;
     write_indices(primary, non_empty_env("OPENSEARCH_SHADOW_WRITE_INDEX"))
-        .map(|indices| (indices, using_legacy_index))
 }
 
 fn write_indices(primary: String, shadow: Option<String>) -> Result<Vec<String>, String> {
@@ -316,6 +301,8 @@ fn index_operation(mut document: Value, status: &str) -> IndexOperation {
         .and_then(Value::as_object)
         .and_then(|post| post.get("domain"))
         .and_then(growth_domain_name);
+    let (route_action_ids, route_action_titles, route_action_details, route_scene_equipment) =
+        route_action_search_fields(&document);
     if let Some(object) = document.as_object_mut() {
         for (field, value) in fields {
             object.insert(field.to_string(), value);
@@ -333,8 +320,65 @@ fn index_operation(mut document: Value, status: &str) -> IndexOperation {
         if let Some(domain) = domain {
             object.insert("domain".to_string(), Value::String(domain.to_string()));
         }
+        // Flatten action nodes instead of using nested queries, because a
+        // search hit resolves to the public route, not to a detached action.
+        object.insert(
+            "route_action_ids".to_string(),
+            serde_json::json!(route_action_ids),
+        );
+        object.insert(
+            "route_action_titles".to_string(),
+            serde_json::json!(route_action_titles),
+        );
+        object.insert(
+            "route_action_details".to_string(),
+            serde_json::json!(route_action_details),
+        );
+        object.insert(
+            "route_scene_equipment".to_string(),
+            serde_json::json!(route_scene_equipment),
+        );
     }
     IndexOperation::Upsert(document)
+}
+
+fn route_action_search_fields(
+    document: &Value,
+) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+    let actions = document
+        .get("route_template")
+        .and_then(Value::as_object)
+        .and_then(|template| template.get("actions"))
+        .and_then(Value::as_array);
+    let mut ids = Vec::new();
+    let mut titles = Vec::new();
+    let mut details = Vec::new();
+    let mut equipment = Vec::new();
+    for action in actions.into_iter().flatten().filter_map(Value::as_object) {
+        append_non_empty(&mut ids, action.get("id"));
+        append_non_empty(&mut titles, action.get("title"));
+        append_non_empty(&mut details, action.get("detail"));
+        append_non_empty(&mut details, action.get("scheduled_label"));
+        for value in action
+            .get("scene_equipment")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            append_non_empty(&mut equipment, Some(value));
+        }
+    }
+    (ids, titles, details, equipment)
+}
+
+fn append_non_empty(values: &mut Vec<String>, value: Option<&Value>) {
+    if let Some(value) = value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        values.push(value.to_string());
+    }
 }
 
 fn content_type_name(value: &Value) -> Option<&'static str> {
@@ -346,17 +390,6 @@ fn content_type_name(value: &Value) -> Option<&'static str> {
             Some(3) => Some("route"),
             Some(4) => Some("milestone"),
             Some(5) => Some("question"),
-            _ => None,
-        },
-        // This keeps a rolling deployment compatible with any client that
-        // serializes the enum by name before producing an outbox document.
-        Value::String(value) => match value.as_str() {
-            "note" => Some("note"),
-            "article" => Some("article"),
-            "video" => Some("video"),
-            "route" => Some("route"),
-            "milestone" => Some("milestone"),
-            "question" => Some("question"),
             _ => None,
         },
         _ => None,
@@ -371,14 +404,6 @@ fn growth_domain_name(value: &Value) -> Option<&'static str> {
             Some(2) => Some("wellness"),
             Some(3) => Some("travel"),
             Some(4) => Some("leisure"),
-            _ => None,
-        },
-        Value::String(value) => match value.as_str() {
-            "learning" => Some("learning"),
-            "movement" => Some("movement"),
-            "wellness" => Some("wellness"),
-            "travel" => Some("travel"),
-            "leisure" => Some("leisure"),
             _ => None,
         },
         _ => None,
@@ -402,7 +427,7 @@ async fn ensure_index(client: &reqwest::Client, base_url: &str, index: &str) -> 
             exists.status()
         ));
     }
-    let body = serde_json::json!({ "settings": { "number_of_shards": 3, "number_of_replicas": 1, "analysis": { "analyzer": { "bookway_cjk": { "type": "cjk" } } } }, "mappings": { "dynamic": true, "properties": { "id": { "type": "text", "fields": { "keyword": { "type": "keyword" } } }, "title": { "type": "text", "analyzer": "bookway_cjk" }, "summary": { "type": "text", "analyzer": "bookway_cjk" }, "body": { "type": "text", "analyzer": "bookway_cjk" }, "status": { "type": "keyword" }, "author_id": { "type": "keyword" }, "content_type": { "type": "keyword" }, "domain": { "type": "keyword" }, "topics": { "type": "keyword" }, "tags": { "type": "keyword" } } } });
+    let body = serde_json::json!({ "settings": { "number_of_shards": 3, "number_of_replicas": 1, "analysis": { "analyzer": { "bookway_cjk": { "type": "cjk" } } } }, "mappings": { "dynamic": true, "properties": { "id": { "type": "text", "fields": { "keyword": { "type": "keyword" } } }, "title": { "type": "text", "analyzer": "bookway_cjk" }, "summary": { "type": "text", "analyzer": "bookway_cjk" }, "body": { "type": "text", "analyzer": "bookway_cjk" }, "route_action_ids": { "type": "keyword" }, "route_action_titles": { "type": "text", "analyzer": "bookway_cjk" }, "route_action_details": { "type": "text", "analyzer": "bookway_cjk" }, "route_scene_equipment": { "type": "text", "analyzer": "bookway_cjk" }, "status": { "type": "keyword" }, "author_id": { "type": "keyword" }, "content_type": { "type": "keyword" }, "domain": { "type": "keyword" }, "topics": { "type": "keyword" }, "tags": { "type": "keyword" } } } });
     let created = client
         .put(index_url)
         .json(&body)
@@ -530,8 +555,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        IndexOperation, index_operation, resolved_as_concrete_index, resource_url,
-        validate_index_name, versioned_document_url, write_indices,
+        IndexOperation, content_type_name, growth_domain_name, index_operation,
+        resolved_as_concrete_index, resource_url, validate_index_name, versioned_document_url,
+        write_indices,
     };
 
     #[test]
@@ -581,6 +607,43 @@ mod tests {
             panic!("published question should be indexed");
         };
         assert_eq!(document["content_type"], "question");
+    }
+
+    #[test]
+    fn published_route_projects_action_nodes_and_equipment_to_search_fields() {
+        let operation = index_operation(
+            json!({
+                "id": "route-1",
+                "content_type": 3,
+                "route_template": {
+                    "actions": [{
+                        "id": "action-kettlebell",
+                        "title": "Kettlebell deadlift",
+                        "detail": "Hinge practice",
+                        "scheduled_label": "Tuesday",
+                        "scene_equipment": ["kettlebell", "mat"]
+                    }]
+                },
+                "post": { "domain": 1 }
+            }),
+            "published",
+        );
+        let IndexOperation::Upsert(document) = operation else {
+            panic!("published route should be indexed");
+        };
+        assert_eq!(document["route_action_ids"], json!(["action-kettlebell"]));
+        assert_eq!(
+            document["route_action_titles"],
+            json!(["Kettlebell deadlift"])
+        );
+        assert_eq!(
+            document["route_action_details"],
+            json!(["Hinge practice", "Tuesday"])
+        );
+        assert_eq!(
+            document["route_scene_equipment"],
+            json!(["kettlebell", "mat"])
+        );
     }
 
     #[test]
@@ -648,5 +711,13 @@ mod tests {
             &json!({ "indices": [], "aliases": [{ "name": "bookway-content", "indices": ["bookway-content-v2"] }], "data_streams": [] }),
             "bookway-content"
         ));
+    }
+
+    #[test]
+    fn index_projection_accepts_only_current_protobuf_enum_values() {
+        assert_eq!(content_type_name(&json!(3)), Some("route"));
+        assert_eq!(growth_domain_name(&json!(2)), Some("wellness"));
+        assert_eq!(content_type_name(&json!("route")), None);
+        assert_eq!(growth_domain_name(&json!("wellness")), None);
     }
 }

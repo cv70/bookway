@@ -7,8 +7,8 @@ use thiserror::Error;
 use crate::{
     Config,
     datasource::{
-        CampaignRepository, EligibleQuery, MemoryCampaignRepository, PostgresCampaignRepository,
-        RepositoryError,
+        CampaignRepository, DecisionRegistration, EligibleQuery, MemoryCampaignRepository,
+        PostgresCampaignRepository, RepositoryError,
     },
 };
 
@@ -54,8 +54,12 @@ impl Domain {
         request: pb::CreateCampaignRequest,
     ) -> Result<pb::AdCampaign, AdCenterError> {
         validate_campaign(&request)?;
-        self.validate_public_action_node(&request.route_id, &request.action_node_id)
-            .await?;
+        self.validate_public_action_node(
+            &request.route_id,
+            &request.action_node_id,
+            &request.scene_equipment,
+        )
+        .await?;
         self.repository
             .create(request)
             .await
@@ -98,11 +102,32 @@ impl Domain {
                 "predicted CTR/CVR must be finite values between 0 and 1".to_string(),
             ));
         }
-        if let Some(status) = request.status {
-            pb::CampaignStatus::try_from(status)
-                .map_err(|_| AdCenterError::Validation("invalid campaign status".to_string()))?;
-        }
+        let requested_status = request
+            .status
+            .map(pb::CampaignStatus::try_from)
+            .transpose()
+            .map_err(|_| AdCenterError::Validation("invalid campaign status".to_string()))?;
         let campaign_id = request.campaign_id.clone();
+        let campaign = self
+            .repository
+            .get_for_advertiser(&campaign_id, &request.advertiser_id)
+            .await
+            .map_err(repository_error)?;
+        if needs_current_action_context(
+            request.scene_equipment.is_some(),
+            requested_status,
+            campaign.status,
+        ) {
+            self.validate_public_action_node(
+                &campaign.route_id,
+                &campaign.action_node_id,
+                request
+                    .scene_equipment
+                    .as_deref()
+                    .unwrap_or(&campaign.scene_equipment),
+            )
+            .await?;
+        }
         self.repository
             .update(&campaign_id, request)
             .await
@@ -147,9 +172,15 @@ impl Domain {
         &self,
         request: pb::EligibleRequest,
     ) -> Result<pb::CampaignList, AdCenterError> {
-        if request.user_id.trim().is_empty() || request.placement.trim().is_empty() {
+        if request.user_id.trim().is_empty()
+            || request.placement.trim().is_empty()
+            || request.route_id.trim().is_empty()
+            || request.action_node_id.trim().is_empty()
+            || request.scene_equipment.trim().is_empty()
+        {
             return Err(AdCenterError::Validation(
-                "user_id and placement are required".to_string(),
+                "user_id, placement, route, action node and scene equipment are required"
+                    .to_string(),
             ));
         }
         self.repository
@@ -159,6 +190,7 @@ impl Domain {
                 domain: &request.domain,
                 route_id: &request.route_id,
                 action_node_id: &request.action_node_id,
+                scene_equipment: &request.scene_equipment,
                 limit: usize::try_from(request.limit.clamp(1, 100)).unwrap_or(100),
             })
             .await
@@ -195,20 +227,26 @@ impl Domain {
         if request.user_id.trim().is_empty()
             || request.request_id.trim().is_empty()
             || request.placement.trim().is_empty()
+            || request.route_id.trim().is_empty()
+            || request.action_node_id.trim().is_empty()
+            || request.scene_equipment.trim().is_empty()
             || request.campaign_ids.is_empty()
             || request.campaign_ids.len() > 10
         {
             return Err(AdCenterError::Validation(
-                "user_id, request_id, placement and 1-10 campaign ids are required".to_string(),
+                "user_id, request_id, placement, route, action node and 1-10 campaign ids are required".to_string(),
             ));
         }
         self.repository
-            .register_decisions(
-                &request.user_id,
-                &request.request_id,
-                &request.placement,
-                request.campaign_ids,
-            )
+            .register_decisions(DecisionRegistration {
+                user_id: &request.user_id,
+                request_id: &request.request_id,
+                placement: &request.placement,
+                route_id: &request.route_id,
+                action_node_id: &request.action_node_id,
+                scene_equipment: &request.scene_equipment,
+                campaign_ids: request.campaign_ids,
+            })
             .await
             .map_err(repository_error)
     }
@@ -217,6 +255,7 @@ impl Domain {
         &self,
         route_id: &str,
         action_node_id: &str,
+        scene_equipment: &str,
     ) -> Result<(), AdCenterError> {
         let mut client = self.bbs_link.clone();
         let route = client
@@ -237,18 +276,42 @@ impl Domain {
                 "广告只能挂载到公开路线行动节点".to_string(),
             ));
         }
-        if !route.route_template.as_ref().is_some_and(|template| {
+        let action = route.route_template.as_ref().and_then(|template| {
             template
                 .actions
                 .iter()
-                .any(|action| action.id == action_node_id)
-        }) {
+                .find(|action| action.id == action_node_id)
+        });
+        let Some(action) = action else {
             return Err(AdCenterError::Validation(
                 "广告行动节点不属于该公开路线".to_string(),
+            ));
+        };
+        if !action
+            .scene_equipment
+            .iter()
+            .any(|value| scene_equipment_key(value) == scene_equipment_key(scene_equipment))
+        {
+            return Err(AdCenterError::Validation(
+                "广告场景装备未在行动节点中声明".to_string(),
             ));
         }
         Ok(())
     }
+}
+
+fn scene_equipment_key(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn needs_current_action_context(
+    updates_scene_equipment: bool,
+    requested_status: Option<pb::CampaignStatus>,
+    current_status: i32,
+) -> bool {
+    updates_scene_equipment
+        || requested_status == Some(pb::CampaignStatus::Active)
+        || current_status == pb::CampaignStatus::Active as i32
 }
 
 fn validate_campaign(request: &pb::CreateCampaignRequest) -> Result<(), AdCenterError> {
@@ -293,5 +356,34 @@ fn repository_error(error: RepositoryError) -> AdCenterError {
     match error {
         RepositoryError::NotFound(id) => AdCenterError::NotFound(id),
         RepositoryError::Failed(message) => AdCenterError::Repository(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{needs_current_action_context, pb};
+
+    #[test]
+    fn active_campaign_updates_require_a_current_action_context() {
+        assert!(needs_current_action_context(
+            false,
+            Some(pb::CampaignStatus::Active),
+            pb::CampaignStatus::Draft as i32,
+        ));
+        assert!(needs_current_action_context(
+            true,
+            None,
+            pb::CampaignStatus::Draft as i32,
+        ));
+        assert!(needs_current_action_context(
+            false,
+            None,
+            pb::CampaignStatus::Active as i32,
+        ));
+        assert!(!needs_current_action_context(
+            false,
+            Some(pb::CampaignStatus::Paused),
+            pb::CampaignStatus::Draft as i32,
+        ));
     }
 }

@@ -40,10 +40,19 @@ static REQUESTS_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 static REQUESTS_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static REQUEST_DURATION_SUM_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static REQUEST_DURATION_LE_100: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REQUEST_DURATION_LE_150: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static REQUEST_DURATION_LE_300: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static REQUEST_DURATION_LE_500: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static REDIS_MANAGER: tokio::sync::OnceCell<redis::aio::ConnectionManager> =
     tokio::sync::OnceCell::const_new();
+const RATE_LIMIT_LUA: &str = r#"
+local count = redis.call('INCR', KEYS[1])
+local ttl = redis.call('TTL', KEYS[1])
+if count == 1 or ttl < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"#;
 
 pub fn init_tracing(service_name: &'static str) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -80,12 +89,13 @@ async fn metrics(service: &'static str) -> impl IntoResponse {
     let failed = REQUESTS_FAILED.load(std::sync::atomic::Ordering::Relaxed);
     let duration_sum_ms = REQUEST_DURATION_SUM_MS.load(std::sync::atomic::Ordering::Relaxed);
     let le_100 = REQUEST_DURATION_LE_100.load(std::sync::atomic::Ordering::Relaxed);
+    let le_150 = REQUEST_DURATION_LE_150.load(std::sync::atomic::Ordering::Relaxed);
     let le_300 = REQUEST_DURATION_LE_300.load(std::sync::atomic::Ordering::Relaxed);
     let le_500 = REQUEST_DURATION_LE_500.load(std::sync::atomic::Ordering::Relaxed);
     (
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
         format!(
-            "# TYPE bookway_http_requests_total counter\nbookway_http_requests_total{{service=\"{service}\"}} {total}\n# TYPE bookway_http_requests_failed_total counter\nbookway_http_requests_failed_total{{service=\"{service}\"}} {failed}\n# TYPE bookway_http_request_duration_seconds histogram\nbookway_http_request_duration_seconds_bucket{{service=\"{service}\",le=\"0.1\"}} {le_100}\nbookway_http_request_duration_seconds_bucket{{service=\"{service}\",le=\"0.3\"}} {le_300}\nbookway_http_request_duration_seconds_bucket{{service=\"{service}\",le=\"0.5\"}} {le_500}\nbookway_http_request_duration_seconds_bucket{{service=\"{service}\",le=\"+Inf\"}} {total}\nbookway_http_request_duration_seconds_sum{{service=\"{service}\"}} {}\nbookway_http_request_duration_seconds_count{{service=\"{service}\"}} {total}\n",
+            "# TYPE bookway_http_requests_total counter\nbookway_http_requests_total{{service=\"{service}\"}} {total}\n# TYPE bookway_http_requests_failed_total counter\nbookway_http_requests_failed_total{{service=\"{service}\"}} {failed}\n# TYPE bookway_http_request_duration_seconds histogram\nbookway_http_request_duration_seconds_bucket{{service=\"{service}\",le=\"0.1\"}} {le_100}\nbookway_http_request_duration_seconds_bucket{{service=\"{service}\",le=\"0.15\"}} {le_150}\nbookway_http_request_duration_seconds_bucket{{service=\"{service}\",le=\"0.3\"}} {le_300}\nbookway_http_request_duration_seconds_bucket{{service=\"{service}\",le=\"0.5\"}} {le_500}\nbookway_http_request_duration_seconds_bucket{{service=\"{service}\",le=\"+Inf\"}} {total}\nbookway_http_request_duration_seconds_sum{{service=\"{service}\"}} {}\nbookway_http_request_duration_seconds_count{{service=\"{service}\"}} {total}\n",
             duration_sum_ms as f64 / 1000.0
         ),
     )
@@ -162,6 +172,9 @@ async fn record_request(request: Request, next: Next) -> Response {
     REQUEST_DURATION_SUM_MS.fetch_add(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
     if elapsed_ms <= 100 {
         REQUEST_DURATION_LE_100.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if elapsed_ms <= 150 {
+        REQUEST_DURATION_LE_150.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     if elapsed_ms <= 300 {
         REQUEST_DURATION_LE_300.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -394,11 +407,12 @@ async fn rate_limit(request: Request, next: Next) -> Response {
     let key = format!("bookway:rate:{}:{}:{}", identity, path, minute);
     let mut connection = manager.clone();
     let command_timeout = env_duration_ms("REDIS_COMMAND_TIMEOUT_MS", 100);
+    let script = redis::Script::new(RATE_LIMIT_LUA);
+    let mut invocation = script.prepare_invoke();
+    invocation.key(&key).arg(60);
     let count = tokio::time::timeout(
         command_timeout,
-        redis::cmd("INCR")
-            .arg(&key)
-            .query_async::<u64>(&mut connection),
+        invocation.invoke_async::<u64>(&mut connection),
     )
     .await;
     let count = match count {
@@ -415,16 +429,6 @@ async fn rate_limit(request: Request, next: Next) -> Response {
             return next.run(request).await;
         }
     };
-    if count == 1 {
-        let _ = tokio::time::timeout(
-            command_timeout,
-            redis::cmd("EXPIRE")
-                .arg(&key)
-                .arg(60)
-                .query_async::<bool>(&mut connection),
-        )
-        .await;
-    }
     if count > limit {
         return (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded\n").into_response();
     }

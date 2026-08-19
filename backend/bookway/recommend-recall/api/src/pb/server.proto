@@ -14,6 +14,10 @@ message Candidate {
   double score = 8;
   string source = 9;
   repeated string reasons = 10;
+  // Explicit multi-objective predictions produced by Recommend Rank.
+  double p_ctr = 11;
+  double p_cvr = 12;
+  double p_wegu = 13;
 }
 message RecallRequest {
   string user_id = 1;

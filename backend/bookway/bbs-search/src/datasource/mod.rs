@@ -575,7 +575,7 @@ impl SearchSource for OpenSearchSource {
             "track_total_hits": true,
             "pit": { "id": pit_cursor.id, "keep_alive": PIT_KEEP_ALIVE },
             "sort": [{ "_score": "desc" }, { "id.keyword": "asc" }],
-            "query": { "bool": { "must": [{ "multi_match": { "query": text, "fields": ["title^4", "summary^2", "body", "tags", "topics", "author_name"], "type": "best_fields" }}], "filter": filters }},
+            "query": { "bool": { "must": [{ "multi_match": { "query": text, "fields": ["title^4", "summary^2", "route_action_titles^3", "route_scene_equipment^3", "route_action_details^2", "route_action_ids", "body", "tags", "topics", "author_name"], "type": "best_fields" }}], "filter": filters }},
             "highlight": { "fields": { "title": {}, "summary": {}, "body": {} } }
         });
         if !excluded_author_ids.is_empty() {
@@ -668,7 +668,6 @@ impl SearchSource for OpenSearchSource {
             .unwrap_or(items.len() as u64) as usize;
         let active_pit_id = payload
             .get("pit_id")
-            .or_else(|| payload.get("id"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or(&pit_cursor.id)
             .to_string();
@@ -787,11 +786,6 @@ impl OpenSearchSource {
             .map_err(|error| SearchSourceError::Request(error.to_string()))?;
         payload
             .get("pit_id")
-            .or_else(|| {
-                // Keep Elasticsearch-compatible deployments working during a rolling migration.
-                // OpenSearch 2.x returns `pit_id` from its native endpoint.
-                payload.get("id")
-            })
             .and_then(serde_json::Value::as_str)
             .filter(|id| !id.is_empty())
             .map(str::to_string)

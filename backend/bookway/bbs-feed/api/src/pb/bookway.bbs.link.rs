@@ -85,6 +85,10 @@ pub struct RouteTemplateAction {
     /// Stable key used by node-bound resources, equipment and advertisements.
     #[prost(string, tag = "6")]
     pub id: ::prost::alloc::string::String,
+    /// Canonical equipment labels for this action context. Commercial offers and
+    /// advertisements may reference only labels declared here.
+    #[prost(string, repeated, tag = "7")]
+    pub scene_equipment: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -164,6 +168,21 @@ pub struct QuestionContext {
     #[prost(string, optional, tag = "4")]
     pub stage_title: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// A route fork is a new editable route draft created from a public route
+/// snapshot. It preserves public provenance without inheriting the source
+/// author's private plans, media ownership, or future edits.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RouteFork {
+    #[prost(string, tag = "1")]
+    pub source_route_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub source_route_version: u32,
+    #[prost(string, tag = "3")]
+    pub source_route_title: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub forked_at: ::prost::alloc::string::String,
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Content {
@@ -201,6 +220,8 @@ pub struct Content {
     pub accepted_answer_id: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "16")]
     pub question_context: ::core::option::Option<QuestionContext>,
+    #[prost(message, optional, tag = "17")]
+    pub route_fork: ::core::option::Option<RouteFork>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -376,6 +397,20 @@ pub struct AcceptAnswerRequest {
     pub question_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub answer_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ForkRouteRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub source_route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub idempotency_key: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "4")]
+    pub title: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "5")]
+    pub summary: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -833,6 +868,27 @@ pub mod bbs_link_client {
                 .insert(GrpcMethod::new("bookway.bbs.link.BbsLink", "AcceptAnswer"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn fork_route(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ForkRouteRequest>,
+        ) -> std::result::Result<tonic::Response<super::Content>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.link.BbsLink/ForkRoute",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.link.BbsLink", "ForkRoute"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -890,6 +946,10 @@ pub mod bbs_link_server {
         async fn accept_answer(
             &self,
             request: tonic::Request<super::AcceptAnswerRequest>,
+        ) -> std::result::Result<tonic::Response<super::Content>, tonic::Status>;
+        async fn fork_route(
+            &self,
+            request: tonic::Request<super::ForkRouteRequest>,
         ) -> std::result::Result<tonic::Response<super::Content>, tonic::Status>;
     }
     #[derive(Debug)]
@@ -1387,6 +1447,49 @@ pub mod bbs_link_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = AcceptAnswerSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.link.BbsLink/ForkRoute" => {
+                    #[allow(non_camel_case_types)]
+                    struct ForkRouteSvc<T: BbsLink>(pub Arc<T>);
+                    impl<T: BbsLink> tonic::server::UnaryService<super::ForkRouteRequest>
+                    for ForkRouteSvc<T> {
+                        type Response = super::Content;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ForkRouteRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BbsLink>::fork_route(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ForkRouteSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -90,6 +90,7 @@ mod tests {
             author_id: "author-1".to_string(),
             status: ContentStatus::Published as i32,
             quality_score: 1.0,
+            recall_score: 1.0,
             score: 1.0,
             source: "test".to_string(),
             reasons: Vec::new(),

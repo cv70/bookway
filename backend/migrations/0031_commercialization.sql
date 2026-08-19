@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS ad_delivery_decisions (
     campaign_id TEXT NOT NULL REFERENCES ad_campaigns(id),
     user_id TEXT NOT NULL,
     placement TEXT NOT NULL,
+    route_id TEXT NOT NULL,
+    action_node_id TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (request_id, campaign_id)

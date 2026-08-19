@@ -104,6 +104,9 @@ fn rank_features(features: feature::FeaturesResponse) -> rank::RankFeatures {
                 save_rate: candidate.save_rate,
                 action_completion_rate: candidate.action_completion_rate,
                 purchase_conversion_rate: candidate.purchase_conversion_rate,
+                p_ctr: calibrated_probability(candidate.click_through_rate),
+                p_cvr: calibrated_probability(candidate.purchase_conversion_rate),
+                p_wegu: calibrated_probability(candidate.action_completion_rate),
             })
             .collect(),
     }
@@ -117,9 +120,65 @@ fn candidate_to_proto(candidate: &Candidate) -> recall::Candidate {
         status: candidate.status,
         quality_score: candidate.quality_score,
         freshness: candidate.post.freshness,
-        recall_score: candidate.score,
+        recall_score: candidate.recall_score,
         score: candidate.score,
         source: candidate.source.clone(),
         reasons: candidate.reasons.clone(),
+        p_ctr: 0.0,
+        p_cvr: 0.0,
+        p_wegu: 0.0,
+    }
+}
+
+fn calibrated_probability(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0001, 1.0)
+    } else {
+        0.0001
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bookway_bbs_link_api::pb::PostSummary;
+
+    use super::candidate_to_proto;
+    use crate::domain::pipeline::Candidate;
+
+    #[test]
+    fn preserves_recall_evidence_after_heuristic_scoring() {
+        let candidate = Candidate {
+            post: PostSummary {
+                id: "content-1".to_string(),
+                ..Default::default()
+            },
+            recall_score: 0.25,
+            score: 0.92,
+            ..test_candidate_defaults()
+        };
+
+        let request_candidate = candidate_to_proto(&candidate);
+        assert_eq!(request_candidate.recall_score, 0.25);
+        assert_eq!(request_candidate.score, 0.92);
+    }
+
+    fn test_candidate_defaults() -> Candidate {
+        Candidate {
+            post: PostSummary::default(),
+            author_id: String::new(),
+            status: 0,
+            quality_score: 0.0,
+            recall_score: 0.0,
+            score: 0.0,
+            source: String::new(),
+            reasons: Vec::new(),
+            followed_author: false,
+            blocked_author: false,
+            muted_author: false,
+            liked: false,
+            bookmarked: false,
+            hidden: false,
+            previously_served: false,
+        }
     }
 }

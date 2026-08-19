@@ -155,6 +155,7 @@ mod tests {
             author_id: author_id.to_string(),
             status: ContentStatus::Published as i32,
             quality_score: 0.0,
+            recall_score: score,
             score,
             source: String::new(),
             reasons: Vec::new(),

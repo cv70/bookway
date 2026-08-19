@@ -72,6 +72,26 @@ export type CreateNodeOffer = {
   commission_bps: number;
 };
 
+export type MerchantOrder = {
+  id: string;
+  status: number;
+  total_cents: number;
+  items: Array<{ title: string; quantity: number }>;
+  created_at: string;
+  fulfillment_status: number;
+  tracking_number: string;
+};
+
+export type AffiliateSettlement = {
+  id: string;
+  order_id: string;
+  creator_id: string;
+  amount_cents: number;
+  status: number;
+  eligible_at: string;
+  settled_at?: string;
+};
+
 const gatewayUrl = import.meta.env.VITE_GATEWAY_URL?.replace(/\/$/, "");
 
 export const isMerchantAdminApiConfigured = () => Boolean(gatewayUrl);
@@ -133,5 +153,21 @@ export const merchantAdminApi = {
         headers: { "idempotency-key": idempotencyKey },
         body: JSON.stringify(offer),
       },
+    ),
+  listOrders: (params = "") =>
+    request<{ items: MerchantOrder[]; next_cursor?: string }>(
+      `/v1/admin/mall/orders?limit=100${params}`,
+    ),
+  updateFulfillment: (orderId: string, status: number, trackingNumber = "") =>
+    request<MerchantOrder>(
+      `/v1/admin/mall/orders/${encodeURIComponent(orderId)}/fulfillment`,
+      {
+        method: "POST",
+        body: JSON.stringify({ status, tracking_number: trackingNumber }),
+      },
+    ),
+  listAffiliateSettlements: () =>
+    request<{ items: AffiliateSettlement[] }>(
+      "/v1/admin/mall/affiliate-settlements?limit=100",
     ),
 };

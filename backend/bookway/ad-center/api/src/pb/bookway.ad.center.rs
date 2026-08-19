@@ -178,6 +178,8 @@ pub struct EligibleRequest {
     pub route_id: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub scene_equipment: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -214,6 +216,8 @@ pub struct RegisterDecisionRequest {
     pub route_id: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub scene_equipment: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

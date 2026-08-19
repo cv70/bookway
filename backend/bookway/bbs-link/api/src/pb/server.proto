@@ -87,6 +87,9 @@ message RouteTemplateAction {
   optional uint32 stage_index = 5;
   // Stable key used by node-bound resources, equipment and advertisements.
   string id = 6;
+  // Canonical equipment labels for this action context. Commercial offers and
+  // advertisements may reference only labels declared here.
+  repeated string scene_equipment = 7;
 }
 
 message RouteTemplate {
@@ -137,6 +140,16 @@ message QuestionContext {
   optional string stage_title = 4;
 }
 
+// A route fork is a new editable route draft created from a public route
+// snapshot. It preserves public provenance without inheriting the source
+// author's private plans, media ownership, or future edits.
+message RouteFork {
+  string source_route_id = 1;
+  uint32 source_route_version = 2;
+  string source_route_title = 3;
+  string forked_at = 4;
+}
+
 message Content {
   string id = 1;
   PostSummary post = 2;
@@ -156,6 +169,7 @@ message Content {
   // Gateway verifies it is a published root comment on this question.
   optional string accepted_answer_id = 15;
   optional QuestionContext question_context = 16;
+  optional RouteFork route_fork = 17;
 }
 
 message ContentPage {
@@ -240,6 +254,13 @@ message AcceptAnswerRequest {
   string question_id = 2;
   string answer_id = 3;
 }
+message ForkRouteRequest {
+  string user_id = 1;
+  string source_route_id = 2;
+  string idempotency_key = 3;
+  optional string title = 4;
+  optional string summary = 5;
+}
 
 service BbsLink {
   rpc List(ListRequest) returns (ContentPage);
@@ -252,4 +273,5 @@ service BbsLink {
   rpc Restrict(RestrictRequest) returns (Content);
   rpc Restore(RestoreRequest) returns (Content);
   rpc AcceptAnswer(AcceptAnswerRequest) returns (Content);
+  rpc ForkRoute(ForkRouteRequest) returns (Content);
 }

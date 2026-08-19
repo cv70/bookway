@@ -8,6 +8,21 @@ enum MallOrderStatus {
   MALL_ORDER_STATUS_EXPIRED = 3;
 }
 
+enum FulfillmentStatus {
+  FULFILLMENT_STATUS_PENDING = 0;
+  FULFILLMENT_STATUS_PROCESSING = 1;
+  FULFILLMENT_STATUS_SHIPPED = 2;
+  FULFILLMENT_STATUS_DELIVERED = 3;
+  FULFILLMENT_STATUS_CANCELLED = 4;
+}
+
+enum AffiliateSettlementStatus {
+  AFFILIATE_SETTLEMENT_STATUS_PENDING = 0;
+  AFFILIATE_SETTLEMENT_STATUS_ELIGIBLE = 1;
+  AFFILIATE_SETTLEMENT_STATUS_SETTLED = 2;
+  AFFILIATE_SETTLEMENT_STATUS_REVERSED = 3;
+}
+
 message OrderItemRequest {
   string sku_id = 1;
   uint32 quantity = 2;
@@ -17,7 +32,9 @@ message CreateRequest {
   string user_id = 1;
   string idempotency_key = 2;
   repeated OrderItemRequest items = 3;
-  optional string node_offer_id = 4;
+  // Orders originate from an offer shown at a route action node; direct SKU
+  // checkout is intentionally not part of the commerce model.
+  string node_offer_id = 4;
 }
 
 message OrderLine {
@@ -41,9 +58,13 @@ message Order {
   string expires_at = 8;
   string created_at = 9;
   string updated_at = 10;
-  optional string node_offer_id = 11;
-  optional string affiliate_creator_id = 12;
+  string node_offer_id = 11;
+  string affiliate_creator_id = 12;
   int64 commission_cents = 13;
+  // Immutable merchant snapshot from the contextual NodeOffer.
+  string merchant_id = 14;
+  FulfillmentStatus fulfillment_status = 15;
+  string tracking_number = 16;
 }
 
 message OrderListResponse { repeated Order items = 1; }
@@ -54,6 +75,42 @@ message OrderRequest { string user_id = 1; string order_id = 2; }
 message PayRequest { string user_id = 1; string order_id = 2; string payment_reference = 3; }
 message BatchRequest { uint32 limit = 1; }
 
+message MerchantOrderRequest {
+  string merchant_id = 1;
+  optional MallOrderStatus status = 2;
+  optional string cursor = 3;
+  optional uint32 limit = 4;
+}
+message MerchantOrderListResponse { repeated Order items = 1; optional string next_cursor = 2; }
+message UpdateFulfillmentRequest {
+  string merchant_id = 1;
+  string order_id = 2;
+  FulfillmentStatus status = 3;
+  string tracking_number = 4;
+}
+message AffiliateSettlement {
+  string id = 1;
+  string order_id = 2;
+  string merchant_id = 3;
+  string creator_id = 4;
+  int64 amount_cents = 5;
+  AffiliateSettlementStatus status = 6;
+  string eligible_at = 7;
+  optional string settled_at = 8;
+  string created_at = 9;
+}
+message AffiliateSettlementRequest {
+  string merchant_id = 1;
+  optional AffiliateSettlementStatus status = 2;
+  optional string cursor = 3;
+  optional uint32 limit = 4;
+}
+message AffiliateSettlementListResponse {
+  repeated AffiliateSettlement items = 1;
+  optional string next_cursor = 2;
+}
+message SettleAffiliateRequest { string merchant_id = 1; string settlement_id = 2; }
+
 service MallOrder {
   rpc Create(CreateRequest) returns (Order);
   rpc List(UserRequest) returns (OrderListResponse);
@@ -61,4 +118,8 @@ service MallOrder {
   rpc Pay(PayRequest) returns (Order);
   rpc Cancel(OrderRequest) returns (Order);
   rpc ExpirePending(BatchRequest) returns (ExpirePendingResponse);
+  rpc MerchantOrders(MerchantOrderRequest) returns (MerchantOrderListResponse);
+  rpc UpdateFulfillment(UpdateFulfillmentRequest) returns (Order);
+  rpc AffiliateSettlements(AffiliateSettlementRequest) returns (AffiliateSettlementListResponse);
+  rpc SettleAffiliate(SettleAffiliateRequest) returns (AffiliateSettlement);
 }

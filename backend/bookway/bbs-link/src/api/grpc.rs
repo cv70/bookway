@@ -127,6 +127,18 @@ impl BbsLink for GrpcServer {
                 .map_err(internal_error)?,
         ))
     }
+
+    async fn fork_route(
+        &self,
+        request: Request<pb::ForkRouteRequest>,
+    ) -> Result<Response<pb::Content>, Status> {
+        Ok(Response::new(
+            self.domain
+                .fork_route(request.into_inner())
+                .await
+                .map_err(internal_error)?,
+        ))
+    }
 }
 
 pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {

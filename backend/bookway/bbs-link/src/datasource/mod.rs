@@ -238,6 +238,7 @@ fn seed(input: SeedContent<'_>) -> pb::Content {
         milestone: None,
         accepted_answer_id: None,
         question_context: None,
+        route_fork: None,
     }
 }
 
@@ -257,6 +258,7 @@ fn seed_route_template(input: &SeedContent<'_>) -> pb::RouteTemplate {
             estimated_minutes: 20,
             scheduled_label: "开始时".to_string(),
             stage_index: Some(0),
+            scene_equipment: vec!["行动记录工具".to_string()],
         }],
         journey_type: pb::RouteTemplateKind::Project as i32,
     }

@@ -111,47 +111,38 @@ impl Domain {
                 "one or more SKUs are no longer saleable".to_string(),
             ));
         }
-        let node_offer = match request.node_offer_id.as_deref() {
-            Some(id) if !id.trim().is_empty() => Some(self.node_offer(id).await?),
-            Some(_) => {
-                return Err(OrderError::Validation(
-                    "node offer id cannot be empty".to_string(),
-                ));
-            }
-            None => None,
+        if request.node_offer_id.trim().is_empty() {
+            return Err(OrderError::Validation(
+                "node offer id is required for contextual checkout".to_string(),
+            ));
+        }
+        let node_offer = self.checkout_node_offer(&request.node_offer_id).await?;
+        let item = contextual_order_item(&request.items, &node_offer)?;
+        let Some(sku) = sku_map.get(&item.sku_id) else {
+            return Err(OrderError::State(
+                "node offer SKU is unavailable".to_string(),
+            ));
         };
-        if let Some(offer) = &node_offer {
-            let Some(item) = request
-                .items
-                .iter()
-                .find(|item| item.sku_id == offer.sku_id)
-            else {
-                return Err(OrderError::Validation(
-                    "node offer SKU must be included in the order".to_string(),
-                ));
-            };
-            let Some(sku) = sku_map.get(&item.sku_id) else {
-                return Err(OrderError::State(
-                    "node offer SKU is unavailable".to_string(),
-                ));
-            };
-            if offer.product_id != sku.product_id {
-                return Err(OrderError::Conflict(
-                    "node offer product does not match the SKU".to_string(),
-                ));
-            }
-            if offer.commission_bps > 3_000 || offer.creator_id.trim().is_empty() {
-                return Err(OrderError::State(
-                    "node offer commission metadata is invalid".to_string(),
-                ));
-            }
+        if node_offer.product_id != sku.product_id {
+            return Err(OrderError::Conflict(
+                "node offer product does not match the SKU".to_string(),
+            ));
+        }
+        if node_offer.commission_bps > 3_000
+            || node_offer.merchant_id.trim().is_empty()
+            || node_offer.creator_id.trim().is_empty()
+            || node_offer.scene_equipment.trim().is_empty()
+        {
+            return Err(OrderError::State(
+                "node offer contextual metadata is invalid".to_string(),
+            ));
         }
         let order = new_order(
             &request.user_id,
             &request.items,
             sku_map,
             self.config.payment_ttl_seconds,
-            node_offer.as_ref(),
+            &node_offer,
         )?;
         let created = self
             .repository
@@ -198,6 +189,10 @@ impl Domain {
                     "payment reference belongs to a different payment".to_string(),
                 ));
             }
+            self.repository
+                .ensure_settlement(&order)
+                .await
+                .map_err(repo_error)?;
             self.record_contextual_purchase(&order).await;
             return Ok(order);
         }
@@ -217,8 +212,98 @@ impl Domain {
             .transition(&request.order_id, pb::MallOrderStatus::Paid as i32, None)
             .await
             .map_err(repo_error)?;
+        self.repository
+            .ensure_settlement(&paid)
+            .await
+            .map_err(repo_error)?;
         self.record_contextual_purchase(&paid).await;
         Ok(paid)
+    }
+
+    pub(crate) async fn merchant_orders(
+        &self,
+        request: pb::MerchantOrderRequest,
+    ) -> Result<pb::MerchantOrderListResponse, OrderError> {
+        validate_merchant_id(&request.merchant_id)?;
+        let limit = usize::try_from(request.limit.unwrap_or(50).clamp(1, 100)).unwrap_or(100);
+        let items = self
+            .repository
+            .merchant_orders(
+                &request.merchant_id,
+                request.status,
+                request.cursor.as_deref(),
+                limit,
+            )
+            .await
+            .map_err(repo_error)?;
+        let next_cursor = items
+            .last()
+            .map(|item| item.id.clone())
+            .filter(|_| items.len() == limit);
+        Ok(pb::MerchantOrderListResponse { items, next_cursor })
+    }
+
+    pub(crate) async fn update_fulfillment(
+        &self,
+        request: pb::UpdateFulfillmentRequest,
+    ) -> Result<pb::Order, OrderError> {
+        validate_merchant_id(&request.merchant_id)?;
+        if request.order_id.trim().is_empty() {
+            return Err(OrderError::Validation("order id is required".to_string()));
+        }
+        if pb::FulfillmentStatus::try_from(request.status).is_err() {
+            return Err(OrderError::Validation(
+                "invalid fulfillment status".to_string(),
+            ));
+        }
+        self.repository
+            .update_fulfillment(
+                &request.merchant_id,
+                &request.order_id,
+                request.status,
+                &request.tracking_number,
+            )
+            .await
+            .map_err(repo_error)
+    }
+
+    pub(crate) async fn affiliate_settlements(
+        &self,
+        request: pb::AffiliateSettlementRequest,
+    ) -> Result<pb::AffiliateSettlementListResponse, OrderError> {
+        validate_merchant_id(&request.merchant_id)?;
+        let limit = usize::try_from(request.limit.unwrap_or(50).clamp(1, 100)).unwrap_or(100);
+        let items = self
+            .repository
+            .settlements(
+                &request.merchant_id,
+                request.status,
+                request.cursor.as_deref(),
+                limit,
+            )
+            .await
+            .map_err(repo_error)?;
+        let next_cursor = items
+            .last()
+            .map(|item| item.id.clone())
+            .filter(|_| items.len() == limit);
+        Ok(pb::AffiliateSettlementListResponse { items, next_cursor })
+    }
+
+    pub(crate) async fn settle_affiliate(
+        &self,
+        request: pb::SettleAffiliateRequest,
+    ) -> Result<pb::AffiliateSettlement, OrderError> {
+        validate_merchant_id(&request.merchant_id)?;
+        if request.settlement_id.trim().is_empty() {
+            return Err(OrderError::Validation(
+                "settlement id is required".to_string(),
+            ));
+        }
+        self.repository
+            .settle_affiliate(&request.merchant_id, &request.settlement_id)
+            .await
+            .map_err(repo_error)
     }
 
     pub(crate) async fn cancel(&self, request: pb::OrderRequest) -> Result<pb::Order, OrderError> {
@@ -327,10 +412,10 @@ impl Domain {
             .items)
     }
 
-    async fn node_offer(&self, id: &str) -> Result<mall_pb::NodeOffer, OrderError> {
+    async fn checkout_node_offer(&self, id: &str) -> Result<mall_pb::NodeOffer, OrderError> {
         let mut client = self.mall.clone();
         client
-            .get_node_offer(service_request(
+            .get_checkout_node_offer(service_request(
                 "mall",
                 mall_pb::IdRequest { id: id.to_string() },
             )?)
@@ -340,10 +425,7 @@ impl Domain {
     }
 
     async fn record_contextual_purchase(&self, order: &pb::Order) {
-        let Some(offer_id) = order.node_offer_id.as_deref() else {
-            return;
-        };
-        let offer = match self.node_offer(offer_id).await {
+        let offer = match self.settlement_node_offer(&order.node_offer_id).await {
             Ok(offer) => offer,
             Err(error) => {
                 tracing::warn!(%error, order_id = %order.id, "contextual offer lookup degraded after payment");
@@ -372,6 +454,18 @@ impl Domain {
         if let Err(error) = client.ingest(request).await {
             tracing::warn!(%error, order_id = %order.id, "contextual purchase attribution degraded");
         }
+    }
+
+    async fn settlement_node_offer(&self, id: &str) -> Result<mall_pb::NodeOffer, OrderError> {
+        let mut client = self.mall.clone();
+        client
+            .get_node_offer(service_request(
+                "mall",
+                mall_pb::IdRequest { id: id.to_string() },
+            )?)
+            .await
+            .map_err(|error| upstream_status("mall", error))
+            .map(|response| response.into_inner())
     }
 
     async fn reserve_inventory(
@@ -449,6 +543,35 @@ fn validate_items(items: &[pb::OrderItemRequest]) -> Result<(), OrderError> {
     Ok(())
 }
 
+fn validate_merchant_id(value: &str) -> Result<(), OrderError> {
+    if value.trim().is_empty() {
+        Err(OrderError::Validation(
+            "merchant id is required".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn contextual_order_item<'a>(
+    items: &'a [pb::OrderItemRequest],
+    offer: &mall_pb::NodeOffer,
+) -> Result<&'a pb::OrderItemRequest, OrderError> {
+    // A checkout has one NodeOffer attribution. Accepting extra arbitrary SKUs
+    // would recreate a generic catalog cart with only a decorative offer ID.
+    let [item] = items else {
+        return Err(OrderError::Validation(
+            "contextual checkout accepts exactly one offered SKU".to_string(),
+        ));
+    };
+    if item.sku_id != offer.sku_id {
+        return Err(OrderError::Validation(
+            "node offer SKU must match the checkout SKU".to_string(),
+        ));
+    }
+    Ok(item)
+}
+
 fn request_fingerprint(request: &pb::CreateRequest) -> String {
     let mut lines = request
         .items
@@ -461,10 +584,7 @@ fn request_fingerprint(request: &pb::CreateRequest) -> String {
         .map(|(sku_id, quantity)| format!("{sku_id}:{quantity}"))
         .collect::<Vec<_>>()
         .join("|");
-    format!(
-        "{items}|offer:{}",
-        request.node_offer_id.as_deref().unwrap_or_default()
-    )
+    format!("{items}|offer:{}", request.node_offer_id)
 }
 
 fn new_order(
@@ -472,7 +592,7 @@ fn new_order(
     requested_items: &[pb::OrderItemRequest],
     skus: BTreeMap<String, mall_pb::MallSku>,
     ttl_seconds: u64,
-    node_offer: Option<&mall_pb::NodeOffer>,
+    node_offer: &mall_pb::NodeOffer,
 ) -> Result<pb::Order, OrderError> {
     let mut total = 0_i64;
     let mut currency = None;
@@ -508,17 +628,14 @@ fn new_order(
         });
     }
     let now = OffsetDateTime::now_utc();
-    let commission_cents = node_offer
-        .and_then(|offer| {
-            items
-                .iter()
-                .find(|item| item.sku_id == offer.sku_id)
-                .and_then(|item| {
-                    item.line_total_cents
-                        .checked_mul(i64::from(offer.commission_bps))
-                })
-                .and_then(|value| value.checked_div(10_000))
+    let commission_cents = items
+        .iter()
+        .find(|item| item.sku_id == node_offer.sku_id)
+        .and_then(|item| {
+            item.line_total_cents
+                .checked_mul(i64::from(node_offer.commission_bps))
         })
+        .and_then(|value| value.checked_div(10_000))
         .unwrap_or(0);
     Ok(pb::Order {
         id: Uuid::now_v7().to_string(),
@@ -533,9 +650,12 @@ fn new_order(
         ),
         created_at: timestamp(now),
         updated_at: timestamp(now),
-        node_offer_id: node_offer.map(|offer| offer.id.clone()),
-        affiliate_creator_id: node_offer.map(|offer| offer.creator_id.clone()),
+        node_offer_id: node_offer.id.clone(),
+        affiliate_creator_id: node_offer.creator_id.clone(),
         commission_cents,
+        merchant_id: node_offer.merchant_id.clone(),
+        fulfillment_status: pb::FulfillmentStatus::Pending as i32,
+        tracking_number: String::new(),
     })
 }
 
@@ -606,5 +726,38 @@ fn repo_error(error: RepositoryError) -> OrderError {
         RepositoryError::Conflict(value) => OrderError::Conflict(value),
         RepositoryError::State(value) => OrderError::State(value),
         RepositoryError::Failed(value) => OrderError::Repository(value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OrderError, contextual_order_item};
+    use crate::api::pb;
+    use bookway_mall_api::pb as mall_pb;
+
+    #[test]
+    fn contextual_checkout_rejects_unattributed_cart_lines() {
+        let offer = mall_pb::NodeOffer {
+            sku_id: "sku-offer".to_string(),
+            ..Default::default()
+        };
+        let offered = pb::OrderItemRequest {
+            sku_id: "sku-offer".to_string(),
+            quantity: 1,
+        };
+        assert!(contextual_order_item(&[offered.clone()], &offer).is_ok());
+        assert!(matches!(
+            contextual_order_item(
+                &[
+                    offered,
+                    pb::OrderItemRequest {
+                        sku_id: "sku-unattributed".to_string(),
+                        quantity: 1,
+                    },
+                ],
+                &offer,
+            ),
+            Err(OrderError::Validation(_))
+        ));
     }
 }

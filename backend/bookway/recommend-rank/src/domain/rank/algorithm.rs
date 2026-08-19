@@ -33,10 +33,10 @@ struct CandidateRankingSignals {
     author_affinity: f64,
     impression_fatigue: f64,
     direct_negative_feedback: f64,
-    click_through_rate: f64,
     save_rate: f64,
-    action_completion_rate: f64,
-    purchase_conversion_rate: f64,
+    p_ctr: f64,
+    p_cvr: f64,
+    p_wegu: f64,
 }
 
 impl CandidateRankingSignals {
@@ -64,22 +64,19 @@ impl CandidateRankingSignals {
                 .map(|candidate| finite(candidate.direct_negative_feedback))
                 .unwrap_or_default()
                 .clamp(0.0, 1.0),
-            click_through_rate: candidate
-                .map(|candidate| finite(candidate.click_through_rate))
-                .unwrap_or_default()
-                .clamp(0.0, 1.0),
             save_rate: candidate
                 .map(|candidate| finite(candidate.save_rate))
                 .unwrap_or_default()
                 .clamp(0.0, 1.0),
-            action_completion_rate: candidate
-                .map(|candidate| finite(candidate.action_completion_rate))
-                .unwrap_or_default()
-                .clamp(0.0, 1.0),
-            purchase_conversion_rate: candidate
-                .map(|candidate| finite(candidate.purchase_conversion_rate))
-                .unwrap_or_default()
-                .clamp(0.0, 1.0),
+            p_ctr: candidate
+                .map(|candidate| predicted(candidate.p_ctr, candidate.click_through_rate))
+                .unwrap_or(0.0001),
+            p_cvr: candidate
+                .map(|candidate| predicted(candidate.p_cvr, candidate.purchase_conversion_rate))
+                .unwrap_or(0.0001),
+            p_wegu: candidate
+                .map(|candidate| predicted(candidate.p_wegu, candidate.action_completion_rate))
+                .unwrap_or(0.0001),
         }
     }
 }
@@ -111,13 +108,15 @@ pub(crate) fn rank(
             + 0.22 * candidate_signals.author_affinity
             - 0.32 * candidate_signals.impression_fatigue
             - 0.80 * candidate_signals.direct_negative_feedback;
-        // WEGU and contextual commerce outcomes dominate vanity signals:
-        // a route that users actually complete is more valuable than one
-        // that only earns clicks.
-        candidate.score += 0.18 * candidate_signals.click_through_rate
-            + 0.20 * candidate_signals.save_rate
-            + 0.42 * candidate_signals.action_completion_rate
-            + 0.12 * candidate_signals.purchase_conversion_rate;
+        // Explicit multi-objective predictions dominate vanity signals:
+        // WEGU (action completion) carries the largest online objective weight.
+        candidate.score += 0.18 * candidate_signals.p_ctr
+            + 0.20 * candidate_signals.p_cvr
+            + 0.42 * candidate_signals.p_wegu
+            + 0.08 * candidate_signals.save_rate;
+        candidate.p_ctr = candidate_signals.p_ctr;
+        candidate.p_cvr = candidate_signals.p_cvr;
+        candidate.p_wegu = candidate_signals.p_wegu;
         if candidate_signals.domain_affinity >= 0.35 || candidate_signals.author_affinity >= 0.35 {
             candidate.reasons.push("符合你近期的行动偏好".to_string());
         }
@@ -139,6 +138,15 @@ pub(crate) fn rank(
 
 fn finite(value: f64) -> f64 {
     if value.is_finite() { value } else { 0.0 }
+}
+
+fn predicted(explicit: f64, observed_rate: f64) -> f64 {
+    let explicit = finite(explicit);
+    if explicit > 0.0 {
+        explicit.clamp(0.0001, 1.0)
+    } else {
+        finite(observed_rate).clamp(0.0001, 1.0)
+    }
 }
 
 #[cfg(test)]

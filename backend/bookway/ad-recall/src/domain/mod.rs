@@ -23,6 +23,7 @@ impl Domain {
             || request.placement.trim().is_empty()
             || request.route_id.trim().is_empty()
             || request.action_node_id.trim().is_empty()
+            || request.scene_equipment.trim().is_empty()
         {
             return Ok(center::CampaignList { items: Vec::new() });
         }
@@ -36,6 +37,7 @@ impl Domain {
                     limit: request.limit.clamp(1, 100),
                     route_id: request.route_id,
                     action_node_id: request.action_node_id,
+                    scene_equipment: request.scene_equipment,
                 })
                 .map_err(|error| tonic::Status::internal(error.to_string()))?,
             )

@@ -14,6 +14,8 @@ pub struct RecallRequest {
     pub route_id: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub scene_equipment: ::prost::alloc::string::String,
 }
 /// Generated client implementations.
 pub mod ad_recall_client {

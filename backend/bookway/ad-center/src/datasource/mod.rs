@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::api::pb;
 use async_trait::async_trait;
@@ -14,7 +14,21 @@ pub(crate) struct EligibleQuery<'a> {
     pub(crate) domain: &'a str,
     pub(crate) route_id: &'a str,
     pub(crate) action_node_id: &'a str,
+    pub(crate) scene_equipment: &'a str,
     pub(crate) limit: usize,
+}
+
+// A delivery receipt is valuable only if it can be traced back to the exact
+// action-node placement that selected the campaign. Keep that context in the
+// repository boundary instead of trusting an upstream caller to retain it.
+pub(crate) struct DecisionRegistration<'a> {
+    pub(crate) user_id: &'a str,
+    pub(crate) request_id: &'a str,
+    pub(crate) placement: &'a str,
+    pub(crate) route_id: &'a str,
+    pub(crate) action_node_id: &'a str,
+    pub(crate) scene_equipment: &'a str,
+    pub(crate) campaign_ids: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -50,10 +64,7 @@ pub(crate) trait CampaignRepository: Send + Sync {
     ) -> Result<Vec<pb::AdCampaign>, RepositoryError>;
     async fn register_decisions(
         &self,
-        user_id: &str,
-        request_id: &str,
-        placement: &str,
-        campaign_ids: Vec<String>,
+        registration: DecisionRegistration<'_>,
     ) -> Result<(), RepositoryError>;
     async fn record_event(
         &self,
@@ -82,6 +93,10 @@ struct MemoryEvent {
 #[derive(Clone)]
 struct MemoryDecision {
     user_id: String,
+    placement: String,
+    route_id: String,
+    action_node_id: String,
+    scene_equipment: String,
     expires_at: OffsetDateTime,
 }
 
@@ -162,6 +177,7 @@ impl CampaignRepository for MemoryCampaignRepository {
             .filter(|campaign| campaign.placement == query.placement)
             .filter(|campaign| campaign.route_id == query.route_id)
             .filter(|campaign| campaign.action_node_id == query.action_node_id)
+            .filter(|campaign| campaign.scene_equipment == query.scene_equipment)
             .filter(|campaign| campaign_starts(campaign).is_none_or(|start| start <= now))
             .filter(|campaign| campaign_ends(campaign).is_none_or(|end| end > now))
             .filter(|campaign| {
@@ -222,21 +238,45 @@ impl CampaignRepository for MemoryCampaignRepository {
 
     async fn register_decisions(
         &self,
-        user_id: &str,
-        request_id: &str,
-        _placement: &str,
-        campaign_ids: Vec<String>,
+        registration: DecisionRegistration<'_>,
     ) -> Result<(), RepositoryError> {
+        let campaign_ids = unique_campaign_ids(&registration.campaign_ids)?;
+        let campaigns = self.campaigns.read().await;
+        for campaign_id in &campaign_ids {
+            let campaign = campaigns
+                .get(campaign_id)
+                .ok_or_else(|| RepositoryError::NotFound(campaign_id.clone()))?;
+            if !campaign_matches_registration(campaign, &registration, OffsetDateTime::now_utc()) {
+                return Err(RepositoryError::Failed(
+                    "campaign does not match the action-node decision context".to_string(),
+                ));
+            }
+        }
+        drop(campaigns);
         let expires_at = OffsetDateTime::now_utc() + time::Duration::hours(1);
         let mut decisions = self.decisions.write().await;
         decisions.retain(|_, decision| decision.expires_at > OffsetDateTime::now_utc());
         for campaign_id in campaign_ids {
-            decisions
-                .entry((request_id.to_string(), campaign_id))
-                .or_insert(MemoryDecision {
-                    user_id: user_id.to_string(),
+            let key = (registration.request_id.to_string(), campaign_id);
+            if let Some(existing) = decisions.get(&key) {
+                if !decision_matches_registration(existing, &registration) {
+                    return Err(RepositoryError::Failed(
+                        "request id already belongs to a different decision context".to_string(),
+                    ));
+                }
+                continue;
+            }
+            decisions.insert(
+                key,
+                MemoryDecision {
+                    user_id: registration.user_id.to_string(),
+                    placement: registration.placement.to_string(),
+                    route_id: registration.route_id.to_string(),
+                    action_node_id: registration.action_node_id.to_string(),
+                    scene_equipment: registration.scene_equipment.to_string(),
                     expires_at,
-                });
+                },
+            );
         }
         Ok(())
     }
@@ -277,7 +317,16 @@ impl CampaignRepository for MemoryCampaignRepository {
             });
         }
         let mut events = self.events.write().await;
-        if events.contains_key(&request.event_id) {
+        if let Some(existing) = events.get(&request.event_id) {
+            if existing.user_id != user_id
+                || existing.request_id != request.request_id
+                || existing.campaign_id != request.campaign_id
+                || existing.event_type != request.event_type
+            {
+                return Err(RepositoryError::Failed(
+                    "event id was already used for a different delivery event".to_string(),
+                ));
+            }
             return Ok(pb::EventReceipt {
                 event_id: request.event_id,
                 accepted: true,
@@ -515,10 +564,11 @@ impl CampaignRepository for PostgresCampaignRepository {
         // Apply targeting and both frequency caps in the candidate query. This
         // keeps the auction input bounded under load and prevents campaigns
         // that are already capped from consuming recall/rank capacity.
-        let values = sqlx::query_as::<_, CampaignRow>(&campaign_select("WHERE c.status = 'active' AND c.placement = $1 AND c.route_id = $2 AND c.action_node_id = $3 AND (c.starts_at IS NULL OR c.starts_at <= now()) AND (c.ends_at IS NULL OR c.ends_at > now()) AND (c.daily_budget_micros = 0 OR COALESCE(stats.spent_micros, 0) < c.daily_budget_micros) AND ($4 = '' OR c.target_domains = '[]'::jsonb OR c.target_domains @> jsonb_build_array($4::text)) AND (c.frequency_cap = 0 OR (SELECT count(*) FROM ad_delivery_events e WHERE e.campaign_id = c.id AND e.user_id = $5 AND e.event_type = 'impression' AND e.occurred_at >= date_trunc('day', now())) < c.frequency_cap) AND (c.global_frequency_cap = 0 OR (SELECT count(*) FROM ad_delivery_events e WHERE e.campaign_id = c.id AND e.event_type = 'impression' AND e.occurred_at >= date_trunc('day', now())) < c.global_frequency_cap) ORDER BY c.bid_micros DESC, c.id LIMIT $6"))
+        let values = sqlx::query_as::<_, CampaignRow>(&campaign_select("WHERE c.status = 'active' AND c.placement = $1 AND c.route_id = $2 AND c.action_node_id = $3 AND c.scene_equipment = $4 AND (c.starts_at IS NULL OR c.starts_at <= now()) AND (c.ends_at IS NULL OR c.ends_at > now()) AND (c.daily_budget_micros = 0 OR COALESCE(stats.spent_micros, 0) < c.daily_budget_micros) AND ($5 = '' OR c.target_domains = '[]'::jsonb OR c.target_domains @> jsonb_build_array($5::text)) AND (c.frequency_cap = 0 OR (SELECT count(*) FROM ad_delivery_events e WHERE e.campaign_id = c.id AND e.user_id = $6 AND e.event_type = 'impression' AND e.occurred_at >= date_trunc('day', now())) < c.frequency_cap) AND (c.global_frequency_cap = 0 OR (SELECT count(*) FROM ad_delivery_events e WHERE e.campaign_id = c.id AND e.event_type = 'impression' AND e.occurred_at >= date_trunc('day', now())) < c.global_frequency_cap) ORDER BY c.bid_micros DESC, c.id LIMIT $7"))
             .bind(query.placement)
             .bind(query.route_id)
             .bind(query.action_node_id)
+            .bind(query.scene_equipment)
             .bind(query.domain)
             .bind(query.user_id)
             .bind(i64::try_from(query.limit).unwrap_or(i64::MAX))
@@ -530,21 +580,57 @@ impl CampaignRepository for PostgresCampaignRepository {
 
     async fn register_decisions(
         &self,
-        user_id: &str,
-        request_id: &str,
-        placement: &str,
-        campaign_ids: Vec<String>,
+        registration: DecisionRegistration<'_>,
     ) -> Result<(), RepositoryError> {
+        let campaign_ids = unique_campaign_ids(&registration.campaign_ids)?;
         let mut tx = self.pool.begin().await.map_err(database)?;
+        let matching_campaigns: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM ad_campaigns WHERE id = ANY($1) AND status = 'active' AND placement = $2 AND route_id = $3 AND action_node_id = $4 AND scene_equipment = $5 AND (starts_at IS NULL OR starts_at <= now()) AND (ends_at IS NULL OR ends_at > now())",
+        )
+        .bind(&campaign_ids)
+        .bind(registration.placement)
+        .bind(registration.route_id)
+        .bind(registration.action_node_id)
+        .bind(registration.scene_equipment)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database)?;
+        if matching_campaigns != i64::try_from(campaign_ids.len()).unwrap_or(i64::MAX) {
+            return Err(RepositoryError::Failed(
+                "campaign does not match the action-node decision context".to_string(),
+            ));
+        }
         for campaign_id in campaign_ids {
-            sqlx::query("INSERT INTO ad_delivery_decisions (request_id,campaign_id,user_id,placement,expires_at) VALUES ($1,$2,$3,$4,now()+interval '1 hour') ON CONFLICT (request_id,campaign_id) DO NOTHING")
-                .bind(request_id)
+            sqlx::query("INSERT INTO ad_delivery_decisions (request_id,campaign_id,user_id,placement,route_id,action_node_id,scene_equipment,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,now()+interval '1 hour') ON CONFLICT (request_id,campaign_id) DO NOTHING")
+                .bind(registration.request_id)
                 .bind(campaign_id)
-                .bind(user_id)
-                .bind(placement)
+                .bind(registration.user_id)
+                .bind(registration.placement)
+                .bind(registration.route_id)
+                .bind(registration.action_node_id)
+                .bind(registration.scene_equipment)
                 .execute(&mut *tx)
                 .await
                 .map_err(database)?;
+        }
+        let matching_decisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM ad_delivery_decisions WHERE request_id = $1 AND campaign_id = ANY($2) AND user_id = $3 AND placement = $4 AND route_id = $5 AND action_node_id = $6 AND scene_equipment = $7 AND expires_at > now()",
+        )
+        .bind(registration.request_id)
+        .bind(&registration.campaign_ids)
+        .bind(registration.user_id)
+        .bind(registration.placement)
+        .bind(registration.route_id)
+        .bind(registration.action_node_id)
+        .bind(registration.scene_equipment)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database)?;
+        if matching_decisions != i64::try_from(registration.campaign_ids.len()).unwrap_or(i64::MAX)
+        {
+            return Err(RepositoryError::Failed(
+                "request id already belongs to a different decision context".to_string(),
+            ));
         }
         tx.commit().await.map_err(database)?;
         Ok(())
@@ -556,14 +642,29 @@ impl CampaignRepository for PostgresCampaignRepository {
         request: pb::RecordEventRequest,
     ) -> Result<pb::EventReceipt, RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(database)?;
-        let duplicate = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM ad_delivery_events WHERE id=$1)",
+        let existing_event = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT user_id, request_id, campaign_id, event_type FROM ad_delivery_events WHERE id=$1",
         )
         .bind(&request.event_id)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(database)?;
-        if duplicate {
+        if let Some((
+            existing_user_id,
+            existing_request_id,
+            existing_campaign_id,
+            existing_event_type,
+        )) = existing_event
+        {
+            if existing_user_id != user_id
+                || existing_request_id != request.request_id
+                || existing_campaign_id != request.campaign_id
+                || existing_event_type != event_name(request.event_type)
+            {
+                return Err(RepositoryError::Failed(
+                    "event id was already used for a different delivery event".to_string(),
+                ));
+            }
             tx.commit().await.map_err(database)?;
             return Ok(pb::EventReceipt {
                 event_id: request.event_id,
@@ -782,6 +883,46 @@ fn campaign_select(where_clause: &str) -> String {
     )
 }
 
+fn unique_campaign_ids(campaign_ids: &[String]) -> Result<Vec<String>, RepositoryError> {
+    let values = campaign_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    if values.len() != campaign_ids.len() {
+        return Err(RepositoryError::Failed(
+            "campaign ids must be non-empty and unique".to_string(),
+        ));
+    }
+    Ok(values.into_iter().collect())
+}
+
+fn campaign_matches_registration(
+    campaign: &pb::AdCampaign,
+    registration: &DecisionRegistration<'_>,
+    now: OffsetDateTime,
+) -> bool {
+    campaign.status == pb::CampaignStatus::Active as i32
+        && campaign.placement == registration.placement
+        && campaign.route_id == registration.route_id
+        && campaign.action_node_id == registration.action_node_id
+        && campaign.scene_equipment == registration.scene_equipment
+        && campaign_starts(campaign).is_none_or(|start| start <= now)
+        && campaign_ends(campaign).is_none_or(|end| end > now)
+}
+
+fn decision_matches_registration(
+    decision: &MemoryDecision,
+    registration: &DecisionRegistration<'_>,
+) -> bool {
+    decision.user_id == registration.user_id
+        && decision.placement == registration.placement
+        && decision.route_id == registration.route_id
+        && decision.action_node_id == registration.action_node_id
+        && decision.scene_equipment == registration.scene_equipment
+}
+
 fn new_campaign(request: pb::CreateCampaignRequest) -> pb::AdCampaign {
     let now = OffsetDateTime::now_utc();
     pb::AdCampaign {
@@ -956,7 +1097,9 @@ fn parse_pricing(value: &str) -> Result<pb::PricingModel, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CampaignRepository, MemoryCampaignRepository, RepositoryError};
+    use super::{
+        CampaignRepository, DecisionRegistration, MemoryCampaignRepository, RepositoryError,
+    };
     use crate::api::pb;
 
     fn campaign_request() -> pb::CreateCampaignRequest {
@@ -981,6 +1124,22 @@ mod tests {
             predicted_ctr: 0.1,
             predicted_cvr: 0.2,
             global_frequency_cap: 0,
+        }
+    }
+
+    fn registration<'a>(
+        user_id: &'a str,
+        request_id: &'a str,
+        campaign_ids: Vec<String>,
+    ) -> DecisionRegistration<'a> {
+        DecisionRegistration {
+            user_id,
+            request_id,
+            placement: "feed",
+            route_id: "route-1",
+            action_node_id: "node-1",
+            scene_equipment: "轻量背包",
+            campaign_ids,
         }
     }
 
@@ -1019,7 +1178,11 @@ mod tests {
         assert!(!untracked.accepted);
 
         repository
-            .register_decisions("user-1", "request-1", "feed", vec![campaign.id.clone()])
+            .register_decisions(registration(
+                "user-1",
+                "request-1",
+                vec![campaign.id.clone()],
+            ))
             .await
             .expect("decision should be registered");
         let accepted = repository
@@ -1076,7 +1239,11 @@ mod tests {
             .await
             .expect("campaign should be activated");
         repository
-            .register_decisions("user-1", "request-1", "feed", vec![campaign.id.clone()])
+            .register_decisions(registration(
+                "user-1",
+                "request-1",
+                vec![campaign.id.clone()],
+            ))
             .await
             .expect("first decision should be tracked");
         assert!(
@@ -1096,7 +1263,11 @@ mod tests {
                 .accepted
         );
         repository
-            .register_decisions("user-2", "request-2", "feed", vec![campaign.id.clone()])
+            .register_decisions(registration(
+                "user-2",
+                "request-2",
+                vec![campaign.id.clone()],
+            ))
             .await
             .expect("second decision should be tracked");
         assert!(
@@ -1115,6 +1286,143 @@ mod tests {
                 .expect("second impression should be rejected")
                 .accepted
         );
+    }
+
+    #[tokio::test]
+    async fn event_id_cannot_be_reused_across_delivery_contexts() {
+        let repository = MemoryCampaignRepository::default();
+        let campaign = repository
+            .create(campaign_request())
+            .await
+            .expect("campaign should be created");
+        repository
+            .update(
+                &campaign.id,
+                pb::UpdateCampaignRequest {
+                    advertiser_id: campaign.advertiser_id.clone(),
+                    status: Some(pb::CampaignStatus::Active as i32),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("campaign should be activated");
+        repository
+            .register_decisions(registration(
+                "user-1",
+                "request-1",
+                vec![campaign.id.clone()],
+            ))
+            .await
+            .expect("first decision should be tracked");
+        repository
+            .record_event(
+                "user-1",
+                pb::RecordEventRequest {
+                    user_id: "user-1".to_string(),
+                    event_id: "shared-event".to_string(),
+                    request_id: "request-1".to_string(),
+                    campaign_id: campaign.id.clone(),
+                    event_type: pb::EventType::Impression as i32,
+                },
+            )
+            .await
+            .expect("first event should be accepted");
+        repository
+            .register_decisions(registration(
+                "user-2",
+                "request-2",
+                vec![campaign.id.clone()],
+            ))
+            .await
+            .expect("second decision should be tracked");
+        let conflict = repository
+            .record_event(
+                "user-2",
+                pb::RecordEventRequest {
+                    user_id: "user-2".to_string(),
+                    event_id: "shared-event".to_string(),
+                    request_id: "request-2".to_string(),
+                    campaign_id: campaign.id,
+                    event_type: pb::EventType::Impression as i32,
+                },
+            )
+            .await;
+        assert!(matches!(
+            conflict,
+            Err(RepositoryError::Failed(message))
+                if message == "event id was already used for a different delivery event"
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_decision_that_does_not_match_the_campaign_action_node() {
+        let repository = MemoryCampaignRepository::default();
+        let campaign = repository
+            .create(campaign_request())
+            .await
+            .expect("campaign should be created");
+        repository
+            .update(
+                &campaign.id,
+                pb::UpdateCampaignRequest {
+                    advertiser_id: campaign.advertiser_id.clone(),
+                    status: Some(pb::CampaignStatus::Active as i32),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("campaign should be activated");
+
+        let rejected = repository
+            .register_decisions(DecisionRegistration {
+                action_node_id: "other-node",
+                ..registration("user-1", "request-wrong-context", vec![campaign.id.clone()])
+            })
+            .await;
+        assert!(matches!(rejected, Err(RepositoryError::Failed(_))));
+
+        let receipt = repository
+            .record_event(
+                "user-1",
+                pb::RecordEventRequest {
+                    user_id: "user-1".to_string(),
+                    event_id: "event-wrong-context".to_string(),
+                    request_id: "request-wrong-context".to_string(),
+                    campaign_id: campaign.id,
+                    event_type: pb::EventType::Impression as i32,
+                },
+            )
+            .await
+            .expect("invalid decision should return a receipt");
+        assert!(!receipt.accepted);
+    }
+
+    #[tokio::test]
+    async fn rejects_a_decision_that_does_not_match_scene_equipment() {
+        let repository = MemoryCampaignRepository::default();
+        let campaign = repository
+            .create(campaign_request())
+            .await
+            .expect("campaign should be created");
+        repository
+            .update(
+                &campaign.id,
+                pb::UpdateCampaignRequest {
+                    advertiser_id: campaign.advertiser_id.clone(),
+                    status: Some(pb::CampaignStatus::Active as i32),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("campaign should be activated");
+
+        let rejected = repository
+            .register_decisions(DecisionRegistration {
+                scene_equipment: "wrong equipment",
+                ..registration("user-1", "request-wrong-equipment", vec![campaign.id])
+            })
+            .await;
+        assert!(matches!(rejected, Err(RepositoryError::Failed(_))));
     }
 
     #[tokio::test]

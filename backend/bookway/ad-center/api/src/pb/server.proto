@@ -37,10 +37,10 @@ message UpdateCampaignRequest {
 }
 message CampaignIdRequest { string campaign_id = 1; string advertiser_id = 2; }
 message AdvertiserCampaignQuery { string advertiser_id = 1; optional uint32 limit = 2; }
-message EligibleRequest { string user_id = 1; string placement = 2; string domain = 3; uint32 limit = 4; string route_id = 5; string action_node_id = 6; }
+message EligibleRequest { string user_id = 1; string placement = 2; string domain = 3; uint32 limit = 4; string route_id = 5; string action_node_id = 6; string scene_equipment = 7; }
 message CampaignList { repeated AdCampaign items = 1; }
 message RecordEventRequest { string user_id = 1; string event_id = 2; string request_id = 3; string campaign_id = 4; EventType event_type = 5; }
-message RegisterDecisionRequest { string user_id = 1; string request_id = 2; string placement = 3; repeated string campaign_ids = 4; string route_id = 5; string action_node_id = 6; }
+message RegisterDecisionRequest { string user_id = 1; string request_id = 2; string placement = 3; repeated string campaign_ids = 4; string route_id = 5; string action_node_id = 6; string scene_equipment = 7; }
 message EventReceipt { string event_id = 1; bool accepted = 2; bool duplicate = 3; }
 message EmptyResponse {}
 

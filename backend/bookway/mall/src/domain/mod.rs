@@ -1,11 +1,11 @@
 use crate::api::pb;
-use bookway_bbs_link_api::pb::{self as bbs_link, bbs_link_client::BbsLinkClient};
 use crate::{
     Config,
     datasource::{
         CatalogRepository, MemoryCatalogRepository, PostgresCatalogRepository, RepositoryError,
     },
 };
+use bookway_bbs_link_api::pb::{self as bbs_link, bbs_link_client::BbsLinkClient};
 use std::sync::Arc;
 use thiserror::Error;
 #[derive(Debug, Error)]
@@ -100,11 +100,12 @@ impl Domain {
             || request.sku_id.trim().is_empty()
             || request.route_id.trim().is_empty()
             || request.action_node_id.trim().is_empty()
+            || request.scene_equipment.trim().is_empty()
             || request.creator_id.trim().is_empty()
             || request.idempotency_key.trim().is_empty()
         {
             return Err(MallError::Validation(
-                "merchant, product, SKU, route, action node, creator and idempotency key are required"
+                "merchant, product, SKU, route, action node, scene equipment, creator and idempotency key are required"
                     .to_string(),
             ));
         }
@@ -117,6 +118,7 @@ impl Domain {
             &request.route_id,
             &request.action_node_id,
             Some(&request.creator_id),
+            Some(&request.scene_equipment),
         )
         .await?;
         let skus = self
@@ -142,7 +144,7 @@ impl Domain {
                 "route and action node are required".to_string(),
             ));
         }
-        self.validate_public_action_node(&request.route_id, &request.action_node_id, None)
+        self.validate_public_action_node(&request.route_id, &request.action_node_id, None, None)
             .await?;
         Ok(pb::NodeOfferList {
             items: self
@@ -153,7 +155,7 @@ impl Domain {
         })
     }
 
-    pub(crate) async fn node_offer(
+    pub(crate) async fn checkout_node_offer(
         &self,
         request: pb::IdRequest,
     ) -> Result<pb::NodeOffer, MallError> {
@@ -162,6 +164,35 @@ impl Domain {
                 "node offer id is required".to_string(),
             ));
         }
+        let offer = self
+            .repository
+            .node_offer(&request.id)
+            .await
+            .map_err(repo_error)?;
+        // Orders resolve an offer by ID rather than through the public list.
+        // Revalidate its route action context so an old offer ID cannot bypass
+        // a withdrawn route, a removed action node, or changed equipment.
+        self.validate_public_action_node(
+            &offer.route_id,
+            &offer.action_node_id,
+            None,
+            Some(&offer.scene_equipment),
+        )
+        .await?;
+        Ok(offer)
+    }
+
+    pub(crate) async fn settlement_node_offer(
+        &self,
+        request: pb::IdRequest,
+    ) -> Result<pb::NodeOffer, MallError> {
+        if request.id.trim().is_empty() {
+            return Err(MallError::Validation(
+                "node offer id is required".to_string(),
+            ));
+        }
+        // Historical attribution and affiliate settlement deliberately retain
+        // the original context after a merchant withdraws an offer.
         self.repository
             .node_offer(&request.id)
             .await
@@ -173,6 +204,7 @@ impl Domain {
         route_id: &str,
         action_node_id: &str,
         expected_creator_id: Option<&str>,
+        expected_scene_equipment: Option<&str>,
     ) -> Result<(), MallError> {
         let mut client = self.bbs_link.clone();
         let route = client
@@ -188,28 +220,59 @@ impl Domain {
                 _ => MallError::Repository(format!("bbs-link get_public failed: {error}")),
             })?
             .into_inner();
-        if route.content_type != bbs_link::ContentType::Route as i32 {
-            return Err(MallError::Validation(
-                "equipment can only be attached to a public route action node".to_string(),
-            ));
-        }
-        if expected_creator_id.is_some_and(|creator_id| route.author_id != creator_id) {
-            return Err(MallError::Validation(
-                "the offer creator must own the attached route".to_string(),
-            ));
-        }
-        let has_node = route
-            .route_template
-            .as_ref()
-            .is_some_and(|template| template.actions.iter().any(|action| action.id == action_node_id));
-        if !has_node {
-            return Err(MallError::Validation(
-                "action node does not belong to the public route".to_string(),
-            ));
-        }
-        Ok(())
+        validate_route_action_node(
+            &route,
+            action_node_id,
+            expected_creator_id,
+            expected_scene_equipment,
+        )
     }
 }
+
+fn validate_route_action_node(
+    route: &bbs_link::Content,
+    action_node_id: &str,
+    expected_creator_id: Option<&str>,
+    expected_scene_equipment: Option<&str>,
+) -> Result<(), MallError> {
+    if route.content_type != bbs_link::ContentType::Route as i32 {
+        return Err(MallError::Validation(
+            "equipment can only be attached to a public route action node".to_string(),
+        ));
+    }
+    if expected_creator_id.is_some_and(|creator_id| route.author_id != creator_id) {
+        return Err(MallError::Validation(
+            "the offer creator must own the attached route".to_string(),
+        ));
+    }
+    let action = route.route_template.as_ref().and_then(|template| {
+        template
+            .actions
+            .iter()
+            .find(|action| action.id == action_node_id)
+    });
+    let Some(action) = action else {
+        return Err(MallError::Validation(
+            "action node does not belong to the public route".to_string(),
+        ));
+    };
+    if let Some(scene_equipment) = expected_scene_equipment
+        && !action
+            .scene_equipment
+            .iter()
+            .any(|value| scene_equipment_key(value) == scene_equipment_key(scene_equipment))
+    {
+        return Err(MallError::Validation(
+            "scene equipment is not declared by the action node".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn scene_equipment_key(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
 fn validate(request: &pb::CreateProductRequest) -> Result<(), MallError> {
     if request.merchant_id.trim().is_empty()
         || request.title.trim().is_empty()
@@ -289,5 +352,45 @@ fn repo_error(error: RepositoryError) -> MallError {
     match error {
         RepositoryError::NotFound(value) => MallError::NotFound(value),
         RepositoryError::Failed(value) => MallError::Repository(value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bookway_bbs_link_api::pb as bbs_link;
+
+    use super::{MallError, validate_route_action_node};
+
+    fn public_route() -> bbs_link::Content {
+        bbs_link::Content {
+            author_id: "route-author".to_string(),
+            content_type: bbs_link::ContentType::Route as i32,
+            route_template: Some(bbs_link::RouteTemplate {
+                actions: vec![bbs_link::RouteTemplateAction {
+                    id: "node-1".to_string(),
+                    scene_equipment: vec!["trail shoes".to_string()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolved_offer_must_remain_on_the_current_action_context() {
+        let route = public_route();
+        validate_route_action_node(&route, "node-1", None, Some("TRAIL SHOES"))
+            .expect("current scene equipment remains saleable");
+        assert!(matches!(
+            validate_route_action_node(&route, "removed-node", None, Some("trail shoes")),
+            Err(MallError::Validation(message))
+                if message == "action node does not belong to the public route"
+        ));
+        assert!(matches!(
+            validate_route_action_node(&route, "node-1", None, Some("rain shell")),
+            Err(MallError::Validation(message))
+                if message == "scene equipment is not declared by the action node"
+        ));
     }
 }
