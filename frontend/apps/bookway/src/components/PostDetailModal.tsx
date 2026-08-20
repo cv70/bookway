@@ -1,6 +1,6 @@
 import { useEventListener } from 'expo';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import { Bookmark, CheckCircle2, EyeOff, Heart, MessageCircle, Route, Send, ShieldAlert, UserPlus, X } from 'lucide-react-native';
+import { Bookmark, CheckCircle2, EyeOff, GitFork, Heart, MessageCircle, Route, Send, ShieldAlert, ShoppingBag, UserPlus, X } from 'lucide-react-native';
 import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
@@ -47,6 +47,9 @@ type Props = {
   onDeleteComment: (postId: string, commentId: string) => Promise<void>;
   onAcceptAnswer: (postId: string, commentId: string) => Promise<ContentDetail>;
   onLoadMoreComments: (postId: string) => Promise<void>;
+  onOpenActionContext?: (routeId: string, action: RouteTemplateAction, sceneEquipment: string) => void;
+  canForkRoute?: boolean;
+  onForkRoute?: (post: CommunityPost) => void;
 };
 
 export function PostDetailModal({
@@ -77,6 +80,9 @@ export function PostDetailModal({
   onDeleteComment,
   onAcceptAnswer,
   onLoadMoreComments,
+  onOpenActionContext,
+  canForkRoute = false,
+  onForkRoute,
 }: Props) {
   const [comment, setComment] = useState('');
   const [replyTo, setReplyTo] = useState<Comment>();
@@ -265,16 +271,19 @@ export function PostDetailModal({
                 <Text style={styles.stageTitle}>阶段 {stageIndex + 1} · {stage.title || '未命名阶段'}</Text>
                 {stage.detail.trim() ? <Text style={styles.stageDetail}>{stage.detail}</Text> : null}
                 {stage.completion_criteria.trim() ? <Text style={styles.stageCriteria}>完成：{stage.completion_criteria}</Text> : null}
-                {stageActions.map((action, actionIndex) => <RouteTemplateActionCard action={action} key={`${action.title}-${actionIndex}`} />)}
+                {stageActions.map((action, actionIndex) => <RouteTemplateActionCard action={action} key={`${action.title}-${actionIndex}`} onOpenContext={onOpenActionContext ? (equipment) => onOpenActionContext(post.id, action, equipment) : undefined} />)}
               </View>;
             })}</View> : null}
-            {unassignedTemplateActions.length ? <View style={styles.templateSection}><Text style={styles.templateSectionTitle}>{templateStages.length ? '其他行动' : '行动安排'}</Text>{unassignedTemplateActions.map((action, actionIndex) => <RouteTemplateActionCard action={action} key={`${action.title}-${actionIndex}`} />)}</View> : null}
+            {unassignedTemplateActions.length ? <View style={styles.templateSection}><Text style={styles.templateSectionTitle}>{templateStages.length ? '其他行动' : '行动安排'}</Text>{unassignedTemplateActions.map((action, actionIndex) => <RouteTemplateActionCard action={action} key={`${action.title}-${actionIndex}`} onOpenContext={onOpenActionContext ? (equipment) => onOpenActionContext(post.id, action, equipment) : undefined} />)}</View> : null}
           </View> : null}
-          {hasRoute ? <Pressable disabled={joined || joining} onPress={() => onJoin(post)} style={({ pressed }) => [styles.route, joined && styles.routeJoined, pressed && styles.pressed]}>
-            <Route color={colors.evergreen} size={20} />
-            <View style={styles.routeCopy}><Text numberOfLines={1} style={styles.routeTitle}>{routeTitle}</Text><Text style={styles.routeMeta}>{routeDuration ? `${routeDuration} · ` : ''}{(joinCount ?? post.join_count).toLocaleString()} 人加入</Text></View>
-            <Text style={styles.join}>{joining ? '加入中' : joined ? '已加入' : '加入路线'}</Text>
-          </Pressable> : null}
+          {hasRoute ? <>
+            <Pressable disabled={joined || joining} onPress={() => onJoin(post)} style={({ pressed }) => [styles.route, joined && styles.routeJoined, pressed && styles.pressed]}>
+              <Route color={colors.evergreen} size={20} />
+              <View style={styles.routeCopy}><Text numberOfLines={1} style={styles.routeTitle}>{routeTitle}</Text><Text style={styles.routeMeta}>{routeDuration ? `${routeDuration} · ` : ''}{(joinCount ?? post.join_count).toLocaleString()} 人加入</Text></View>
+              <Text style={styles.join}>{joining ? '加入中' : joined ? '已加入' : '加入路线'}</Text>
+            </Pressable>
+            {canForkRoute && onForkRoute ? <Pressable accessibilityLabel="分叉这条路线" onPress={() => onForkRoute(post)} style={({ pressed }) => [styles.forkRoute, pressed && styles.pressed]}><GitFork color={colors.evergreen} size={17} /><Text style={styles.forkRouteText}>分叉路线，创建自己的版本</Text></Pressable> : null}
+          </> : null}
           <View style={styles.knowledgeCapture}>
             <View style={styles.knowledgeCaptureCopy}>
               <View style={styles.knowledgeCaptureTitleRow}><Bookmark color={capturedKnowledge ? colors.evergreen : colors.gold} fill={capturedKnowledge ? colors.evergreen : 'transparent'} size={18} /><Text style={styles.knowledgeCaptureTitle}>{capturedKnowledge ? '已收进知识库' : '把这条灵感收进知识库'}</Text></View>
@@ -332,7 +341,7 @@ function TemplateField({ label, value }: { label: string; value: string }) {
   return <View style={styles.templateField}><Text style={styles.templateFieldLabel}>{label}</Text><Text style={styles.templateFieldValue}>{value}</Text></View>;
 }
 
-function RouteTemplateActionCard({ action }: { action: RouteTemplateAction }) {
+function RouteTemplateActionCard({ action, onOpenContext }: { action: RouteTemplateAction; onOpenContext?: (sceneEquipment: string) => void }) {
   const duration = action.estimated_minutes > 0 ? `约 ${action.estimated_minutes} 分钟` : '用时自定';
   // Templates describe a reusable method, never the author's calendar.
   const schedule = '按自己的节奏安排';
@@ -340,6 +349,10 @@ function RouteTemplateActionCard({ action }: { action: RouteTemplateAction }) {
     <Text style={styles.templateActionTitle}>{action.title || '行动'}</Text>
     {action.detail.trim() ? <Text style={styles.templateActionDetail}>{action.detail}</Text> : null}
     <Text style={styles.templateActionMeta}>{duration} · {schedule}</Text>
+    {action.scene_equipment?.length ? <View style={styles.equipmentRow}>
+      <Text style={styles.equipmentLabel}>场景装备</Text>
+      <View style={styles.equipmentList}>{action.scene_equipment.map((equipment) => <Pressable accessibilityRole="button" accessibilityLabel={`查看${equipment}相关内容`} disabled={!onOpenContext} key={equipment} onPress={() => onOpenContext?.(equipment)} style={({ pressed }) => [styles.equipmentChip, pressed && styles.pressed]}><ShoppingBag color={colors.blue} size={13} /><Text style={styles.equipmentText}>{equipment}</Text></Pressable>)}</View>
+    </View> : null}
   </View>;
 }
 
@@ -457,12 +470,19 @@ const styles = StyleSheet.create({
   templateActionTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
   templateActionDetail: { color: colors.muted, fontSize: 12, lineHeight: 19, marginTop: 4, letterSpacing: 0 },
   templateActionMeta: { color: colors.faint, fontSize: 11, marginTop: 5, letterSpacing: 0 },
+  equipmentRow: { marginTop: 10, gap: 6 },
+  equipmentLabel: { color: colors.muted, fontSize: 10, fontWeight: '700', letterSpacing: 0 },
+  equipmentList: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  equipmentChip: { minHeight: 30, paddingHorizontal: 9, flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: 5, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
+  equipmentText: { color: colors.blue, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
   route: { minHeight: 68, marginHorizontal: 20, marginTop: 17, padding: 12, borderRadius: 7, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
   routeJoined: { backgroundColor: colors.evergreenSoft },
   routeCopy: { flex: 1, minWidth: 0 },
   routeTitle: { color: colors.ink, fontSize: 13, fontWeight: '700', letterSpacing: 0 },
   routeMeta: { color: colors.faint, fontSize: 11, marginTop: 3, letterSpacing: 0 },
   join: { color: colors.evergreen, fontSize: 12, fontWeight: '700', letterSpacing: 0 },
+  forkRoute: { minHeight: 42, marginHorizontal: 20, marginTop: 8, paddingHorizontal: 13, flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: colors.evergreen, borderRadius: 6 },
+  forkRouteText: { color: colors.evergreen, fontSize: 12, fontWeight: '700', letterSpacing: 0 },
   knowledgeCapture: { minHeight: 88, marginHorizontal: 20, marginTop: 15, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 7, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
   knowledgeCaptureCopy: { flex: 1, minWidth: 0 },
   knowledgeCaptureTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },

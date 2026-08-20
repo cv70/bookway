@@ -20,8 +20,7 @@ impl KnowledgeCatalog for GrpcServer {
             self.domain
                 .search(request.into_inner())
                 .await
-                .map_err(status)?
-                .into(),
+                .map_err(status)?,
         ))
     }
     async fn get(
@@ -107,6 +106,9 @@ fn status(error: DomainError) -> Status {
         DomainError::Validation(message) => Status::invalid_argument(message),
         DomainError::Repository(crate::datasource::RepositoryError::NotFound(message)) => {
             Status::not_found(message)
+        }
+        DomainError::Repository(crate::datasource::RepositoryError::Conflict(message)) => {
+            Status::already_exists(message)
         }
         DomainError::Repository(error) => Status::internal(error.to_string()),
         DomainError::Upstream(message) => Status::internal(message),

@@ -4,7 +4,10 @@ use thiserror::Error;
 
 use crate::{
     conf::Config,
-    datasource::{BbsRepository, MemoryBbsRepository, PostgresBbsRepository, RepositoryError},
+    datasource::{
+        BbsRepository, CachedBbsRepository, MemoryBbsRepository, PostgresBbsRepository,
+        RepositoryError,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -29,7 +32,17 @@ impl Domain {
                 bookway_data::postgres_pool().await?,
             )),
         };
-        Ok(Self { config, repository })
+        let redis = match bookway_data::redis_connection().await {
+            Ok(redis) => redis,
+            Err(error) => {
+                tracing::warn!(%error, "redis unavailable at startup; bbs relationship cache disabled");
+                None
+            }
+        };
+        Ok(Self {
+            config,
+            repository: Arc::new(CachedBbsRepository::new(repository, redis)),
+        })
     }
 
     #[cfg(test)]

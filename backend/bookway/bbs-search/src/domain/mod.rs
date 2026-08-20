@@ -837,7 +837,14 @@ fn content_results(
                 domain: Some(growth_domain(post.domain)),
                 score,
                 highlights,
-                post: Some(post_summary(post.clone())),
+                post: Some(post_summary(
+                    post.clone(),
+                    content
+                        .route_template
+                        .as_ref()
+                        .map(|template| template.actions.clone())
+                        .unwrap_or_default(),
+                )),
                 resource: None,
             })
         })
@@ -964,7 +971,10 @@ fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-fn post_summary(value: bbs_link_pb::PostSummary) -> pb::PostSummary {
+fn post_summary(
+    value: bbs_link_pb::PostSummary,
+    route_actions: Vec<bbs_link_pb::RouteTemplateAction>,
+) -> pb::PostSummary {
     pb::PostSummary {
         id: value.id,
         author_name: value.author_name,
@@ -982,6 +992,7 @@ fn post_summary(value: bbs_link_pb::PostSummary) -> pb::PostSummary {
         is_route: value.is_route,
         is_milestone: value.is_milestone,
         is_question: value.is_question,
+        route_actions,
     }
 }
 
@@ -1701,6 +1712,14 @@ mod tests {
                 Some("route-1"),
                 "{query} should resolve the owning route"
             );
+            let actions = response.items[0]
+                .post
+                .as_ref()
+                .expect("route result should carry its public action nodes")
+                .route_actions
+                .as_slice();
+            assert_eq!(actions[0].id, "action-kettlebell");
+            assert!(actions[0].scene_equipment.iter().any(|item| item == "壶铃"));
         }
     }
 
@@ -1802,6 +1821,7 @@ mod tests {
             content_type: content_type as i32,
             topics: vec![topic.to_string()],
             quality_score,
+            route_actions: Vec::new(),
         }
     }
 }

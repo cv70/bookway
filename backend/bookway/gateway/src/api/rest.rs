@@ -399,13 +399,13 @@ impl From<bbs_link_pb::Milestone> for Milestone {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateContentRequest {
     pub(crate) title: String,
     pub(crate) summary: String,
     pub(crate) body: String,
     pub(crate) domain: GrowthDomain,
     pub(crate) content_type: ContentType,
-    pub(crate) cover_url: Option<String>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
     #[serde(default)]
@@ -433,7 +433,6 @@ impl CreateContentRequest {
             body: self.body,
             domain: self.domain.into_link(),
             content_type: self.content_type.into_link(),
-            cover_url: self.cover_url,
             tags: self.tags,
             topics: self.topics,
             route_title: self.route_title,
@@ -447,13 +446,13 @@ impl CreateContentRequest {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct UpdateContentRequest {
     pub(crate) title: Option<String>,
     pub(crate) summary: Option<String>,
     pub(crate) body: Option<String>,
     pub(crate) tags: Option<Vec<String>>,
     pub(crate) topics: Option<Vec<String>>,
-    pub(crate) cover_url: Option<String>,
     pub(crate) media_asset_ids: Option<Vec<String>>,
     pub(crate) route_template: Option<RouteTemplate>,
     pub(crate) milestone: Option<MilestoneDraft>,
@@ -469,7 +468,6 @@ impl UpdateContentRequest {
             body: self.body,
             tags: self.tags.map(|values| bbs_link_pb::StringList { values }),
             topics: self.topics.map(|values| bbs_link_pb::StringList { values }),
-            cover_url: self.cover_url,
             media_asset_ids: self
                 .media_asset_ids
                 .map(|values| bbs_link_pb::StringList { values }),
@@ -4811,6 +4809,21 @@ mod tests {
             request.route_template.expect("route template").journey_type,
             bbs_link_pb::RouteTemplateKind::Project as i32
         );
+    }
+
+    #[test]
+    fn legacy_cover_url_is_rejected_at_the_rest_boundary() {
+        let result = serde_json::from_value::<CreateContentRequest>(serde_json::json!({
+            "title": "路线",
+            "summary": "摘要",
+            "body": "正文",
+            "domain": "learning",
+            "content_type": "note",
+            "cover_url": "https://legacy.example/cover.jpg",
+            "tags": [],
+            "topics": []
+        }));
+        assert!(result.is_err(), "deprecated cover_url must not be accepted");
     }
 
     #[test]

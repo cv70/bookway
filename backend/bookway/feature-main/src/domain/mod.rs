@@ -51,12 +51,18 @@ impl Domain {
                     // Serialize misses for the same user. The second read
                     // avoids a PostgreSQL stampede when a hot Redis key
                     // expires under concurrent recommendation requests.
-                    let _miss_guard = self.cache.miss_lock(&request.user_id).await;
+                    let miss_guard = self.cache.refresh_lock(&request.user_id).await;
                     if let Some(features) = self.cache.load(&request.user_id).await {
+                        miss_guard.release().await;
                         return features;
+                    }
+                    if miss_guard.peer_holds_lease() {
+                        miss_guard.release().await;
+                        return HashMap::new();
                     }
                     let features = self.repository.load(&request.user_id).await;
                     self.cache.store(&request.user_id, &features).await;
+                    miss_guard.release().await;
                     features
                 }
             }

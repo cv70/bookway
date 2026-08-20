@@ -129,6 +129,7 @@ fn mall_error(error: MallError) -> Status {
     match error {
         MallError::Validation(message) => Status::invalid_argument(message),
         MallError::NotFound(message) => Status::not_found(message),
+        MallError::Conflict(message) => Status::already_exists(message),
         MallError::Repository(message) => Status::internal(message),
     }
 }

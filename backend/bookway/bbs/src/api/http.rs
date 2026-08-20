@@ -90,6 +90,10 @@ impl IntoResponse for HttpError {
             BbsError::Repository(crate::datasource::RepositoryError::BlockedRelationship) => {
                 (StatusCode::CONFLICT, "blocked_relationship")
             }
+            BbsError::Repository(crate::datasource::RepositoryError::CachePeerRefresh) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "relationship_cache_refreshing",
+            ),
             BbsError::Repository(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
         };
         (status, Json(ErrorResponse::new(code, self.0.to_string()))).into_response()

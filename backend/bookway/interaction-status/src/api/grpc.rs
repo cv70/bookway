@@ -43,18 +43,28 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .await;
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(pb::interaction_status_server::InteractionStatusServer::new(
-            GrpcServer {
-                domain: domain.clone(),
-            },
-        ))
+        .add_service(
+            pb::interaction_status_server::InteractionStatusServer::with_interceptor(
+                GrpcServer {
+                    domain: domain.clone(),
+                },
+                bookway_runtime::grpc_service_auth_interceptor,
+            ),
+        )
         .serve(domain.config.grpc_addr)
         .await
 }
 
 fn internal_error(error: crate::domain::InteractionStatusError) -> Status {
     match error {
-        crate::domain::InteractionStatusError::Validation(message) => Status::invalid_argument(message),
-        crate::domain::InteractionStatusError::Repository(error) => Status::internal(error.to_string()),
+        crate::domain::InteractionStatusError::Validation(message) => {
+            Status::invalid_argument(message)
+        }
+        crate::domain::InteractionStatusError::Repository(error) => match error {
+            crate::datasource::RepositoryError::CachePeerRefresh => {
+                Status::unavailable(error.to_string())
+            }
+            _ => Status::internal(error.to_string()),
+        },
     }
 }

@@ -34,14 +34,17 @@ impl RecommendRecallSource {
     async fn interests(&self, query: &FeedQuery) -> (Vec<GrowthDomain>, bool) {
         let mut interests = query.interests.iter().copied().collect::<BTreeSet<_>>();
         let mut client = self.feature_client.clone();
-        let profile = tokio::time::timeout(
-            PROFILE_FEATURE_TIMEOUT,
-            client.features(feature::FeaturesRequest {
-                user_id: query.user_id.clone(),
-                content_ids: Vec::new(),
-            }),
-        )
-        .await;
+        let request = match bookway_runtime::grpc_service_request(feature::FeaturesRequest {
+            user_id: query.user_id.clone(),
+            content_ids: Vec::new(),
+        }) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, user_id = %query.user_id, "profile feature request authentication degraded");
+                return (interests.into_iter().collect(), true);
+            }
+        };
+        let profile = tokio::time::timeout(PROFILE_FEATURE_TIMEOUT, client.features(request)).await;
         let degraded = match profile {
             Ok(Ok(response)) => {
                 interests.extend(personalized_interest_domains(&response.into_inner()));
@@ -92,20 +95,23 @@ impl CandidateSource for RecommendRecallSource {
         let following_author_ids = self.following_author_ids(query).await?;
         let mut client = (*self.client).clone();
         let response = client
-            .recall(recall::RecallRequest {
-                user_id: query.user_id.clone(),
-                interests: interests.into_iter().map(|domain| domain as i32).collect(),
-                seen: query.seen.iter().cloned().collect(),
-                cursor: query.cursor.clone().unwrap_or_default(),
-                limit: u32::try_from(if query.surface == "following" {
-                    query.limit
-                } else {
-                    query.limit.saturating_mul(3)
+            .recall(
+                bookway_runtime::grpc_service_request(recall::RecallRequest {
+                    user_id: query.user_id.clone(),
+                    interests: interests.into_iter().map(|domain| domain as i32).collect(),
+                    seen: query.seen.iter().cloned().collect(),
+                    cursor: query.cursor.clone().unwrap_or_default(),
+                    limit: u32::try_from(if query.surface == "following" {
+                        query.limit
+                    } else {
+                        query.limit.saturating_mul(3)
+                    })
+                    .unwrap_or(u32::MAX),
+                    following_author_ids,
+                    following_only: query.surface == "following",
                 })
-                .unwrap_or(u32::MAX),
-                following_author_ids,
-                following_only: query.surface == "following",
-            })
+                .map_err(|error| PipelineError::Recall(error.to_string()))?,
+            )
             .await
             .map_err(|status| PipelineError::Recall(status.to_string()))?
             .into_inner();

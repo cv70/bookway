@@ -7,6 +7,7 @@ impl Domain {
         &self,
         request: pb::ContextRequest,
     ) -> Result<pb::SocialContext, BbsError> {
+        validate_user_id(&request.user_id)?;
         let user_id = request.user_id;
         Ok(self.repository.context(&user_id).await?)
     }

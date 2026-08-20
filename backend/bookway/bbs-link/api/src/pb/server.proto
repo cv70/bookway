@@ -187,6 +187,9 @@ message PublicContentSummary {
   ContentType content_type = 4;
   repeated string topics = 5;
   double quality_score = 6;
+  // Public route action nodes are part of the searchable execution context.
+  // They contain no private Journey or schedule data.
+  repeated RouteTemplateAction route_actions = 7;
 }
 message PublicContentSummariesRequest { repeated string ids = 1; }
 message PublicContentSummaries { repeated PublicContentSummary items = 1; }
@@ -206,6 +209,7 @@ message ListRequest {
 }
 message IdRequest { string id = 1; }
 message CreateRequest {
+  reserved 8;
   string user_id = 1;
   optional string idempotency_key = 2;
   string title = 3;
@@ -213,9 +217,6 @@ message CreateRequest {
   string body = 5;
   GrowthDomain domain = 6;
   ContentType content_type = 7;
-  // Deprecated. Arbitrary URLs are never accepted as public content media;
-  // clients must upload through Media and send its asset IDs instead.
-  optional string cover_url = 8;
   repeated string tags = 9;
   repeated string topics = 10;
   optional string route_title = 11;
@@ -226,6 +227,7 @@ message CreateRequest {
   optional QuestionContextDraft question_context = 16;
 }
 message UpdateRequest {
+  reserved 8;
   string user_id = 1;
   string id = 2;
   optional string title = 3;
@@ -233,8 +235,6 @@ message UpdateRequest {
   optional string body = 5;
   optional StringList tags = 6;
   optional StringList topics = 7;
-  // Deprecated. See CreateRequest.media_asset_ids.
-  optional string cover_url = 8;
   optional StringList media_asset_ids = 9;
   optional RouteTemplate route_template = 10;
   optional MilestoneDraft milestone = 11;

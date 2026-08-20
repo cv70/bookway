@@ -1,10 +1,11 @@
-import { Bookmark, EyeOff, Heart, Route, UsersRound } from 'lucide-react-native';
+import { Bookmark, ExternalLink, EyeOff, Heart, Route, UsersRound } from 'lucide-react-native';
 import { useEffect } from 'react';
-import { Image, Pressable, StyleSheet, Text, View, type ImageStyle } from 'react-native';
+import { Image, Linking, Pressable, StyleSheet, Text, View, type ImageStyle } from 'react-native';
 
 import { colors } from '../theme';
 import { FeedItem } from '../types';
 import { eventReporter } from '../analytics/eventReporter';
+import { reportAdEvent } from '../api/client';
 import { DomainBadge } from './DomainBadge';
 
 export function FeedCard({
@@ -29,14 +30,14 @@ export function FeedCard({
   onLike?: (postId: string, context?: FeedItem['recommendation_context']) => void;
   onBookmark?: (postId: string, context?: FeedItem['recommendation_context']) => void;
   onHide?: (postId: string, context?: FeedItem['recommendation_context']) => void;
-  onJoin?: (post: FeedItem['post'], context?: FeedItem['recommendation_context']) => void;
+  onJoin?: (post: NonNullable<FeedItem['post']>, context?: FeedItem['recommendation_context']) => void;
   onOpen?: (item: FeedItem) => void;
 }) {
-  const { post } = item;
-  const canJoinRoute = post.is_route ?? Boolean(post.route_title.trim());
+  const post = item.post;
   const attribution = item.recommendation_context;
   const impressionComponent = attribution?.surface === 'search' ? 'search-result-card' : 'feed-card';
   useEffect(() => {
+    if (!post) return;
     const attributionSource = attribution?.request_id
       ? attribution.surface === 'search' ? 'search' : 'recommendation'
       : undefined;
@@ -47,7 +48,10 @@ export function FeedCard({
       attribution?.request_id,
       attributionSource,
     );
-  }, [attribution?.position, attribution?.request_id, attribution?.surface, impressionComponent, post.id]);
+  }, [attribution?.position, attribution?.request_id, attribution?.surface, impressionComponent, post?.id]);
+  if (item.ad && !post) return <ContextualAdCard ad={item.ad} />;
+  if (!post) return null;
+  const canJoinRoute = post.is_route ?? Boolean(post.route_title.trim());
   return (
     <View style={styles.card}>
       <View style={styles.authorRow}>
@@ -118,12 +122,49 @@ export function FeedCard({
   );
 }
 
+function ContextualAdCard({ ad }: { ad: NonNullable<FeedItem['ad']> }) {
+  useEffect(() => {
+    reportAdEvent(ad, 'impression').catch(() => undefined);
+  }, [ad]);
+  const open = () => {
+    reportAdEvent(ad, 'click').catch(() => undefined);
+    Linking.openURL(ad.landing_url).catch(() => undefined);
+  };
+  return (
+    <View style={styles.adCard}>
+      <View style={styles.adLabelRow}>
+        <Text style={styles.adLabel}>场景装备</Text>
+        <Text style={styles.adEquipment}>{ad.scene_equipment}</Text>
+      </View>
+      <Pressable accessibilityRole="button" accessibilityLabel={`查看${ad.title}`} onPress={open} style={({ pressed }) => [styles.adBody, pressed && styles.pressed]}>
+        {ad.image_url ? <Image source={{ uri: ad.image_url }} style={styles.adImage as ImageStyle} /> : null}
+        <View style={styles.adCopy}>
+          <Text numberOfLines={2} style={styles.adTitle}>{ad.title}</Text>
+          {ad.body ? <Text numberOfLines={3} style={styles.adDescription}>{ad.body}</Text> : null}
+          <View style={styles.adAction}><Text style={styles.adActionText}>查看装备</Text><ExternalLink color={colors.blue} size={15} /></View>
+        </View>
+      </Pressable>
+    </View>
+  );
+}
+
 function compact(value: number) {
   return value >= 10000 ? `${(value / 10000).toFixed(1)}万` : value.toLocaleString();
 }
 
 const styles = StyleSheet.create({
   card: { backgroundColor: colors.surface, borderBottomColor: colors.line, borderBottomWidth: 8 },
+  adCard: { backgroundColor: colors.surface, borderBottomColor: colors.line, borderBottomWidth: 8, padding: 16 },
+  adLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 },
+  adLabel: { color: colors.blue, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
+  adEquipment: { color: colors.faint, fontSize: 11, letterSpacing: 0 },
+  adBody: { flexDirection: 'row', gap: 12, borderWidth: 1, borderColor: colors.line, borderRadius: 6, padding: 11 },
+  adImage: { width: 82, height: 82, borderRadius: 5, backgroundColor: colors.line },
+  adCopy: { flex: 1, minWidth: 0 },
+  adTitle: { color: colors.ink, fontSize: 15, lineHeight: 21, fontWeight: '700', letterSpacing: 0 },
+  adDescription: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 4, letterSpacing: 0 },
+  adAction: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 7 },
+  adActionText: { color: colors.blue, fontSize: 12, fontWeight: '700', letterSpacing: 0 },
   authorRow: { height: 64, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 10 },
   avatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.line },
   authorCopy: { flex: 1, minWidth: 0 },

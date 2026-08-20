@@ -216,12 +216,15 @@ pub(crate) trait SearchAnalytics: Send + Sync {
 }
 
 pub(crate) type SharedSearchAnalytics = Arc<dyn SearchAnalytics>;
+type SearchCounters = (u64, u64);
+type SearchStatsKey = (String, pb::SearchType);
+type SearchHistoryKey = (String, String, pb::SearchType);
 
 #[derive(Default)]
 pub(crate) struct MemorySearchAnalytics {
-    stats: RwLock<HashMap<(String, pb::SearchType), (u64, u64)>>,
-    global_users: RwLock<HashMap<(String, pb::SearchType), HashSet<String>>>,
-    history: RwLock<HashMap<(String, String, pb::SearchType), (u64, u64)>>,
+    stats: RwLock<HashMap<SearchStatsKey, SearchCounters>>,
+    global_users: RwLock<HashMap<SearchStatsKey, HashSet<String>>>,
+    history: RwLock<HashMap<SearchHistoryKey, SearchCounters>>,
     sequence: RwLock<u64>,
 }
 

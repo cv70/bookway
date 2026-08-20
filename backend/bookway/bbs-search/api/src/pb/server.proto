@@ -1,6 +1,8 @@
 syntax = "proto3";
 package bookway.bbs.search;
 
+import "bbs-link/api/src/pb/server.proto";
+
 enum SearchType {
   SEARCH_TYPE_ALL = 0;
   SEARCH_TYPE_POSTS = 1;
@@ -60,6 +62,10 @@ message PostSummary {
   bool is_route = 14;
   bool is_milestone = 15;
   bool is_question = 16;
+  // Public route action nodes available for the search result. The route ID
+  // remains the enclosing SearchResult ID; callers can identify the matched
+  // title or equipment locally without private execution data.
+  repeated bookway.bbs.link.RouteTemplateAction route_actions = 17;
 }
 
 message ResourceSummary {

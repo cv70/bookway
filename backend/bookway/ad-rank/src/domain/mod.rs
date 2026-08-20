@@ -134,7 +134,11 @@ mod tests {
             })
             .await;
         assert_eq!(
-            response.items[0].campaign.as_ref().unwrap().id,
+            response.items[0]
+                .campaign
+                .as_ref()
+                .expect("ranked campaign should be present")
+                .id,
             "lower-bid-high-value"
         );
     }
@@ -181,7 +185,14 @@ mod tests {
             })
             .await;
 
-        assert_eq!(response.items[0].campaign.as_ref().unwrap().id, "cpm");
+        assert_eq!(
+            response.items[0]
+                .campaign
+                .as_ref()
+                .expect("ranked campaign should be present")
+                .id,
+            "cpm"
+        );
         assert!((response.items[0].score - 6_000_000.2).abs() < f64::EPSILON);
         assert!((response.items[1].score - 5_000_000.2).abs() < f64::EPSILON);
     }

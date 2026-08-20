@@ -41,6 +41,8 @@ WHERE COALESCE(facts.active_count, 0) <> COALESCE(counters.active_count, 0);
 
 `BBS_ADDR` 和 `BBS_GRPC_ADDR`，默认分别监听 `127.0.0.1:8082`、`127.0.0.1:18002`。
 
-## 生产化待办
+## 生产化边界
 
-`STORAGE_MODE=postgres` 已使用 SQLx/PostgreSQL 持久化关系，并在拉黑事务中清理冲突关注。公共路线已消除单路线全局写锁并使用分片精确计数；下一阶段增加 Redis 图谱缓存、关系 Outbox/审计事件、隐私权限、反滥用限流，以及超大关系账号的读写扩散策略。
+`STORAGE_MODE=postgres` 使用 SQLx/PostgreSQL 持久化关系，并在拉黑事务中清理冲突关注。关系和可见性上下文通过 Redis protobuf 缓存加速，按用户使用 30 秒 TTL；缓存 miss 由进程内互斥和 Redis 刷新租约（2 秒 TTL）合并，写关系时递增版本并删除对应上下文，旧读回填会因版本不一致而被丢弃。版本键保留 120 秒，长于缓存但不会按历史用户永久增长。Redis 故障只禁用缓存并回退事实库；跨实例刷新仍未回填时，安全可见性调用返回 `UNAVAILABLE` 而不是把未知关系当作允许。公共路线已消除单路线全局写锁并使用分片精确计数。
+
+关系 Outbox/审计事件、反滥用限流、超大关系账号的读写扩散、隐私权限和多地域图谱复制仍属于独立上线门禁，不由本服务的缓存伪装完成。

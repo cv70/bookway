@@ -263,16 +263,18 @@ fn bounded_optional(value: &str, max_chars: usize) -> String {
 }
 
 fn stable_token(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    // Collection names are persisted and used as tenant boundaries by the
+    // future vector backend. Encode every byte so distinct route/node IDs
+    // cannot collide after sanitization (for example `route/one` and
+    // `route_one`).
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(1 + value.len() * 2);
+    encoded.push('r');
+    for byte in value.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn rag_relevance(
@@ -378,8 +380,9 @@ mod tests {
 
     #[test]
     fn route_node_embedding_collection_is_safe_for_identifiers() {
-        assert_eq!(stable_token("route/one"), "route_one");
-        assert_eq!(stable_token("node-1_v2"), "node-1_v2");
+        assert_eq!(stable_token("route/one"), "r726f7574652f6f6e65");
+        assert_eq!(stable_token("node-1_v2"), "r6e6f64652d315f7632");
+        assert_ne!(stable_token("route/one"), stable_token("route_one"));
     }
 
     #[test]
@@ -457,7 +460,10 @@ mod tests {
             .await
             .expect("resource should attach");
         assert!(first.rag_enabled);
-        assert_eq!(first.embedding_collection, "route_node:route_one:node_one");
+        assert_eq!(
+            first.embedding_collection,
+            "route_node:r726f7574652f6f6e65:r6e6f64652f6f6e65"
+        );
         assert_eq!(first.sort_rank, 10_000);
 
         let retry = domain
@@ -466,6 +472,24 @@ mod tests {
             .expect("retry should return the existing attachment");
         assert_eq!(retry.id, first.id);
 
+        let conflicting_request = pb::AttachNodeResourceRequest {
+            route_id: "route/other".to_string(),
+            action_node_id: "node/other".to_string(),
+            resource_id: "resource-mdn-web".to_string(),
+            kind: pb::AttachmentKind::RagCorpus as i32,
+            idempotency_key: "attach-1".to_string(),
+            created_by: "creator-1".to_string(),
+            ..Default::default()
+        };
+        let conflict = domain
+            .attach_node_resource(conflicting_request.clone())
+            .await;
+        assert!(matches!(
+            conflict,
+            Err(DomainError::Repository(
+                crate::datasource::RepositoryError::Conflict(_)
+            ))
+        ));
         let listed = domain
             .list_node_resources(pb::ListNodeResourcesRequest {
                 route_id: "route/one".to_string(),
@@ -475,10 +499,11 @@ mod tests {
             .await
             .expect("attachment should be listed");
         assert_eq!(listed.items.len(), 1);
-        assert_eq!(
-            listed.items[0].resource.as_ref().unwrap().id,
-            "resource-mdn-web"
-        );
+        let listed_resource = listed.items[0]
+            .resource
+            .as_ref()
+            .expect("listed attachment should include its resource");
+        assert_eq!(listed_resource.id, "resource-mdn-web");
 
         let rag_context = domain
             .retrieve_rag_context(pb::RetrieveRagContextRequest {
@@ -493,7 +518,7 @@ mod tests {
         assert_eq!(rag_context.retrieval_mode, "attachment_lexical_fallback");
         assert_eq!(
             rag_context.embedding_collections,
-            vec!["route_node:route_one:node_one"]
+            vec!["route_node:r726f7574652f6f6e65:r6e6f64652f6f6e65"]
         );
 
         let detached = domain

@@ -1,4 +1,4 @@
-import { Bell, Plus } from 'lucide-react-native';
+import { Bell, Plus, X } from 'lucide-react-native';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { colors } from '../theme';
@@ -6,13 +6,13 @@ import { colors } from '../theme';
 type Props = {
   eyebrow?: string;
   title: string;
-  action?: 'bell' | 'plus';
+  action?: 'bell' | 'plus' | 'close';
   badgeCount?: number;
   onAction?: () => void;
 };
 
 export function ScreenHeader({ eyebrow, title, action, badgeCount = 0, onAction }: Props) {
-  const Icon = action === 'plus' ? Plus : Bell;
+  const Icon = action === 'plus' ? Plus : action === 'close' ? X : Bell;
   return (
     <View style={styles.header}>
       <View style={styles.titleGroup}>
@@ -21,7 +21,7 @@ export function ScreenHeader({ eyebrow, title, action, badgeCount = 0, onAction 
       </View>
       {action ? (
         <Pressable
-          accessibilityLabel={action === 'plus' ? '创建路线' : badgeCount ? `通知，${badgeCount} 条未读` : '通知'}
+          accessibilityLabel={action === 'plus' ? '创建路线' : action === 'close' ? '返回推荐' : badgeCount ? `通知，${badgeCount} 条未读` : '通知'}
           hitSlop={10}
           onPress={onAction}
           style={({ pressed }) => [styles.action, pressed && styles.pressed]}

@@ -59,16 +59,18 @@ impl From<InteractionStatusError> for HttpError {
 }
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
-        let status = match &self.0 {
-            InteractionStatusError::Validation(_) => StatusCode::BAD_REQUEST,
-            InteractionStatusError::Repository(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, code) = match &self.0 {
+            InteractionStatusError::Validation(_) => (StatusCode::BAD_REQUEST, "validation_error"),
+            InteractionStatusError::Repository(
+                crate::datasource::RepositoryError::CachePeerRefresh,
+            ) => (StatusCode::SERVICE_UNAVAILABLE, "context_cache_refreshing"),
+            InteractionStatusError::Repository(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+            }
         };
         (
             status,
-            Json(crate::api::ErrorResponse::new(
-                "storage_error",
-                self.0.to_string(),
-            )),
+            Json(crate::api::ErrorResponse::new(code, self.0.to_string())),
         )
             .into_response()
     }

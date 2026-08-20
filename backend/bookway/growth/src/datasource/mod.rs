@@ -3182,11 +3182,11 @@ async fn ensure_postgres_timezone(
 
 fn postgres_action_schedule(
     action: &pb::Action,
-    legacy_local_date: Option<Date>,
+    existing_local_date: Option<Date>,
 ) -> Result<PostgresActionSchedule, RepositoryError> {
     match (&action.scheduled_for, &action.scheduled_timezone) {
         (None, None) => Ok(PostgresActionSchedule {
-            local_date: legacy_local_date.unwrap_or_else(|| OffsetDateTime::now_utc().date()),
+            local_date: existing_local_date.unwrap_or_else(|| OffsetDateTime::now_utc().date()),
             scheduled_at: None,
             timezone: None,
         }),

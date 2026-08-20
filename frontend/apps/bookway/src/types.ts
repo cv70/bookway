@@ -200,6 +200,9 @@ export type CommunityPost = {
   is_route?: boolean;
   is_milestone?: boolean;
   is_question?: boolean;
+  // Search responses may include the public action nodes that matched a
+  // route title or scene-equipment query.
+  route_actions?: RouteTemplateAction[];
 };
 
 export type ContentMedia = {
@@ -222,7 +225,11 @@ export type ContentDetail = {
   topics: string[];
   created_at: string;
   published_at?: string | null;
+  content_type?: ContentType;
+  status?: ContentStatus;
+  version?: number;
   route_template?: RouteTemplate | null;
+  route_fork?: RouteFork | null;
   milestone?: Milestone | null;
   accepted_answer_id?: string | null;
   question_context?: QuestionContext | null;
@@ -260,13 +267,26 @@ export type PublicAuthor = {
 
 export type ContentStatus = 'draft' | 'reviewing' | 'published' | 'restricted' | 'deleted';
 
+export type RouteFork = {
+  source_route_id: string;
+  source_route_version: number;
+  source_route_title: string;
+  forked_at: string;
+};
+
 export type OwnedContent = {
   id: string;
   post: CommunityPost;
   author_id: string;
   status: ContentStatus;
+  body: string;
+  topics: string[];
   created_at: string;
   published_at?: string | null;
+  content_type?: ContentType;
+  version?: number;
+  route_template?: RouteTemplate | null;
+  route_fork?: RouteFork | null;
 };
 
 export type OwnedContentPage = {
@@ -321,7 +341,11 @@ export type UserFeedback = {
 
 export type FeedItem = {
   author_id: string;
-  post: CommunityPost;
+  // Organic items carry a post; contextual commercial items carry only `ad`.
+  // The transport keeps this as an optional field so the feed can mix both
+  // kinds without inventing a fake community post.
+  post?: CommunityPost | null;
+  ad?: FeedAd | null;
   score: number;
   source: string;
   reasons: string[];
@@ -329,7 +353,126 @@ export type FeedItem = {
   recommendation_context?: RecommendationEventContext;
 };
 
+export type FeedAd = {
+  request_id: string;
+  campaign_id: string;
+  placement: string;
+  title: string;
+  body: string;
+  image_url: string;
+  landing_url: string;
+  ecpm: number;
+  model_version: string;
+  route_id: string;
+  action_node_id: string;
+  scene_equipment: string;
+};
+
 export type RecommendationSurface = 'home' | 'following' | 'search';
+
+// Optional route-node context used to request contextual feed ads. The Gateway
+// validates the route and action-node pair before any campaign is considered.
+export type FeedActionContext = {
+  route_id: string;
+  action_node_id: string;
+  placement?: string;
+  action_domain?: GrowthDomain;
+  scene_equipment?: string;
+};
+
+export type MallSku = {
+  id: string;
+  product_id: string;
+  title: string;
+  price_cents: number;
+  currency: string;
+  attributes: Record<string, string>;
+  saleable: boolean;
+};
+
+export type MallProduct = {
+  id: string;
+  title: string;
+  description: string;
+  image_url: string;
+  status: number;
+  skus: MallSku[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type NodeOffer = {
+  id: string;
+  product_id: string;
+  sku_id: string;
+  route_id: string;
+  action_node_id: string;
+  creator_id: string;
+  commission_bps: number;
+  created_at: string;
+  scene_equipment: string;
+  product?: MallProduct | null;
+  merchant_id: string;
+};
+
+export type NodeOfferList = { items: NodeOffer[] };
+
+export type MallOrderItemInput = { sku_id: string; quantity: number };
+
+export type MallOrder = {
+  id: string;
+  user_id: string;
+  status: number;
+  currency: string;
+  total_cents: number;
+  items: Array<{
+    sku_id: string;
+    product_id: string;
+    title: string;
+    quantity: number;
+    unit_price_cents: number;
+    currency: string;
+    line_total_cents: number;
+  }>;
+  payment_reference?: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+  node_offer_id: string;
+  affiliate_creator_id: string;
+  commission_cents: number;
+  merchant_id: string;
+  fulfillment_status: number;
+  tracking_number: string;
+};
+
+export type RouteNodeResourceKind =
+  | 'document'
+  | 'pdf'
+  | 'external_link'
+  | 'tool_checklist'
+  | 'ai_action_guide'
+  | 'rag_corpus';
+
+export type RouteNodeResourceAttachment = {
+  id: string;
+  route_id: string;
+  action_node_id: string;
+  resource_id: string;
+  kind: RouteNodeResourceKind;
+  title_override: string;
+  note: string;
+  sort_rank: number;
+  rag_enabled: boolean;
+  embedding_collection: string;
+  retrieval_scope: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  resource?: PublicResource | null;
+};
+
+export type RouteNodeResourcePage = { items: RouteNodeResourceAttachment[] };
 
 export type RecommendationEventContext = {
   request_id?: string;
@@ -586,6 +729,7 @@ export type ContentType = 'note' | 'article' | 'video' | 'route' | 'milestone' |
 export type RouteTemplateStage = Pick<JourneyStage, 'title' | 'detail' | 'completion_criteria'>;
 
 export type RouteTemplateAction = Pick<Action, 'title' | 'detail' | 'estimated_minutes' | 'scheduled_label'> & {
+  id: string;
   stage_index?: number;
   scene_equipment?: string[];
 };
@@ -605,7 +749,6 @@ export type CreatePostInput = {
   domain: GrowthDomain;
   content_type: ContentType;
   media_asset_ids?: string[];
-  cover_url?: string;
   tags: string[];
   topics: string[];
   route_title?: string;
@@ -623,6 +766,15 @@ export type CreatePostInput = {
     route_id: string;
     stage_index?: number;
   };
+};
+
+export type UpdatePostInput = {
+  title?: string;
+  summary?: string;
+  body?: string;
+  tags?: string[];
+  topics?: string[];
+  route_template?: RouteTemplate;
 };
 
 export type TabKey = 'today' | 'discover' | 'journeys' | 'profile';

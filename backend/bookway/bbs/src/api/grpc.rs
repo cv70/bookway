@@ -107,6 +107,9 @@ fn domain_error(error: crate::domain::BbsError) -> Status {
         crate::domain::BbsError::Repository(
             crate::datasource::RepositoryError::BlockedRelationship,
         ) => Status::failed_precondition(error.to_string()),
+        crate::domain::BbsError::Repository(
+            crate::datasource::RepositoryError::CachePeerRefresh,
+        ) => Status::unavailable(error.to_string()),
         crate::domain::BbsError::Repository(_) => Status::internal(error.to_string()),
     }
 }

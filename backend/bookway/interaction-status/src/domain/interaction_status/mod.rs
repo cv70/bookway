@@ -8,11 +8,18 @@ impl Domain {
         request: pb::ContextRequest,
     ) -> Result<pb::ReactionContext, InteractionStatusError> {
         let user_id = request.user_id.unwrap_or_else(|| "anonymous".to_string());
-        let post_ids = request
+        let mut post_ids = request
             .post_ids
             .into_iter()
             .filter(|id| !id.trim().is_empty())
             .collect::<Vec<_>>();
+        if post_ids.len() > 500 {
+            return Err(InteractionStatusError::Validation(
+                "at most 500 post_ids may be requested".to_string(),
+            ));
+        }
+        post_ids.sort_unstable();
+        post_ids.dedup();
         Ok(self.repository.context(&user_id, &post_ids).await?)
     }
 
@@ -100,5 +107,24 @@ mod tests {
             .expect("reaction context");
 
         assert_eq!(context.hidden_post_ids, ["post-a"]);
+    }
+
+    #[tokio::test]
+    async fn context_rejects_oversized_batches() {
+        let domain = Domain::from_repository(
+            Config {
+                listen_addr: "127.0.0.1:0".parse().expect("valid HTTP address"),
+                grpc_addr: "127.0.0.1:0".parse().expect("valid gRPC address"),
+            },
+            Arc::new(MemoryInteractionStatusRepository::seeded()),
+        );
+        let error = domain
+            .context(pb::ContextRequest {
+                user_id: Some("user-a".to_string()),
+                post_ids: (0..501).map(|index| format!("post-{index}")).collect(),
+            })
+            .await
+            .expect_err("oversized context should be rejected");
+        assert!(matches!(error, InteractionStatusError::Validation(_)));
     }
 }

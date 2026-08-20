@@ -23,9 +23,12 @@ pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
         .await;
     Server::builder()
         .add_service(health_service)
-        .add_service(pb::recommend_rank_server::RecommendRankServer::new(
-            GrpcServer::new(domain),
-        ))
+        .add_service(
+            pb::recommend_rank_server::RecommendRankServer::with_interceptor(
+                GrpcServer::new(domain),
+                bookway_runtime::grpc_service_auth_interceptor,
+            ),
+        )
         .serve(addr)
         .await
 }

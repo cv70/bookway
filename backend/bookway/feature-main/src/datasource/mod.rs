@@ -1,9 +1,14 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
+use tokio::time::sleep;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct CandidateFeatures {
@@ -272,13 +277,54 @@ impl FeatureRepository {
                              AND occurred_at > now() - interval '90 days' THEN 1.0
                         ELSE 0.0
                     END)::double precision AS negative_weight
-                    ,COUNT(*) FILTER (WHERE event_type = 'click')::double precision AS clicks
+                    ,COUNT(*) FILTER (
+                        WHERE event_type = 'click'
+                          AND occurred_at > now() - interval '30 days'
+                    )::double precision AS clicks
                     ,COUNT(*) FILTER (WHERE event_type IN ('bookmark', 'save_knowledge'))::double precision AS saves
+                    ,COUNT(*) FILTER (WHERE event_type = 'save_knowledge')::double precision AS knowledge_starts
                     ,COUNT(*) FILTER (WHERE event_type = 'complete')::double precision AS completions
                     ,COUNT(*) FILTER (WHERE event_type = 'join_route')::double precision AS joins
                     ,COUNT(*) FILTER (WHERE event_type = 'purchase')::double precision AS purchases
                 FROM user_events
-                WHERE user_id = $1 AND content_id = ANY($2)
+                WHERE user_id = $1
+                  AND content_id = ANY($2)
+                  AND occurred_at > now() - interval '90 days'
+                GROUP BY content_id
+            ),
+            population_feedback AS (
+                -- Population signals provide a cold-start prior for pCTR,
+                -- pCVR and route completion. Personal signals take over only
+                -- after enough observations to avoid one-event overfitting.
+                SELECT
+                    content_id,
+                    COUNT(*) FILTER (
+                        WHERE event_type = 'impression'
+                          AND occurred_at > now() - interval '90 days'
+                    )::double precision AS impression_count,
+                    COUNT(*) FILTER (
+                        WHERE event_type = 'click'
+                          AND occurred_at > now() - interval '90 days'
+                    )::double precision AS clicks,
+                    COUNT(*) FILTER (
+                        WHERE event_type = 'complete'
+                          AND occurred_at > now() - interval '90 days'
+                    )::double precision AS completions,
+                    COUNT(*) FILTER (
+                        WHERE event_type = 'save_knowledge'
+                          AND occurred_at > now() - interval '90 days'
+                    )::double precision AS knowledge_starts,
+                    COUNT(*) FILTER (
+                        WHERE event_type = 'join_route'
+                          AND occurred_at > now() - interval '90 days'
+                    )::double precision AS joins,
+                    COUNT(*) FILTER (
+                        WHERE event_type = 'purchase'
+                          AND occurred_at > now() - interval '90 days'
+                    )::double precision AS purchases
+                FROM user_events
+                WHERE content_id = ANY($2)
+                  AND occurred_at > now() - interval '90 days'
                 GROUP BY content_id
             )
             SELECT
@@ -287,15 +333,55 @@ impl FeatureRepository {
                 LEAST(GREATEST(COALESCE(author.score, 0.0), 0.0) / normalizers.author_max, 1.0)::double precision,
                 LEAST(COALESCE(feedback.impression_count, 0.0) / 4.0, 1.0)::double precision,
                 LEAST(COALESCE(feedback.negative_weight, 0.0), 1.0)::double precision,
-                LEAST(COALESCE(feedback.clicks, 0.0) / GREATEST(COALESCE(feedback.impression_count, 0.0), 1.0), 1.0)::double precision,
+                LEAST(
+                    COALESCE(feedback.clicks, 0.0)
+                        / GREATEST(COALESCE(feedback.impression_count, 0.0), 1.0)
+                        * LEAST(COALESCE(feedback.impression_count, 0.0) / 20.0, 1.0)
+                    + (COALESCE(population.clicks, 0.0) + 0.5)
+                        / GREATEST(COALESCE(population.impression_count, 0.0) + 20.0, 20.0)
+                        * (1.0 - LEAST(COALESCE(feedback.impression_count, 0.0) / 20.0, 1.0)),
+                    1.0
+                )::double precision,
                 LEAST(COALESCE(feedback.saves, 0.0) / GREATEST(COALESCE(feedback.impression_count, 0.0), 1.0), 1.0)::double precision,
-                LEAST(COALESCE(feedback.completions, 0.0) / GREATEST(COALESCE(feedback.joins, 0.0), 1.0), 1.0)::double precision,
-                LEAST(COALESCE(feedback.purchases, 0.0) / GREATEST(COALESCE(feedback.impression_count, 0.0), 1.0), 1.0)::double precision
+                CASE
+                    WHEN candidate.content_type = 'route' THEN LEAST(
+                        COALESCE(feedback.completions, 0.0)
+                            / GREATEST(COALESCE(feedback.joins, 0.0), 1.0)
+                            * LEAST(COALESCE(feedback.joins, 0.0) / 20.0, 1.0)
+                        + (COALESCE(population.completions, 0.0) + 0.1)
+                            / GREATEST(COALESCE(population.joins, 0.0) + 20.0, 20.0)
+                            * (1.0 - LEAST(COALESCE(feedback.joins, 0.0) / 20.0, 1.0)),
+                        1.0
+                    )
+                    ELSE LEAST(
+                        COALESCE(feedback.completions, 0.0)
+                            / GREATEST(COALESCE(feedback.knowledge_starts, 0.0), 1.0)
+                            * LEAST(COALESCE(feedback.knowledge_starts, 0.0) / 20.0, 1.0)
+                        + (COALESCE(population.completions, 0.0) + 0.1)
+                            / GREATEST(COALESCE(population.knowledge_starts, 0.0) + 20.0, 20.0)
+                            * (1.0 - LEAST(COALESCE(feedback.knowledge_starts, 0.0) / 20.0, 1.0)),
+                        1.0
+                    )
+                END::double precision,
+                LEAST(
+                    CASE
+                        WHEN candidate.content_type = 'route' THEN
+                            COALESCE(feedback.purchases, 0.0)
+                                / GREATEST(COALESCE(feedback.impression_count, 0.0), 1.0)
+                                * LEAST(COALESCE(feedback.impression_count, 0.0) / 20.0, 1.0)
+                            + (COALESCE(population.purchases, 0.0) + 0.05)
+                                / GREATEST(COALESCE(population.impression_count, 0.0) + 50.0, 50.0)
+                                * (1.0 - LEAST(COALESCE(feedback.impression_count, 0.0) / 20.0, 1.0))
+                        ELSE 0.0
+                    END,
+                    1.0
+                )::double precision
             FROM content_items AS candidate
             CROSS JOIN normalizers
             LEFT JOIN domain_scores AS domain ON domain.domain = candidate.domain
             LEFT JOIN author_scores AS author ON author.author_id = candidate.author_id
             LEFT JOIN direct_feedback AS feedback ON feedback.content_id = candidate.id
+            LEFT JOIN population_feedback AS population ON population.content_id = candidate.id
             WHERE candidate.id = ANY($2)
             "#,
         )
@@ -381,6 +467,69 @@ pub(crate) struct FeatureCache {
     redis: Option<redis::aio::ConnectionManager>,
     miss_locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
 }
+
+const FEATURE_REFRESH_LOCK_TTL_MS: usize = 5_000;
+const FEATURE_REFRESH_LOCK_WAIT_MS: u64 = 80;
+const FEATURE_REFRESH_LOCK_POLL_MS: u64 = 10;
+const FEATURE_REFRESH_LOCK_RELEASE: &str = r#"
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end
+return 0
+"#;
+static FEATURE_REFRESH_LOCK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct RedisRefreshLease {
+    manager: redis::aio::ConnectionManager,
+    key: String,
+    token: String,
+}
+
+impl RedisRefreshLease {
+    async fn release(self) {
+        let mut manager = self.manager;
+        let result: redis::RedisResult<i32> = redis::Script::new(FEATURE_REFRESH_LOCK_RELEASE)
+            .key(self.key)
+            .arg(self.token)
+            .invoke_async(&mut manager)
+            .await;
+        if let Err(error) = result {
+            tracing::debug!(%error, "feature refresh lease release degraded");
+        }
+    }
+}
+
+pub(crate) struct FeatureRefreshGuard {
+    _local: tokio::sync::OwnedMutexGuard<()>,
+    redis: Option<RedisRefreshLease>,
+    peer_holds_lease: bool,
+}
+
+impl FeatureRefreshGuard {
+    pub(crate) fn peer_holds_lease(&self) -> bool {
+        self.peer_holds_lease
+    }
+
+    pub(crate) async fn release(mut self) {
+        if let Some(lease) = self.redis.take() {
+            lease.release().await;
+        }
+    }
+}
+
+impl Drop for FeatureRefreshGuard {
+    fn drop(&mut self) {
+        let Some(lease) = self.redis.take() else {
+            return;
+        };
+        // The normal path explicitly releases the lease. Drop is a bounded
+        // best-effort cleanup; the TTL remains the crash-safety backstop.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(lease.release());
+        }
+    }
+}
+
 impl FeatureCache {
     pub(crate) fn new(redis: Option<redis::aio::ConnectionManager>) -> Self {
         Self {
@@ -404,6 +553,68 @@ impl FeatureCache {
             }
         };
         lock.lock_owned().await
+    }
+
+    pub(crate) async fn refresh_lock(&self, user_id: &str) -> FeatureRefreshGuard {
+        let local = self.miss_lock(user_id).await;
+        let Some(mut manager) = self.redis.clone() else {
+            return FeatureRefreshGuard {
+                _local: local,
+                redis: None,
+                peer_holds_lease: false,
+            };
+        };
+        let key = format!("bookway:features:refresh-lock:{user_id}");
+        let sequence = FEATURE_REFRESH_LOCK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let token = format!("{}-{timestamp}-{sequence}", std::process::id());
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(FEATURE_REFRESH_LOCK_WAIT_MS);
+        loop {
+            let result: redis::RedisResult<Option<String>> = redis::cmd("SET")
+                .arg(&key)
+                .arg(&token)
+                .arg("NX")
+                .arg("PX")
+                .arg(FEATURE_REFRESH_LOCK_TTL_MS)
+                .query_async(&mut manager)
+                .await;
+            match result {
+                Ok(Some(_)) => {
+                    return FeatureRefreshGuard {
+                        _local: local,
+                        redis: Some(RedisRefreshLease {
+                            manager,
+                            key,
+                            token,
+                        }),
+                        peer_holds_lease: false,
+                    };
+                }
+                Ok(None) if tokio::time::Instant::now() < deadline => {
+                    sleep(Duration::from_millis(FEATURE_REFRESH_LOCK_POLL_MS)).await;
+                }
+                Ok(None) => {
+                    tracing::debug!(user_id, "feature refresh lease held by another instance");
+                    return FeatureRefreshGuard {
+                        _local: local,
+                        redis: None,
+                        peer_holds_lease: true,
+                    };
+                }
+                Err(error) => {
+                    tracing::debug!(%error, user_id, "feature refresh lease unavailable; using local lock");
+                    return FeatureRefreshGuard {
+                        _local: local,
+                        redis: None,
+                        peer_holds_lease: false,
+                    };
+                }
+            }
+        }
     }
     pub(crate) async fn load(&self, user_id: &str) -> Option<HashMap<String, f64>> {
         let mut manager = self.redis.clone()?;
@@ -483,5 +694,12 @@ mod cache_tests {
         first.await.expect("first refresh task should finish");
         second.await.expect("second refresh task should finish");
         assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_lock_falls_back_to_the_local_guard_without_redis() {
+        let cache = FeatureCache::new(None);
+        let guard = cache.refresh_lock("user-1").await;
+        guard.release().await;
     }
 }

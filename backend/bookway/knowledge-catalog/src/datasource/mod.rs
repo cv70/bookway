@@ -11,6 +11,8 @@ use uuid::Uuid;
 pub(crate) enum RepositoryError {
     #[error("resource {0} was not found")]
     NotFound(String),
+    #[error("resource attachment conflict: {0}")]
+    Conflict(String),
     #[error("database operation failed: {0}")]
     Database(#[source] sqlx::Error),
     #[error("stored resource is invalid: {0}")]
@@ -31,6 +33,12 @@ pub(crate) struct NewNodeResourceAttachment {
     pub(crate) retrieval_scope: String,
     pub(crate) idempotency_key: String,
     pub(crate) created_by: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RagVectorHit {
+    pub(crate) attachment_id: String,
+    pub(crate) relevance: f64,
 }
 
 #[async_trait]
@@ -56,12 +64,37 @@ pub(crate) trait ResourceRepository: Send + Sync {
         action_node_id: &str,
         attachment_id: &str,
     ) -> Result<bool, RepositoryError>;
+    async fn upsert_rag_embedding(
+        &self,
+        attachment: &pb::RouteNodeResourceAttachment,
+        embedding_model: &str,
+        embedding: Vec<f32>,
+    ) -> Result<(), RepositoryError>;
+    async fn search_rag_embeddings(
+        &self,
+        route_id: &str,
+        action_node_id: &str,
+        embedding_collection: &str,
+        embedding_model: &str,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<Vec<RagVectorHit>, RepositoryError>;
 }
 
 pub(crate) struct MemoryResourceRepository {
     resources: RwLock<Vec<pb::Resource>>,
     attachments: RwLock<Vec<pb::RouteNodeResourceAttachment>>,
     attachment_idempotency: RwLock<HashMap<String, String>>,
+    rag_embeddings: RwLock<HashMap<String, RagEmbedding>>,
+}
+
+#[derive(Clone)]
+struct RagEmbedding {
+    route_id: String,
+    action_node_id: String,
+    embedding_collection: String,
+    embedding_model: String,
+    embedding: Vec<f32>,
 }
 
 impl MemoryResourceRepository {
@@ -107,6 +140,7 @@ impl MemoryResourceRepository {
             ]),
             attachments: RwLock::new(Vec::new()),
             attachment_idempotency: RwLock::new(HashMap::new()),
+            rag_embeddings: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -234,14 +268,22 @@ impl ResourceRepository for MemoryResourceRepository {
             .get(&request.idempotency_key)
             .cloned()
         {
-            let mut items = self
-                .list_node_resources(&request.route_id, &request.action_node_id, true)
-                .await?
-                .items;
-            if let Some(existing) = items.iter_mut().find(|item| item.id == existing_id) {
-                existing.resource = Some(resource);
-                return Ok(existing.clone());
+            let attachments = self.attachments.read().await;
+            let existing = attachments
+                .iter()
+                .find(|item| item.id == existing_id)
+                .ok_or_else(|| {
+                    RepositoryError::Invalid("missing node resource idempotency target".to_string())
+                })?;
+            if !attachment_matches_request(existing, &request) {
+                return Err(RepositoryError::Conflict(
+                    "idempotency key is already bound to a different resource attachment"
+                        .to_string(),
+                ));
             }
+            let mut existing = existing.clone();
+            existing.resource = Some(resource);
+            return Ok(existing);
         }
 
         let mut attachments = self.attachments.write().await;
@@ -325,7 +367,70 @@ impl ResourceRepository for MemoryResourceRepository {
         }
         attachment.updated_at = "archived:2026-08-18T00:00:00Z".to_string();
         attachment.resource = None;
+        self.rag_embeddings.write().await.remove(attachment_id);
         Ok(true)
+    }
+
+    async fn upsert_rag_embedding(
+        &self,
+        attachment: &pb::RouteNodeResourceAttachment,
+        embedding_model: &str,
+        embedding: Vec<f32>,
+    ) -> Result<(), RepositoryError> {
+        validate_embedding(embedding_model, &embedding)?;
+        if attachment.id.trim().is_empty()
+            || attachment.route_id.trim().is_empty()
+            || attachment.action_node_id.trim().is_empty()
+            || attachment.embedding_collection.trim().is_empty()
+        {
+            return Err(RepositoryError::Invalid(
+                "RAG embedding attachment scope is incomplete".to_string(),
+            ));
+        }
+        self.rag_embeddings.write().await.insert(
+            attachment.id.clone(),
+            RagEmbedding {
+                route_id: attachment.route_id.clone(),
+                action_node_id: attachment.action_node_id.clone(),
+                embedding_collection: attachment.embedding_collection.clone(),
+                embedding_model: embedding_model.to_string(),
+                embedding,
+            },
+        );
+        Ok(())
+    }
+
+    async fn search_rag_embeddings(
+        &self,
+        route_id: &str,
+        action_node_id: &str,
+        embedding_collection: &str,
+        embedding_model: &str,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<Vec<RagVectorHit>, RepositoryError> {
+        validate_embedding(embedding_model, query)?;
+        let mut hits = self
+            .rag_embeddings
+            .read()
+            .await
+            .iter()
+            .filter(|(_, embedding)| {
+                embedding.route_id == route_id
+                    && embedding.action_node_id == action_node_id
+                    && embedding.embedding_collection == embedding_collection
+                    && embedding.embedding_model == embedding_model
+            })
+            .filter_map(|(attachment_id, embedding)| {
+                cosine_similarity(query, &embedding.embedding).map(|relevance| RagVectorHit {
+                    attachment_id: attachment_id.clone(),
+                    relevance,
+                })
+            })
+            .collect::<Vec<_>>();
+        sort_rag_hits(&mut hits);
+        hits.truncate(limit);
+        Ok(hits)
     }
 }
 
@@ -362,6 +467,12 @@ struct AttachmentRow {
     created_by: String,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
+}
+
+#[derive(FromRow)]
+struct RagEmbeddingRow {
+    attachment_id: String,
+    embedding: Vec<f32>,
 }
 
 pub(crate) struct PostgresResourceRepository {
@@ -458,6 +569,12 @@ impl ResourceRepository for PostgresResourceRepository {
             .await
             .map_err(RepositoryError::Database)?
         {
+            if !attachment_row_matches_request(&row, &request) {
+                return Err(RepositoryError::Conflict(
+                    "idempotency key is already bound to a different resource attachment"
+                        .to_string(),
+                ));
+            }
             return row_to_attachment(row, Some(resource));
         }
 
@@ -489,14 +606,88 @@ impl ResourceRepository for PostgresResourceRepository {
         action_node_id: &str,
         attachment_id: &str,
     ) -> Result<bool, RepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(RepositoryError::Database)?;
         let result = sqlx::query("UPDATE route_node_resource_attachments SET archived_at=now(), updated_at=now() WHERE id=$1 AND route_id=$2 AND action_node_id=$3 AND archived_at IS NULL")
             .bind(attachment_id)
             .bind(route_id)
             .bind(action_node_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(RepositoryError::Database)?;
+        let detached = result.rows_affected() > 0;
+        if detached {
+            sqlx::query("DELETE FROM route_node_resource_embeddings WHERE attachment_id=$1")
+                .bind(attachment_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(RepositoryError::Database)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::Database)?;
+        Ok(detached)
+    }
+
+    async fn upsert_rag_embedding(
+        &self,
+        attachment: &pb::RouteNodeResourceAttachment,
+        embedding_model: &str,
+        embedding: Vec<f32>,
+    ) -> Result<(), RepositoryError> {
+        validate_embedding(embedding_model, &embedding)?;
+        if attachment.id.trim().is_empty()
+            || attachment.route_id.trim().is_empty()
+            || attachment.action_node_id.trim().is_empty()
+            || attachment.embedding_collection.trim().is_empty()
+        {
+            return Err(RepositoryError::Invalid(
+                "RAG embedding attachment scope is incomplete".to_string(),
+            ));
+        }
+        sqlx::query("INSERT INTO route_node_resource_embeddings (attachment_id,route_id,action_node_id,embedding_collection,embedding_model,embedding) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (attachment_id) DO UPDATE SET route_id=EXCLUDED.route_id,action_node_id=EXCLUDED.action_node_id,embedding_collection=EXCLUDED.embedding_collection,embedding_model=EXCLUDED.embedding_model,embedding=EXCLUDED.embedding,updated_at=now()")
+            .bind(&attachment.id)
+            .bind(&attachment.route_id)
+            .bind(&attachment.action_node_id)
+            .bind(&attachment.embedding_collection)
+            .bind(embedding_model)
+            .bind(embedding)
             .execute(&self.pool)
             .await
             .map_err(RepositoryError::Database)?;
-        Ok(result.rows_affected() > 0)
+        Ok(())
+    }
+
+    async fn search_rag_embeddings(
+        &self,
+        route_id: &str,
+        action_node_id: &str,
+        embedding_collection: &str,
+        embedding_model: &str,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<Vec<RagVectorHit>, RepositoryError> {
+        validate_embedding(embedding_model, query)?;
+        let rows = sqlx::query_as::<_, RagEmbeddingRow>("SELECT attachment_id,embedding FROM route_node_resource_embeddings WHERE route_id=$1 AND action_node_id=$2 AND embedding_collection=$3 AND embedding_model=$4")
+            .bind(route_id)
+            .bind(action_node_id)
+            .bind(embedding_collection)
+            .bind(embedding_model)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(RepositoryError::Database)?;
+        let mut hits = rows
+            .into_iter()
+            .filter_map(|row| {
+                cosine_similarity(query, &row.embedding).map(|relevance| RagVectorHit {
+                    attachment_id: row.attachment_id,
+                    relevance,
+                })
+            })
+            .collect::<Vec<_>>();
+        sort_rag_hits(&mut hits);
+        hits.truncate(limit);
+        Ok(hits)
     }
 }
 
@@ -541,6 +732,41 @@ fn row_to_attachment(
     })
 }
 
+fn attachment_matches_request(
+    attachment: &pb::RouteNodeResourceAttachment,
+    request: &NewNodeResourceAttachment,
+) -> bool {
+    attachment.route_id == request.route_id
+        && attachment.action_node_id == request.action_node_id
+        && attachment.resource_id == request.resource_id
+        && attachment.kind == request.kind as i32
+        && attachment.title_override == request.title_override
+        && attachment.note == request.note
+        && attachment.sort_rank == request.sort_rank
+        && attachment.rag_enabled == request.rag_enabled
+        && attachment.embedding_collection == request.embedding_collection
+        && attachment.retrieval_scope == request.retrieval_scope
+        && attachment.created_by == request.created_by
+}
+
+fn attachment_row_matches_request(
+    row: &AttachmentRow,
+    request: &NewNodeResourceAttachment,
+) -> bool {
+    row.route_id == request.route_id
+        && row.action_node_id == request.action_node_id
+        && row.resource_id == request.resource_id
+        && row.kind == attachment_kind_name(request.kind)
+        && row.title_override == request.title_override
+        && row.note == request.note
+        && row.sort_rank == request.sort_rank
+        && row.rag_enabled == request.rag_enabled
+        && row.embedding_collection == request.embedding_collection
+        && row.retrieval_scope == request.retrieval_scope
+        && row.created_by == request.created_by
+}
+
+#[allow(clippy::too_many_arguments)]
 fn resource(
     id: &str,
     title: &str,
@@ -579,6 +805,53 @@ fn parse_cursor(cursor: &str) -> Result<usize, RepositoryError> {
         .parse()
         .map_err(|_| RepositoryError::Invalid("cursor must be a non-negative offset".to_string()))
 }
+
+fn validate_embedding(model: &str, embedding: &[f32]) -> Result<(), RepositoryError> {
+    if model.trim().is_empty() || model.chars().count() > 80 {
+        return Err(RepositoryError::Invalid(
+            "RAG embedding model is invalid".to_string(),
+        ));
+    }
+    if !(8..=4096).contains(&embedding.len())
+        || embedding.iter().any(|value| !value.is_finite())
+        || embedding.iter().all(|value| *value == 0.0)
+    {
+        return Err(RepositoryError::Invalid(
+            "RAG embedding vector is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f64> {
+    if left.len() != right.len() {
+        return None;
+    }
+    let (dot, left_norm, right_norm) = left.iter().zip(right).fold(
+        (0.0_f64, 0.0_f64, 0.0_f64),
+        |(dot, left_norm, right_norm), (left, right)| {
+            let left = f64::from(*left);
+            let right = f64::from(*right);
+            (
+                dot + left * right,
+                left_norm + left * left,
+                right_norm + right * right,
+            )
+        },
+    );
+    let denominator = left_norm.sqrt() * right_norm.sqrt();
+    (denominator > f64::EPSILON).then(|| (dot / denominator).clamp(-1.0, 1.0))
+}
+
+fn sort_rag_hits(hits: &mut [RagVectorHit]) {
+    hits.sort_by(|left, right| {
+        right
+            .relevance
+            .total_cmp(&left.relevance)
+            .then_with(|| left.attachment_id.cmp(&right.attachment_id))
+    });
+}
+
 fn escape_like(value: &str) -> String {
     value
         .replace('\\', "\\\\")

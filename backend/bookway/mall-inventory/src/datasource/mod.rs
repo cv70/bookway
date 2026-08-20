@@ -66,6 +66,7 @@ return 1
 pub(crate) enum RepositoryError {
     NotFound(String),
     Insufficient(String),
+    Conflict(String),
     Failed(String),
 }
 #[async_trait]
@@ -141,6 +142,11 @@ impl InventoryRepository for MemoryInventoryRepository {
         let mut state = self.state.lock().await;
         expire_memory(&mut state, EXPIRY_SWEEP_LIMIT);
         if let Some(reservation) = state.reservations.get(&request.reservation_id) {
+            if !same_reservation_items(&reservation.items, &request.items)? {
+                return Err(RepositoryError::Conflict(
+                    "reservation id is already bound to different inventory items".to_string(),
+                ));
+            }
             return reservation_proto(&request.reservation_id, reservation);
         }
         let quantities = quantities(&request.items)?;
@@ -453,7 +459,12 @@ impl InventoryRepository for RedisInventoryRepository {
             .await
         {
             Ok(true) => match self.postgres.reservation(&request.reservation_id).await {
-                Ok(reservation) => return Ok(reservation),
+                Ok(reservation) => {
+                    if !same_reservation_items(&reservation.items, &request.items)? {
+                        return Err(reservation_conflict());
+                    }
+                    return Ok(reservation);
+                }
                 Err(RepositoryError::NotFound(_)) => {
                     if let Err(error) = self.clear_reservation_cache(&request.reservation_id).await
                     {
@@ -466,7 +477,12 @@ impl InventoryRepository for RedisInventoryRepository {
             Ok(false) => match self.postgres.reservation(&request.reservation_id).await {
                 // Redis may have been evicted or restarted after the durable
                 // write. Never apply a second cache hold to that reservation.
-                Ok(reservation) => return Ok(reservation),
+                Ok(reservation) => {
+                    if !same_reservation_items(&reservation.items, &request.items)? {
+                        return Err(reservation_conflict());
+                    }
+                    return Ok(reservation);
+                }
                 Err(RepositoryError::NotFound(_)) => {}
                 Err(error) => return Err(error),
             },
@@ -478,7 +494,15 @@ impl InventoryRepository for RedisInventoryRepository {
 
         match self.reserve_cache_gate(&request).await {
             Ok(1) => match self.postgres.reserve(request.clone()).await {
-                Ok(reservation) => Ok(reservation),
+                Ok(reservation) => {
+                    // The Redis gate and durable insert are deliberately
+                    // separate. Another writer may have committed the same
+                    // reservation between the initial lookup and the gate;
+                    // reconcile from PostgreSQL so the cache cannot retain a
+                    // double-held reserved count in that race.
+                    self.reconcile_cached_stock(&reservation.items).await;
+                    Ok(reservation)
+                }
                 Err(error) => {
                     if let Err(rollback_error) = self.rollback_cache_gate(&request).await {
                         tracing::error!(%rollback_error, reservation_id = %request.reservation_id, "inventory Redis reservation compensation failed");
@@ -488,16 +512,35 @@ impl InventoryRepository for RedisInventoryRepository {
                 }
             },
             Ok(2) => match self.postgres.reservation(&request.reservation_id).await {
-                Ok(reservation) => Ok(reservation),
+                Ok(reservation) => {
+                    if !same_reservation_items(&reservation.items, &request.items)? {
+                        Err(reservation_conflict())
+                    } else {
+                        Ok(reservation)
+                    }
+                }
                 Err(RepositoryError::NotFound(_)) => {
                     self.invalidate_stock_cache(&request.items).await;
                     self.postgres.reserve(request).await
                 }
                 Err(error) => Err(error),
             },
-            Ok(-2) => Err(RepositoryError::Insufficient(
-                "Redis reservation gate".to_string(),
-            )),
+            Ok(-2) => {
+                // A stale cache may report insufficient stock after an expiry,
+                // release, or restock. PostgreSQL remains authoritative, so
+                // verify the decision there instead of turning cache lag into
+                // a false rejection.
+                match self.postgres.reserve(request.clone()).await {
+                    Ok(reservation) => {
+                        self.reconcile_cached_stock(&reservation.items).await;
+                        Ok(reservation)
+                    }
+                    Err(error) => {
+                        self.invalidate_stock_cache(&request.items).await;
+                        Err(error)
+                    }
+                }
+            }
             Ok(result) => {
                 tracing::warn!(result, reservation_id = %request.reservation_id, "inventory Redis cache was incomplete; using PostgreSQL");
                 self.postgres.reserve(request).await
@@ -567,6 +610,18 @@ impl InventoryRepository for PostgresInventoryRepository {
         .await
         .map_err(database)?;
         if existing.is_some() {
+            let existing_items = sqlx::query_as::<_, ReservationItemRow>(
+                "SELECT sku_id,quantity FROM mall_inventory_reservation_items WHERE reservation_id=$1",
+            )
+            .bind(&request.reservation_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(database)?;
+            if !same_stored_reservation_items(&existing_items, &request.items)? {
+                return Err(RepositoryError::Conflict(
+                    "reservation id is already bound to different inventory items".to_string(),
+                ));
+            }
             tx.commit().await.map_err(database)?;
             return self.reservation(&request.reservation_id).await;
         }
@@ -748,6 +803,38 @@ fn quantities(items: &[pb::ReservationLine]) -> Result<BTreeMap<String, i64>, Re
     Ok(values)
 }
 
+fn same_reservation_items(
+    existing: &[pb::ReservationLine],
+    requested: &[pb::ReservationLine],
+) -> Result<bool, RepositoryError> {
+    Ok(quantities(existing)? == quantities(requested)?)
+}
+
+fn same_stored_reservation_items(
+    existing: &[ReservationItemRow],
+    requested: &[pb::ReservationLine],
+) -> Result<bool, RepositoryError> {
+    let mut stored = BTreeMap::new();
+    for item in existing {
+        if item.quantity <= 0 {
+            return Err(RepositoryError::Failed(
+                "invalid stored reservation quantity".to_string(),
+            ));
+        }
+        let entry = stored.entry(item.sku_id.clone()).or_insert(0_i64);
+        *entry = entry
+            .checked_add(item.quantity)
+            .ok_or_else(|| RepositoryError::Failed("inventory quantity overflow".to_string()))?;
+    }
+    Ok(stored == quantities(requested)?)
+}
+
+fn reservation_conflict() -> RepositoryError {
+    RepositoryError::Conflict(
+        "reservation id is already bound to different inventory items".to_string(),
+    )
+}
+
 fn stock_cache_key(sku_id: &str) -> String {
     format!("bookway:inventory:stock:{sku_id}")
 }
@@ -847,6 +934,18 @@ mod tests {
             .await
             .expect("same order should return its reservation");
         assert_eq!(first.id, retry.id);
+        let conflict = repository
+            .reserve(pb::ReserveRequest {
+                reservation_id: "order-1".to_string(),
+                items: vec![pb::ReservationLine {
+                    sku_id: "sku-1".to_string(),
+                    quantity: 1,
+                }],
+                ttl_seconds: Some(900),
+            })
+            .await
+            .expect_err("a reservation id cannot be reused for a different payload");
+        assert!(matches!(conflict, RepositoryError::Conflict(_)));
         assert_eq!(
             repository
                 .stock("sku-1")

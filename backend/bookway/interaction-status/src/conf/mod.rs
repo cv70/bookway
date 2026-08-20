@@ -12,7 +12,10 @@ impl Config {
     pub(crate) fn from_env() -> Result<Self, RuntimeError> {
         Ok(Self {
             listen_addr: bookway_runtime::listen_addr("INTERACTION_STATUS_ADDR", "127.0.0.1:8087")?,
-            grpc_addr: bookway_runtime::listen_addr("INTERACTION_STATUS_GRPC_ADDR", "127.0.0.1:18007")?,
+            grpc_addr: bookway_runtime::listen_addr(
+                "INTERACTION_STATUS_GRPC_ADDR",
+                "127.0.0.1:18007",
+            )?,
         })
     }
 }

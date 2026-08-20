@@ -14,11 +14,7 @@ impl BbsFeed for GrpcServer {
         &self,
         request: Request<recommend_main::FeedRequest>,
     ) -> Result<Response<recommend_main::FeedResponse>, Status> {
-        let response = self
-            .domain
-            .feed(request.into_inner())
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
+        let response = self.domain.feed(request.into_inner()).await?;
         Ok(Response::new(response))
     }
 }
@@ -31,9 +27,10 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .await;
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(pb::bbs_feed_server::BbsFeedServer::new(GrpcServer {
-            domain,
-        }))
+        .add_service(pb::bbs_feed_server::BbsFeedServer::with_interceptor(
+            GrpcServer { domain },
+            bookway_runtime::grpc_service_auth_interceptor,
+        ))
         .serve(addr)
         .await
 }

@@ -4,17 +4,20 @@
 
 搜索产品策略的主入口。它把用户查询编排为可演进的流水线：
 
-`规范化 -> 精确召回 + 受控同义扩展 -> 混合/去重 -> 轻量重排 -> 稳定分页`
+`规范化 -> 精确召回 + 受控同义扩展 -> 混合/去重 -> 相关性 + pCTR/pCVR/pWEGU 重排 -> 稳定分页`
 
 `bbs-search` 继续拥有底层关键词检索、OpenSearch/PIT 与事实源降级、内容可见性过滤，以及每一路召回的私有游标；其 OpenSearch 命中会先由 `bbs-link` 的紧凑公开摘要批量回读，OpenSearch 因此只提供候选与排序而不成为内容事实源。`knowledge-catalog` 作为公共资源目录候选源接入同一 pipeline，Search Main 只返回已发布资源的 provider、URL、license、version、citation 和 topics，不复制正文或绕过目录授权。Gateway 先根据社交关系注入可信查看者和屏蔽作者集合，Search Main 会原样传递给每一个 `bbs-search` 请求，不能由客户端覆盖。
 
 ## 查询与排序策略
 
+路线搜索结果保留来自权威公开摘要的 `route_actions`，包括稳定行动节点 ID 和声明装备；客户端可以把行动/装备命中继续传递给路线执行或场景商业化，而不会依赖索引中的旧节点数据。
+
 - 将空白和常见中英文分隔符规范为 canonical query，限制为 1--100 个字符。
 - 每次搜索都有精确 lexical recall；仅命中受控词典时增加一条扩展 recall，例如 `跑步 -> 慢跑/晨跑/夜跑`、`阅读 -> 读书/书单/主题阅读`。`@用户` 和 `#话题` 等身份/主题查询不扩展，最多附加 6 个词并始终保留原始精确召回。扩展故障只标记 `degraded`，精确召回故障则向上游报错。
 - `all` 搜索会同时召回内容/路线/用户/话题和公共资源；`resources` 搜索只请求 `knowledge-catalog`，不会把资源查询打到 BBS。资源结果与内容结果共用稳定分页、去重、曝光归因和轻量重排。
 - 相同 `(result_type, id)` 的候选会合并，未展示的候选保存在服务端并按标题完整命中、标题词覆盖、`#` 话题/`@` 用户/路线/资源意图和领域匹配做确定性轻量重排。
-- 该层是明确的模型接入点，而不是宣称已经存在 ML 排序模型；后续可在这里加入向量召回、特征、实验和离线评测。
+- 对已登录用户，Search Main 每轮召回合并后批量读取 Feature Main 的候选特征，在 35ms 有界预算内加入 pCTR、pCVR 和 pWEGU；pWEGU（行动完成）占行为项最大权重。特征服务不可用时保留词法结果并返回 `degraded=true`，不会阻断精确搜索。
+- 该层仍是明确的模型接入点，而不是宣称已经存在 ML 排序模型；后续可在这里加入向量召回、实验和离线评测。
 
 ## 游标与会话
 
@@ -61,4 +64,5 @@ cargo run -p bookway-search-evaluator
 - `BBS_SEARCH_GRPC_URL`：默认 `http://127.0.0.1:8085`。
 - `BBS_LINK_GRPC_URL`：默认 `http://127.0.0.1:18004`，用于 pending 内容的权威公开回读。
 - `KNOWLEDGE_CATALOG_GRPC_URL`：默认 `http://127.0.0.1:8105`，用于统一搜索中的公共资源召回。
+- `FEATURE_MAIN_GRPC_URL`：默认 `http://127.0.0.1:8093`，用于已登录搜索结果的 pCTR/pCVR/pWEGU 特征。
 - `STORAGE_MODE`：`memory` 或生产使用的 `postgres`；后者要求先运行数据库迁移。

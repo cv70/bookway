@@ -41,7 +41,7 @@
 
 `AUTH_REQUIRED=true` 时 Gateway 校验 HS256 Bearer JWT，并只从已验证的 `sub` 与 `roles` 写入内部 `x-user-id`、`x-user-roles`；来路请求携带的同名头会先被清除。`/v1/me/*` 的作者过滤也只能来自该可信身份，不能由 query string 指定。审核接口还要求角色为 `moderator`、`trust_safety` 或 `admin`，且本地关闭鉴权时也一律拒绝。`resolved + restrict_content` 会通过带 `x-service-token` 的内部调用将内容转为 `restricted`；获准申诉的 `resolved + restore_content` 只能恢复原本受限的内容。Gateway 对两个动作都只尝试一次低延迟快路径，失败只记录告警，绝不把已持久化的审核决定改写为失败；报告下架与获准申诉恢复分别由独立调度器携带服务令牌重试，前者确认公开读取不可用，后者确认公开读取可用后再投递终态通知。
 
-路线加入只接受已发布、当前用户可见且 `content_type=route` 的公开路线；展示用的 `route_title` 从不作为授权依据。Gateway 将 BBS Link 的结构化模板适配为 Growth 的首项行动、附加行动和阶段索引，再由 Growth 事务性创建或复用独立的私人 Journey 并记录参与意图；这是一份采用时快照，不会与原路线保持实时联动。模板后来被编辑不会改变已加入用户的私人计划。缺少模板的历史路线保留一项安全的兼容回退。退出先更新最新意图再写 BBS。同步调用失败时由 `bookway-route-participation-reconciler` 自动重试，BBS 会拒绝低于当前版本的延迟命令。
+路线加入只接受已发布、当前用户可见且 `content_type=route` 的公开路线；展示用的 `route_title` 从不作为授权依据。Gateway 将 BBS Link 的结构化模板适配为 Growth 的首项行动、附加行动和阶段索引，再由 Growth 事务性创建或复用独立的私人 Journey 并记录参与意图；这是一份采用时快照，不会与原路线保持实时联动。模板后来被编辑不会改变已加入用户的私人计划；缺少结构化模板或可执行首项行动的路线会被拒绝加入。退出先更新最新意图再写 BBS。同步调用失败时由 `bookway-route-participation-reconciler` 自动重试，BBS 会拒绝低于当前版本的延迟命令。
 
 当采用路线中的行动实际完成时，Growth 在内部完成响应中返回来源路线 ID；Gateway 随后以固定事件 ID 向 User Event 写入一次 `complete` 信号，归因到该公共路线。客户端不再把私有 Action ID 当作内容 ID 上报，因此特征系统只接收已提交、可关联的真实执行反馈。User Event 短暂不可用只会记录降级日志，不会撤销已完成的行动。
 

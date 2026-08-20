@@ -745,7 +745,7 @@ mod tests {
             sku_id: "sku-offer".to_string(),
             quantity: 1,
         };
-        assert!(contextual_order_item(&[offered.clone()], &offer).is_ok());
+        assert!(contextual_order_item(std::slice::from_ref(&offered), &offer).is_ok());
         assert!(matches!(
             contextual_order_item(
                 &[

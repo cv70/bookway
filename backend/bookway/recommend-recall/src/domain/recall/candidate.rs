@@ -148,7 +148,11 @@ mod tests {
         )
         .expect("candidate");
         let mut unrelated = matching.clone();
-        unrelated.post.as_mut().unwrap().domain = GrowthDomain::Learning as i32;
+        unrelated
+            .post
+            .as_mut()
+            .expect("candidate should retain its public post")
+            .domain = GrowthDomain::Learning as i32;
         apply_two_tower_score(&mut matching, &[GrowthDomain::Movement as i32]);
         apply_two_tower_score(&mut unrelated, &[GrowthDomain::Movement as i32]);
         assert!(matching.recall_score > unrelated.recall_score);

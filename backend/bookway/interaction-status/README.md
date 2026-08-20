@@ -15,6 +15,8 @@
 
 `INTERACTION_STATUS_ADDR` 和 `INTERACTION_STATUS_GRPC_ADDR`，默认分别监听 `127.0.0.1:8087`、`127.0.0.1:18007`。
 
+配置 `REDIS_URL` 后，批量 `context` 会使用按用户和内容集合分片的 protobuf 热缓存；缓存带 30 秒 TTL、用户版本校验、跨实例刷新租约和进程内 singleflight。写入仍以 PostgreSQL 为事实源，并在成功后递增用户版本。Redis 不可用时回退 PostgreSQL；其他实例正在刷新且缓存尚未回填时返回 `UNAVAILABLE`，避免把未知状态当成允许。
+
 ## 生产化待办
 
-`STORAGE_MODE=postgres` 已使用 SQLx/PostgreSQL 联合唯一键保证点赞和收藏幂等。下一阶段增加 Redis 热点计数、异步对账、反刷限流、Outbox 事件投递和数据保留/隐私策略。
+`STORAGE_MODE=postgres` 已使用 SQLx/PostgreSQL 联合唯一键保证点赞和收藏幂等。Redis/PostgreSQL 真实依赖下的容量、P99、故障切换和租约演练仍需在发布前补齐；热点计数、异步对账、反刷限流、Outbox 事件投递和数据保留/隐私策略仍是后续工作。

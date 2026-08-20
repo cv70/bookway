@@ -55,6 +55,11 @@ impl Domain {
             let Some(post) = content.post else {
                 continue;
             };
+            let route_actions = content
+                .route_template
+                .as_ref()
+                .map(|template| template.actions.clone())
+                .unwrap_or_default();
             summaries.insert(
                 content.id.clone(),
                 pb::PublicContentSummary {
@@ -64,6 +69,7 @@ impl Domain {
                     content_type: content.content_type,
                     topics: content.topics,
                     quality_score: content.quality_score,
+                    route_actions,
                 },
             );
         }
@@ -111,7 +117,6 @@ impl Domain {
                 "标签和主题最多各 12 个".to_string(),
             ));
         }
-        reject_legacy_cover_url(request.cover_url.as_deref())?;
         validate_enum::<pb::GrowthDomain>(request.domain, "growth domain")?;
         validate_enum::<pb::ContentType>(request.content_type, "content type")?;
         let route_template =
@@ -367,7 +372,6 @@ impl Domain {
             }
             content.route_template = route_template;
         }
-        reject_legacy_cover_url(request.cover_url.as_deref())?;
         if let Some(media_asset_ids) = request.media_asset_ids {
             let media_asset_ids = normalize_media_asset_ids(&media_asset_ids.values)?;
             let media = self
@@ -734,15 +738,6 @@ fn normalize_content_summary(mut content: pb::Content) -> pb::Content {
     content
 }
 
-fn reject_legacy_cover_url(cover_url: Option<&str>) -> Result<(), ContentError> {
-    if cover_url.is_some_and(|value| !value.trim().is_empty()) {
-        return Err(ContentError::Validation(
-            "封面必须使用已上传的媒体资源 ID，不能直接提供 URL".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn normalize_media_asset_ids(ids: &[String]) -> Result<Vec<String>, ContentError> {
     if ids.len() > 12 {
         return Err(ContentError::Validation(
@@ -1059,7 +1054,6 @@ mod tests {
             body: "今天完成了第一个小步骤".to_string(),
             domain: pb::GrowthDomain::Learning as i32,
             content_type: pb::ContentType::Note as i32,
-            cover_url: None,
             tags: vec!["成长".to_string()],
             topics: vec!["记录".to_string()],
             route_title: None,
@@ -1142,7 +1136,10 @@ mod tests {
         assert_eq!(first.id, retry.id);
         assert_eq!(first.author_id, "user-a");
         assert_eq!(first.status, pb::ContentStatus::Draft as i32);
-        assert!(first.media.is_empty(), "a fork cannot copy another user's media");
+        assert!(
+            first.media.is_empty(),
+            "a fork cannot copy another user's media"
+        );
         assert_eq!(
             first
                 .route_fork
@@ -1187,7 +1184,10 @@ mod tests {
                 summary: None,
             })
             .await;
-        assert!(matches!(private_fork, Err(ContentError::Repository(RepositoryError::NotFound(_)))));
+        assert!(matches!(
+            private_fork,
+            Err(ContentError::Repository(RepositoryError::NotFound(_)))
+        ));
 
         let own_fork = service
             .fork_route(pb::ForkRouteRequest {
@@ -1684,14 +1684,6 @@ mod tests {
             Err(ContentError::Repository(
                 RepositoryError::IdempotencyConflict(_)
             ))
-        ));
-    }
-
-    #[test]
-    fn arbitrary_cover_urls_are_rejected() {
-        assert!(matches!(
-            reject_legacy_cover_url(Some("https://untrusted.example/cover.jpg")),
-            Err(ContentError::Validation(_))
         ));
     }
 

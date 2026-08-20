@@ -329,7 +329,7 @@ cargo run -p bookway-gateway
 | direct-message-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`GROWTH_GRPC_URL`、`DIRECT_MESSAGE_NOTIFICATION_*` |
 | appeal-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`GROWTH_GRPC_URL`、`APPEAL_NOTIFICATION_*` |
 | content-report-restriction-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`REPORT_RESTRICTION_*` |
-| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL` |
+| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`（可降级） |
 | media | `MEDIA_ADDR` | `S3_ENDPOINT`、`S3_BUCKET`、`CDN_BASE_URL` |
 | content-audit | `CONTENT_AUDIT_ADDR` | 审核规则与 PostgreSQL |
 | feedback | `FEEDBACK_ADDR` | PostgreSQL；`user_feedback` 状态队列 |
@@ -352,6 +352,7 @@ cargo run -p bookway-gateway
 
 - SQLx 连接池和按服务所有权拆分的 PostgreSQL Repository，写路径使用事务与幂等键。
 - Redis 全局限流和特征缓存；Redis 故障 fail-open 并记录告警。
+- BBS 关系/可见性上下文 Redis 缓存、跨实例刷新租约、写后版本失效和安全 fail-closed 回退。
 - Transactional Outbox、Kafka/Redpanda Relay、`SKIP LOCKED`、退避和死信状态。
 - OpenSearch CJK 物理/影子双写索引、可恢复全量重建、逐版本只读对账、读别名原子发布和检索降级。
 - Gateway 媒体 API、MinIO/S3 预签名直传、对象大小/MIME 完成校验、私有 pending 元数据和 CDN 地址。

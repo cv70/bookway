@@ -9,6 +9,7 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub(crate) enum RepositoryError {
     NotFound(String),
+    Conflict(String),
     Failed(String),
 }
 #[async_trait]
@@ -161,7 +162,7 @@ impl CatalogRepository for MemoryCatalogRepository {
         }
         let mut idempotency = self.node_offer_idempotency.write().await;
         if let Some(id) = idempotency.get(&request.idempotency_key) {
-            return self
+            let existing = self
                 .node_offers
                 .read()
                 .await
@@ -169,7 +170,13 @@ impl CatalogRepository for MemoryCatalogRepository {
                 .cloned()
                 .ok_or_else(|| {
                     RepositoryError::Failed("missing node offer idempotency target".to_string())
-                });
+                })?;
+            if !offer_matches_request(&existing, &request) {
+                return Err(RepositoryError::Conflict(
+                    "idempotency key is already bound to a different node offer".to_string(),
+                ));
+            }
+            return Ok(existing);
         }
         let offer = pb::NodeOffer {
             id: Uuid::now_v7().to_string(),
@@ -382,22 +389,38 @@ impl CatalogRepository for PostgresCatalogRepository {
         }
         let id = Uuid::now_v7().to_string();
         let row = sqlx::query_as::<_, NodeOfferRow>(
-            "INSERT INTO mall_node_offers (id,merchant_id,product_id,sku_id,route_id,action_node_id,scene_equipment,creator_id,commission_bps,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING id,merchant_id,product_id,sku_id,route_id,action_node_id,scene_equipment,creator_id,commission_bps,created_at",
+            "INSERT INTO mall_node_offers (id,merchant_id,product_id,sku_id,route_id,action_node_id,scene_equipment,creator_id,commission_bps,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (idempotency_key) DO NOTHING RETURNING id,merchant_id,product_id,sku_id,route_id,action_node_id,scene_equipment,creator_id,commission_bps,created_at",
         )
         .bind(id)
-        .bind(request.merchant_id)
-        .bind(request.product_id)
-        .bind(request.sku_id)
-        .bind(request.route_id)
-        .bind(request.action_node_id)
-        .bind(request.scene_equipment)
-        .bind(request.creator_id)
+        .bind(&request.merchant_id)
+        .bind(&request.product_id)
+        .bind(&request.sku_id)
+        .bind(&request.route_id)
+        .bind(&request.action_node_id)
+        .bind(&request.scene_equipment)
+        .bind(&request.creator_id)
         .bind(i32::try_from(request.commission_bps).map_err(|_| RepositoryError::Failed("commission exceeds supported range".to_string()))?)
-        .bind(request.idempotency_key)
-        .fetch_one(&self.pool)
+        .bind(&request.idempotency_key)
+        .fetch_optional(&self.pool)
         .await
         .map_err(database)?;
-        Ok(row.into_proto())
+        if let Some(row) = row {
+            return Ok(row.into_proto());
+        }
+        let existing = sqlx::query_as::<_, NodeOfferRow>(
+            "SELECT id,merchant_id,product_id,sku_id,route_id,action_node_id,scene_equipment,creator_id,commission_bps,created_at FROM mall_node_offers WHERE idempotency_key=$1",
+        )
+        .bind(&request.idempotency_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?
+        .ok_or_else(|| RepositoryError::Failed("node offer idempotency row disappeared".to_string()))?;
+        if !offer_row_matches_request(&existing, &request) {
+            return Err(RepositoryError::Conflict(
+                "idempotency key is already bound to a different node offer".to_string(),
+            ));
+        }
+        Ok(existing.into_proto())
     }
     async fn node_offers(
         &self,
@@ -612,6 +635,28 @@ fn database(error: sqlx::Error) -> RepositoryError {
     RepositoryError::Failed(error.to_string())
 }
 
+fn offer_matches_request(offer: &pb::NodeOffer, request: &pb::AttachNodeOfferRequest) -> bool {
+    offer.merchant_id == request.merchant_id
+        && offer.product_id == request.product_id
+        && offer.sku_id == request.sku_id
+        && offer.route_id == request.route_id
+        && offer.action_node_id == request.action_node_id
+        && offer.scene_equipment == request.scene_equipment
+        && offer.creator_id == request.creator_id
+        && offer.commission_bps == request.commission_bps
+}
+
+fn offer_row_matches_request(row: &NodeOfferRow, request: &pb::AttachNodeOfferRequest) -> bool {
+    row.merchant_id == request.merchant_id
+        && row.product_id == request.product_id
+        && row.sku_id == request.sku_id
+        && row.route_id == request.route_id
+        && row.action_node_id == request.action_node_id
+        && row.scene_equipment == request.scene_equipment
+        && row.creator_id == request.creator_id
+        && u32::try_from(row.commission_bps).unwrap_or_default() == request.commission_bps
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CatalogRepository, MemoryCatalogRepository, RepositoryError};
@@ -743,12 +788,18 @@ mod tests {
             .await
             .expect("offer should be attached");
         let retry = repository
-            .attach_node_offer(request)
+            .attach_node_offer(request.clone())
             .await
             .expect("retry should return the same offer");
         assert_eq!(first.id, retry.id);
         assert_eq!(first.commission_bps, 500);
         assert_eq!(first.scene_equipment, "trail-running shoes");
+        let mut conflicting = request;
+        conflicting.commission_bps = 700;
+        assert!(matches!(
+            repository.attach_node_offer(conflicting).await,
+            Err(RepositoryError::Conflict(_))
+        ));
         let offers = repository
             .node_offers(pb::NodeOfferQueryRequest {
                 route_id: "route-1".to_string(),

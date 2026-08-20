@@ -14,6 +14,8 @@
 
 ## 依赖与环境变量
 
+路线搜索结果同时返回公开 `route_actions`（稳定行动节点 ID、标题和声明装备），因此命中行动或装备的搜索可以继续绑定到正确的执行场景；这些字段不包含任何私人 Journey 数据。
+
 - 依赖：OpenSearch（生产主路径）、`bbs-link`（降级路径）。
 - `BBS_SEARCH_ADDR`：默认 `127.0.0.1:8085`。
 - `BBS_LINK_GRPC_URL`：内容服务地址；生产环境在 `SERVICE_AUTH_REQUIRED=true` 下自动携带 `x-service-token`。

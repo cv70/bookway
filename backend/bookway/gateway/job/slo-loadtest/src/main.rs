@@ -23,6 +23,7 @@ enum LoadTestError {
 struct Config {
     gateway_url: String,
     user_id: String,
+    bearer_token: Option<String>,
     search_query: String,
     requests_per_surface: usize,
     concurrency: usize,
@@ -41,10 +42,15 @@ impl Config {
             });
         }
         let user_id = non_empty("GATEWAY_LOADTEST_USER_ID", "slo-loadtest-user")?;
+        let bearer_token = env::var("GATEWAY_LOADTEST_BEARER_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         let search_query = non_empty("GATEWAY_LOADTEST_SEARCH_QUERY", "跑步装备")?;
         Ok(Self {
             gateway_url: gateway_url.trim_end_matches('/').to_string(),
             user_id,
+            bearer_token,
             search_query,
             requests_per_surface: env_number("GATEWAY_LOADTEST_REQUESTS", 1_000_usize)?
                 .clamp(1, 1_000_000),
@@ -162,6 +168,7 @@ async fn run_surface(client: reqwest::Client, config: &Config, surface: Surface)
         let client = client.clone();
         let endpoint = endpoint.clone();
         let user_id = config.user_id.clone();
+        let bearer_token = config.bearer_token.clone();
         tasks.spawn(async move {
             let mut samples = Vec::new();
             loop {
@@ -170,11 +177,13 @@ async fn run_surface(client: reqwest::Client, config: &Config, surface: Surface)
                     return samples;
                 }
                 let started = Instant::now();
-                let response = client
-                    .get(&endpoint)
-                    .header("x-user-id", &user_id)
-                    .send()
-                    .await;
+                let mut request = client.get(&endpoint);
+                if let Some(token) = bearer_token.as_deref() {
+                    request = request.bearer_auth(token);
+                } else {
+                    request = request.header("x-user-id", &user_id);
+                }
+                let response = request.send().await;
                 samples.push(match response {
                     Ok(response) if response.status().is_success() => Sample {
                         elapsed_ms: started.elapsed().as_millis(),

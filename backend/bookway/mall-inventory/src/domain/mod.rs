@@ -16,6 +16,8 @@ pub(crate) enum InventoryError {
     NotFound(String),
     #[error("insufficient inventory: {0}")]
     Insufficient(String),
+    #[error("reservation conflict: {0}")]
+    Conflict(String),
     #[error("inventory operation failed: {0}")]
     Repository(String),
 }
@@ -137,6 +139,7 @@ fn repo_error(error: RepositoryError) -> InventoryError {
     match error {
         RepositoryError::NotFound(value) => InventoryError::NotFound(value),
         RepositoryError::Insufficient(value) => InventoryError::Insufficient(value),
+        RepositoryError::Conflict(value) => InventoryError::Conflict(value),
         RepositoryError::Failed(value) => InventoryError::Repository(value),
     }
 }

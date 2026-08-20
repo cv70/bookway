@@ -6,6 +6,7 @@ use std::{
 
 use bookway_bbs_link_api::pb::{self as bbs_link_pb, bbs_link_client::BbsLinkClient};
 use bookway_bbs_search_api::pb::{self, bbs_search_client::BbsSearchClient};
+use bookway_feature_main_api::pb::{self as feature_pb, feature_main_client::FeatureMainClient};
 use bookway_knowledge_catalog_api::pb::{
     self as catalog_pb, knowledge_catalog_client::KnowledgeCatalogClient,
 };
@@ -37,6 +38,8 @@ const QUERY_REWRITE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const BBS_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_500);
 const BBS_LINK_TIMEOUT: Duration = Duration::from_millis(1_500);
 const KNOWLEDGE_CATALOG_TIMEOUT: Duration = Duration::from_millis(1_500);
+const FEATURE_RERANK_TIMEOUT: Duration = Duration::from_millis(35);
+const MAX_FEATURE_RERANK_CANDIDATES: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SearchIntent {
@@ -194,6 +197,7 @@ pub(crate) struct Domain {
     search_client: BbsSearchClient<tonic::transport::Channel>,
     content_client: Option<BbsLinkClient<tonic::transport::Channel>>,
     resource_client: Option<KnowledgeCatalogClient<tonic::transport::Channel>>,
+    feature_client: Option<FeatureMainClient<tonic::transport::Channel>>,
     sessions: Arc<dyn SearchSessionStore>,
     exposures: SharedSearchExposureStore,
     query_rewrites: Arc<QueryRewriteCache>,
@@ -205,6 +209,7 @@ impl Domain {
         search_client: BbsSearchClient<tonic::transport::Channel>,
         content_client: BbsLinkClient<tonic::transport::Channel>,
         resource_client: KnowledgeCatalogClient<tonic::transport::Channel>,
+        feature_client: Option<FeatureMainClient<tonic::transport::Channel>>,
     ) -> Result<Self, bookway_data::DataError> {
         let storage = bookway_data::storage_mode()?;
         let pool = match storage {
@@ -228,6 +233,7 @@ impl Domain {
             search_client,
             content_client: Some(content_client),
             resource_client: Some(resource_client),
+            feature_client,
             sessions,
             exposures,
             query_rewrites: Arc::new(QueryRewriteCache::new(query_rewrites)),
@@ -246,12 +252,14 @@ impl Domain {
                 bbs_search_url: String::new(),
                 bbs_link_url: String::new(),
                 knowledge_catalog_url: String::new(),
+                feature_main_url: String::new(),
             },
             search_client,
             // Unit tests supply already-authoritative candidates directly. Production
             // construction above always installs the BBS Link public-fact client.
             content_client: None,
             resource_client: None,
+            feature_client: None,
             sessions,
             exposures,
             query_rewrites: Arc::new(QueryRewriteCache::new(Arc::new(
@@ -434,6 +442,7 @@ impl Domain {
         source_calls: usize,
     ) -> Result<usize, SearchMainError> {
         let mut calls = 0;
+        let mut fetched_candidates = Vec::new();
         for index in 0..session.recalls.len() {
             if source_calls + calls >= MAX_RECALL_PAGES_PER_RESPONSE {
                 break;
@@ -461,13 +470,7 @@ impl Domain {
                         .source_total_estimate
                         .max(usize::try_from(response.total_estimate).unwrap_or(usize::MAX));
                     session.degraded |= response.degraded;
-                    let mut candidates = response.items;
-                    rerank_results(&mut candidates, &plan.original_query, plan.intent);
-                    merge_candidates(
-                        &mut session.pending,
-                        &mut session.seen_result_ids,
-                        candidates,
-                    );
+                    fetched_candidates.extend(response.items);
                 }
                 Err(error) if index == 0 => return Err(error),
                 Err(error) => {
@@ -482,8 +485,84 @@ impl Domain {
                 }
             }
         }
+        let (features, feature_degraded) = self
+            .load_search_features(request.user_id.as_deref(), &fetched_candidates)
+            .await;
+        session.degraded |= feature_degraded;
+        rerank_results(
+            &mut fetched_candidates,
+            &plan.original_query,
+            plan.intent,
+            &features,
+        );
+        merge_candidates(
+            &mut session.pending,
+            &mut session.seen_result_ids,
+            fetched_candidates,
+        );
         sort_results(&mut session.pending);
         Ok(calls)
+    }
+
+    async fn load_search_features(
+        &self,
+        user_id: Option<&str>,
+        candidates: &[pb::SearchResult],
+    ) -> (HashMap<String, feature_pb::CandidateFeatures>, bool) {
+        let Some(user_id) = user_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return (HashMap::new(), false);
+        };
+        let Some(feature_client) = self.feature_client.as_ref() else {
+            return (HashMap::new(), true);
+        };
+        let content_ids = candidates
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    pb::SearchResultType::try_from(candidate.result_type),
+                    Ok(pb::SearchResultType::Post | pb::SearchResultType::Journey)
+                )
+            })
+            .map(|candidate| candidate.id.clone())
+            .filter(|id| !id.trim().is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(MAX_FEATURE_RERANK_CANDIDATES)
+            .collect::<Vec<_>>();
+        if content_ids.is_empty() {
+            return (HashMap::new(), false);
+        }
+        let mut client = feature_client.clone();
+        let request = match bookway_runtime::grpc_service_request(feature_pb::FeaturesRequest {
+            user_id: user_id.to_string(),
+            content_ids,
+        }) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, "search feature request authentication degraded");
+                return (HashMap::new(), true);
+            }
+        };
+        let response =
+            match tokio::time::timeout(FEATURE_RERANK_TIMEOUT, client.features(request)).await {
+                Ok(Ok(response)) => response.into_inner(),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, user_id, "search feature lookup degraded");
+                    return (HashMap::new(), true);
+                }
+                Err(_) => {
+                    tracing::warn!(user_id, "search feature lookup timed out");
+                    return (HashMap::new(), true);
+                }
+            };
+        (
+            response
+                .candidates
+                .into_iter()
+                .map(|candidate| (candidate.content_id.clone(), candidate))
+                .collect(),
+            false,
+        )
     }
 
     async fn search_resources(
@@ -583,6 +662,12 @@ impl Domain {
         request: pb::SearchRequest,
     ) -> Result<pb::SearchResponse, SearchMainError> {
         let mut client = self.search_client.clone();
+        let request = bookway_runtime::grpc_service_request(request).map_err(|error| {
+            SearchMainError::Upstream {
+                code: tonic::Code::Internal,
+                message: error.to_string(),
+            }
+        })?;
         let response = tokio::time::timeout(BBS_SEARCH_TIMEOUT, client.search(request))
             .await
             .map_err(|_| SearchMainError::Upstream {
@@ -602,6 +687,12 @@ impl Domain {
         request: pb::SuggestionsRequest,
     ) -> Result<pb::SuggestionsResponse, SearchMainError> {
         let mut client = self.search_client.clone();
+        let request = bookway_runtime::grpc_service_request(request).map_err(|error| {
+            SearchMainError::Upstream {
+                code: tonic::Code::Internal,
+                message: error.to_string(),
+            }
+        })?;
         let response = tokio::time::timeout(BBS_SEARCH_TIMEOUT, client.suggestions(request))
             .await
             .map_err(|_| SearchMainError::Upstream {
@@ -773,12 +864,18 @@ fn search_result_from_summary(
         domain: Some(search_growth_domain(post.domain)),
         score: candidate.score,
         highlights: Vec::new(),
-        post: Some(search_post_summary(post.clone())),
+        post: Some(search_post_summary(
+            post.clone(),
+            summary.route_actions.clone(),
+        )),
         resource: None,
     }
 }
 
-fn search_post_summary(value: bbs_link_pb::PostSummary) -> pb::PostSummary {
+fn search_post_summary(
+    value: bbs_link_pb::PostSummary,
+    route_actions: Vec<bbs_link_pb::RouteTemplateAction>,
+) -> pb::PostSummary {
     pb::PostSummary {
         id: value.id,
         author_name: value.author_name,
@@ -796,6 +893,7 @@ fn search_post_summary(value: bbs_link_pb::PostSummary) -> pb::PostSummary {
         is_route: value.is_route,
         is_milestone: value.is_milestone,
         is_question: value.is_question,
+        route_actions,
     }
 }
 
@@ -1033,7 +1131,12 @@ fn merge_candidates(
     }
 }
 
-fn rerank_results(items: &mut [pb::SearchResult], query: &str, intent: SearchIntent) {
+fn rerank_results(
+    items: &mut [pb::SearchResult],
+    query: &str,
+    intent: SearchIntent,
+    features: &HashMap<String, feature_pb::CandidateFeatures>,
+) {
     let query = query.to_lowercase();
     let terms = query.split_whitespace().collect::<Vec<_>>();
     let expected_domain = domain_for_query(&query);
@@ -1063,8 +1166,25 @@ fn rerank_results(items: &mut [pb::SearchResult], query: &str, intent: SearchInt
         if expected_domain.is_some_and(|domain| item.domain == Some(domain)) {
             item.score += 0.5;
         }
+        if let Some(candidate) = features.get(&item.id) {
+            let p_ctr = finite_probability(candidate.click_through_rate);
+            let p_cvr = finite_probability(candidate.purchase_conversion_rate);
+            let p_wegu = finite_probability(candidate.action_completion_rate);
+            // Search remains lexical-first, but verified action completion is
+            // the largest behavioral contribution. This favors routes users
+            // can finish over results that only attract clicks.
+            item.score += 3.0 * (0.15 * p_ctr + 0.25 * p_cvr + 0.60 * p_wegu);
+        }
     }
     sort_results(items);
+}
+
+fn finite_probability(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 fn sort_results(items: &mut [pb::SearchResult]) {
@@ -1563,6 +1683,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn action_completion_outweighs_click_signal_in_search_rerank() {
+        let mut items = vec![
+            item("click-only", "行动路线", 1.0),
+            item("action-proven", "行动路线", 1.0),
+        ];
+        let features = HashMap::from([
+            (
+                "click-only".to_string(),
+                feature_pb::CandidateFeatures {
+                    click_through_rate: 1.0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "action-proven".to_string(),
+                feature_pb::CandidateFeatures {
+                    action_completion_rate: 1.0,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        rerank_results(&mut items, "行动", SearchIntent::Generic, &features);
+
+        assert_eq!(items[0].id, "action-proven");
+    }
+
     fn response(items: Vec<pb::SearchResult>, next_cursor: Option<&str>) -> pb::SearchResponse {
         pb::SearchResponse {
             request_id: String::new(),
@@ -1625,6 +1773,7 @@ mod tests {
             content_type: content_type as i32,
             topics: vec!["当前话题".to_string()],
             quality_score: 0.9,
+            route_actions: Vec::new(),
         }
     }
 

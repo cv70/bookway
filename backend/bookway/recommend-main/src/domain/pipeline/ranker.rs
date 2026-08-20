@@ -34,20 +34,26 @@ impl RecommendRanker {
             .collect();
         let mut feature_client = self.feature_client.clone();
         let response = feature_client
-            .features(feature::FeaturesRequest {
-                user_id: user_id.to_string(),
-                content_ids: ids,
-            })
+            .features(
+                bookway_runtime::grpc_service_request(feature::FeaturesRequest {
+                    user_id: user_id.to_string(),
+                    content_ids: ids,
+                })
+                .map_err(|error| PipelineError::Model(error.to_string()))?,
+            )
             .await
             .map_err(|error| PipelineError::Model(error.to_string()))?
             .into_inner();
         let mut client = (*self.ranker).clone();
         let response = client
-            .rank(rank::RankRequest {
-                user_id: user_id.to_string(),
-                features: Some(rank_features(response)),
-                candidates: candidates.iter().map(candidate_to_proto).collect(),
-            })
+            .rank(
+                bookway_runtime::grpc_service_request(rank::RankRequest {
+                    user_id: user_id.to_string(),
+                    features: Some(rank_features(response)),
+                    candidates: candidates.iter().map(candidate_to_proto).collect(),
+                })
+                .map_err(|error| PipelineError::Model(error.to_string()))?,
+            )
             .await
             .map_err(|status| PipelineError::Model(status.to_string()))?
             .into_inner();

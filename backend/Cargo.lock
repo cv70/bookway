@@ -447,8 +447,10 @@ dependencies = [
  "bookway-data",
  "bookway-runtime",
  "prost",
+ "redis",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror 2.0.20",
  "time",
@@ -457,6 +459,7 @@ dependencies = [
  "tonic-health",
  "tower 0.5.3",
  "tower-http",
+ "tracing",
  "uuid",
 ]
 
@@ -1029,8 +1032,10 @@ dependencies = [
  "bookway-interaction-status-api",
  "bookway-runtime",
  "prost",
+ "redis",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
@@ -1038,6 +1043,8 @@ dependencies = [
  "tonic-health",
  "tower 0.5.3",
  "tower-http",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1572,6 +1579,7 @@ dependencies = [
  "bookway-bbs-link-api",
  "bookway-bbs-search-api",
  "bookway-data",
+ "bookway-feature-main-api",
  "bookway-knowledge-catalog-api",
  "bookway-runtime",
  "bookway-search-main-api",
@@ -1594,6 +1602,7 @@ name = "bookway-search-main-api"
 version = "0.1.0"
 dependencies = [
  "bookway-api",
+ "bookway-bbs-link-api",
  "bookway-bbs-search-api",
  "prost",
  "serde",

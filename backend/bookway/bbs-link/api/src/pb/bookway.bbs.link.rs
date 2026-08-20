@@ -250,6 +250,10 @@ pub struct PublicContentSummary {
     pub topics: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(double, tag = "6")]
     pub quality_score: f64,
+    /// Public route action nodes are part of the searchable execution context.
+    /// They contain no private Journey or schedule data.
+    #[prost(message, repeated, tag = "7")]
+    pub route_actions: ::prost::alloc::vec::Vec<RouteTemplateAction>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -310,10 +314,6 @@ pub struct CreateRequest {
     pub domain: i32,
     #[prost(enumeration = "ContentType", tag = "7")]
     pub content_type: i32,
-    /// Deprecated. Arbitrary URLs are never accepted as public content media;
-    /// clients must upload through Media and send its asset IDs instead.
-    #[prost(string, optional, tag = "8")]
-    pub cover_url: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, repeated, tag = "9")]
     pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, repeated, tag = "10")]
@@ -348,9 +348,6 @@ pub struct UpdateRequest {
     pub tags: ::core::option::Option<StringList>,
     #[prost(message, optional, tag = "7")]
     pub topics: ::core::option::Option<StringList>,
-    /// Deprecated. See CreateRequest.media_asset_ids.
-    #[prost(string, optional, tag = "8")]
-    pub cover_url: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "9")]
     pub media_asset_ids: ::core::option::Option<StringList>,
     #[prost(message, optional, tag = "10")]

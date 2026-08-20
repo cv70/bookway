@@ -14,6 +14,8 @@ pub(crate) enum MallError {
     Validation(String),
     #[error("product or SKU {0} was not found")]
     NotFound(String),
+    #[error("catalog conflict: {0}")]
+    Conflict(String),
     #[error("catalog operation failed: {0}")]
     Repository(String),
 }
@@ -179,6 +181,24 @@ impl Domain {
             Some(&offer.scene_equipment),
         )
         .await?;
+        // The route association can remain addressable for historical
+        // settlement, but checkout must resolve a currently saleable SKU.
+        let product = self
+            .repository
+            .get(&offer.product_id)
+            .await
+            .map_err(repo_error)?;
+        let skus = self
+            .repository
+            .skus(vec![offer.sku_id.clone()])
+            .await
+            .map_err(repo_error)?;
+        if !skus
+            .iter()
+            .any(|sku| sku.id == offer.sku_id && sku.product_id == product.id)
+        {
+            return Err(MallError::NotFound(offer.sku_id));
+        }
         Ok(offer)
     }
 
@@ -351,6 +371,7 @@ fn validate_update(request: &pb::UpdateProductRequest) -> Result<(), MallError> 
 fn repo_error(error: RepositoryError) -> MallError {
     match error {
         RepositoryError::NotFound(value) => MallError::NotFound(value),
+        RepositoryError::Conflict(value) => MallError::Conflict(value),
         RepositoryError::Failed(value) => MallError::Repository(value),
     }
 }

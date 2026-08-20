@@ -62,6 +62,13 @@ pub struct PostSummary {
     pub is_milestone: bool,
     #[prost(bool, tag = "16")]
     pub is_question: bool,
+    /// Public route action nodes available for the search result. The route ID
+    /// remains the enclosing SearchResult ID; callers can identify the matched
+    /// title or equipment locally without private execution data.
+    #[prost(message, repeated, tag = "17")]
+    pub route_actions: ::prost::alloc::vec::Vec<
+        ::bookway_bbs_link_api::pb::RouteTemplateAction,
+    >,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

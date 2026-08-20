@@ -287,7 +287,6 @@ fn content_request(job: &PublicationJob) -> Result<content_pb::CreateRequest, St
         body: required_string(&job.payload, "body")?,
         domain,
         content_type: content_pb::ContentType::Note as i32,
-        cover_url: None,
         tags: Vec::new(),
         topics: Vec::new(),
         route_title: optional_string(&job.payload, "route_title"),
@@ -403,7 +402,6 @@ mod tests {
             Some("entry-publication:entry-1")
         );
         assert_eq!(request.body, "The public body");
-        assert!(request.cover_url.is_none());
         assert!(request.route_title.is_none());
         assert_eq!(
             request.media_asset_ids,

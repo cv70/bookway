@@ -7,6 +7,7 @@ import { eventReporter } from './src/analytics/eventReporter';
 import {
   completeAction,
   capturePostAsKnowledge,
+  createMallOrder,
   acceptQuestionAnswer,
   createAction,
   createComment,
@@ -26,9 +27,12 @@ import {
   getNotifications,
   getPost,
   getRouteParticipations,
+  getRouteNodeOffers,
+  getRouteNodeResources,
   getSocialContext,
   getToday,
   getWeeklyReview,
+  forkRoute,
   joinRoute,
   markNotificationRead,
   retryEntryPublication,
@@ -38,6 +42,8 @@ import {
   setPostReaction,
   startKnowledgeJourney,
   submitPostForReview,
+  publishPost,
+  updatePost,
   updateAction,
   updateJourney,
   updateKnowledge,
@@ -51,6 +57,7 @@ import { CreateJourneyModal } from './src/components/CreateJourneyModal';
 import { CreateMenuModal } from './src/components/CreateMenuModal';
 import { CreatePostModal } from './src/components/CreatePostModal';
 import { FeedbackModal } from './src/components/FeedbackModal';
+import { ForkRouteModal } from './src/components/ForkRouteModal';
 import { HideFeedbackModal } from './src/components/HideFeedbackModal';
 import { JourneyDetailModal } from './src/components/JourneyDetailModal';
 import { ModerationCommentsModal } from './src/components/ModerationCommentsModal';
@@ -60,6 +67,7 @@ import { NotificationsModal } from './src/components/NotificationsModal';
 import { PostDetailModal } from './src/components/PostDetailModal';
 import { ProfileSectionModal } from './src/components/ProfileSectionModal';
 import { ReaderModal } from './src/components/ReaderModal';
+import { RouteDraftModal } from './src/components/RouteDraftModal';
 import { ReadingLibraryModal } from './src/components/ReadingLibraryModal';
 import { TabBar } from './src/components/TabBar';
 import { fallbackFeed, fallbackJourneys, fallbackReadingBooks, fallbackToday } from './src/data/fallback';
@@ -83,6 +91,7 @@ import {
   CreateKnowledgeResourceInput,
   CreatePostInput,
   Feed,
+  FeedActionContext,
   FeedItem,
   GrowthEntry,
   Journey,
@@ -90,6 +99,7 @@ import {
   KnowledgeResource,
   NotificationPage,
   NegativeFeedbackReason,
+  NodeOffer,
   PublicAuthor,
   ReaderSettings,
   ReadingBook,
@@ -97,9 +107,13 @@ import {
   RecommendationEventContext,
   ReportReason,
   ReviewAdjustmentSuggestion,
+  RouteTemplateAction,
+  RouteNodeResourceAttachment,
+  OwnedContent,
   TabKey,
   Today,
   UpdateKnowledgeResourceInput,
+  UpdatePostInput,
   UserNotification,
   WeeklyReview,
 } from './src/types';
@@ -121,6 +135,16 @@ export default function App() {
   const [today, setToday] = useState<Today>(fallbackToday);
   const [journeys, setJourneys] = useState<Journey[]>(fallbackJourneys);
   const [feed, setFeed] = useState<Feed>(fallbackFeed);
+  const [contextualFeed, setContextualFeed] = useState<Feed>();
+  const [contextualFeedContext, setContextualFeedContext] = useState<FeedActionContext>();
+  const [contextualFeedLoading, setContextualFeedLoading] = useState(false);
+  const [contextualOffers, setContextualOffers] = useState<NodeOffer[]>([]);
+  const [contextualOffersLoading, setContextualOffersLoading] = useState(false);
+  const [contextualOffersError, setContextualOffersError] = useState(false);
+  const [contextualAction, setContextualAction] = useState<RouteTemplateAction>();
+  const [contextualResources, setContextualResources] = useState<RouteNodeResourceAttachment[]>([]);
+  const [contextualResourcesLoading, setContextualResourcesLoading] = useState(false);
+  const [contextualResourcesError, setContextualResourcesError] = useState(false);
   const [followingFeed, setFollowingFeed] = useState<Feed>(() => ({
     request_id: 'local-following-preview',
     items: [],
@@ -152,7 +176,9 @@ export default function App() {
   const creatingEntryFingerprintsRef = useRef(new Set<string>());
   const journeyFallbackIdsByFingerprintRef = useRef(new Map<string, string>());
   const homeFeedLoadingMoreRef = useRef(false);
+  const contextualFeedLoadingMoreRef = useRef(false);
   const followingFeedLoadingMoreRef = useRef(false);
+  const contextualFeedRequestRef = useRef(0);
   const notificationOpenRequestRef = useRef(0);
   const postDetailRequestRef = useRef(0);
   const authorContentRequestRef = useRef(0);
@@ -174,6 +200,8 @@ export default function App() {
   const [selectedPost, setSelectedPost] = useState<CommunityPost>();
   const [selectedPostAuthorId, setSelectedPostAuthorId] = useState<string>();
   const [selectedContent, setSelectedContent] = useState<ContentDetail>();
+  const [forkSourcePost, setForkSourcePost] = useState<CommunityPost>();
+  const [selectedRouteDraft, setSelectedRouteDraft] = useState<ContentDetail | OwnedContent>();
   const [selectedPostRecommendationContext, setSelectedPostRecommendationContext] = useState<RecommendationEventContext>();
   const [hideFeedback, setHideFeedback] = useState<{ postId: string; context?: RecommendationEventContext }>();
   const [selectedAuthor, setSelectedAuthor] = useState<PublicAuthor>();
@@ -281,7 +309,10 @@ export default function App() {
     ? journeyActionsById[selectedJourney.id] ?? today.actions.filter((action) => action.journey_id === selectedJourney.id)
     : [];
   const savedPosts = feed.items
-    .filter((item) => bookmarkedPostIds.has(item.post.id))
+    .filter((item): item is FeedItem & { post: CommunityPost } => {
+      const post = item.post;
+      return Boolean(post && bookmarkedPostIds.has(post.id));
+    })
     .map((item) => item.post);
 
   const refreshCompanion = () => {
@@ -289,23 +320,36 @@ export default function App() {
   };
 
   const loadMoreFeed = async (surface: 'home' | 'following') => {
-    const current = surface === 'home' ? feed : followingFeed;
+    const contextual = surface === 'home' && contextualFeedContext ? contextualFeed : undefined;
+    const current = contextual ?? (surface === 'home' ? feed : followingFeed);
     const cursor = current.meta.next_cursor;
-    const loadingRef = surface === 'home' ? homeFeedLoadingMoreRef : followingFeedLoadingMoreRef;
+    const loadingRef = contextual
+      ? contextualFeedLoadingMoreRef
+      : surface === 'home' ? homeFeedLoadingMoreRef : followingFeedLoadingMoreRef;
     if (!cursor || loadingRef.current) return;
 
+    const requestId = contextual ? contextualFeedRequestRef.current : undefined;
+    const actionContext = contextual ? contextualFeedContext : undefined;
     loadingRef.current = true;
-    (surface === 'home' ? setFeedLoadingMore : setFollowingFeedLoadingMore)(true);
+    if (contextual) setContextualFeedLoading(true);
+    else (surface === 'home' ? setFeedLoadingMore : setFollowingFeedLoadingMore)(true);
     try {
-      const next = await getFeed(undefined, cursor, surface);
+      const next = await getFeed(undefined, cursor, surface, actionContext);
       const attributed = attachFeedAttribution(next, surface);
-      (surface === 'home' ? setFeed : setFollowingFeed)((existing) => mergeFeedPages(existing, attributed));
+      if (contextual) {
+        if (requestId !== contextualFeedRequestRef.current) return;
+        setContextualFeed((existing) => existing ? mergeFeedPages(existing, attributed) : attributed);
+      } else {
+        (surface === 'home' ? setFeed : setFollowingFeed)((existing) => mergeFeedPages(existing, attributed));
+      }
     } catch {
       // Keep the current page usable when a continuation request is interrupted.
-      setOffline(true);
+      if (!contextual || requestId === contextualFeedRequestRef.current) setOffline(true);
     } finally {
       loadingRef.current = false;
-      (surface === 'home' ? setFeedLoadingMore : setFollowingFeedLoadingMore)(false);
+      if (contextual && requestId !== contextualFeedRequestRef.current) return;
+      if (contextual) setContextualFeedLoading(false);
+      else (surface === 'home' ? setFeedLoadingMore : setFollowingFeedLoadingMore)(false);
     }
   };
 
@@ -368,6 +412,53 @@ export default function App() {
       .catch(() => {
         if (requestId === postDetailRequestRef.current) setOffline(true);
       });
+  };
+
+  const openForkRoute = (post: CommunityPost) => {
+    setForkSourcePost(post);
+  };
+
+  const handleForkRoute = async (title: string, summary: string) => {
+    const source = forkSourcePost;
+    if (!source) return;
+    try {
+      const draft = await forkRoute(source.id, title, summary);
+      setForkSourcePost(undefined);
+      closePostDetail();
+      setSelectedRouteDraft(draft);
+    } catch (error) {
+      setOffline(true);
+      throw error;
+    }
+  };
+
+  const openRouteDraft = (content: OwnedContent) => {
+    setProfileSection(undefined);
+    setSelectedRouteDraft(content);
+  };
+
+  const saveRouteDraft = async (contentId: string, input: UpdatePostInput) => {
+    try {
+      const updated = await updatePost(contentId, input);
+      setSelectedRouteDraft(updated);
+      return updated;
+    } catch (error) {
+      setOffline(true);
+      throw error;
+    }
+  };
+
+  const publishRouteDraft = async (contentId: string, input: UpdatePostInput) => {
+    try {
+      const updated = await updatePost(contentId, input);
+      setSelectedRouteDraft(updated);
+      await publishPost(contentId, `route-publish-${contentId}`);
+      setSelectedRouteDraft(undefined);
+      setProfileSection('creation');
+    } catch (error) {
+      setOffline(true);
+      throw error;
+    }
   };
 
   const openAuthorProfile = (author: PublicAuthor) => {
@@ -483,8 +574,8 @@ export default function App() {
     }
     if (postId) {
       setOpeningNotificationId(notification.id);
-      const existing = [...feed.items, ...followingFeed.items].find((item) => item.post.id === postId);
-      if (existing) {
+      const existing = [...feed.items, ...followingFeed.items].find((item) => item.post?.id === postId);
+      if (existing?.post) {
         if (requestId !== notificationOpenRequestRef.current) return;
         setOpeningNotificationId(undefined);
         setNotificationsVisible(false);
@@ -849,11 +940,13 @@ export default function App() {
     setLikedPostIds((current) => toggleId(current, postId, active));
     setFeed((current) => ({
       ...current,
-      items: current.items.map((item) => item.post.id === postId
-        ? { ...item, post: { ...item.post, like_count: Math.max(0, item.post.like_count + (active ? 1 : -1)) } }
-        : item),
+      items: current.items.map((item) => {
+        if (!item.post || item.post.id !== postId) return item;
+        return { ...item, post: { ...item.post, like_count: Math.max(0, item.post.like_count + (active ? 1 : -1)) } };
+      }),
     }));
     setFollowingFeed((current) => updateFeedLikeCount(current, postId, active));
+    setContextualFeed((current) => current ? updateFeedLikeCount(current, postId, active) : current);
     setPostReaction(postId, 'like', active, undefined, context).catch(() => setOffline(true));
   };
 
@@ -881,12 +974,16 @@ export default function App() {
   ) => {
     setFeed((current) => ({
       ...current,
-      items: current.items.filter((item) => item.post.id !== postId),
+      items: current.items.filter((item) => item.post?.id !== postId),
     }));
     setFollowingFeed((current) => ({
       ...current,
-      items: current.items.filter((item) => item.post.id !== postId),
+      items: current.items.filter((item) => item.post?.id !== postId),
     }));
+    setContextualFeed((current) => current ? {
+      ...current,
+      items: current.items.filter((item) => item.post?.id !== postId),
+    } : current);
     setSelectedPost((current) => current?.id === postId ? undefined : current);
     setSelectedContent((current) => current?.id === postId ? undefined : current);
     setPostReaction(postId, 'hide', true, reason, context).catch(() => setOffline(true));
@@ -914,8 +1011,110 @@ export default function App() {
   };
 
   const openPost = (item: FeedItem) => {
+    if (!item.post) return;
     trackFeedEvent('click', item.post.id, item.recommendation_context);
     openPostDetail(item.post, item.author_id || undefined, undefined, item.recommendation_context);
+  };
+
+  const clearContextualFeed = () => {
+    contextualFeedRequestRef.current += 1;
+    contextualFeedLoadingMoreRef.current = false;
+    setContextualFeed(undefined);
+    setContextualFeedContext(undefined);
+    setContextualFeedLoading(false);
+    setContextualOffers([]);
+    setContextualOffersLoading(false);
+    setContextualOffersError(false);
+    setContextualAction(undefined);
+    setContextualResources([]);
+    setContextualResourcesLoading(false);
+    setContextualResourcesError(false);
+  };
+
+  const closePostDetail = () => {
+    postDetailRequestRef.current += 1;
+    setSelectedPost(undefined);
+    setSelectedPostAuthorId(undefined);
+    setSelectedContent(undefined);
+    setSelectedPostRecommendationContext(undefined);
+  };
+
+  const changeTab = (tab: TabKey) => {
+    if (tab !== 'discover' && contextualFeedContext) clearContextualFeed();
+    setActiveTab(tab);
+  };
+
+  const openActionContext = (
+    routeId: string,
+    action: RouteTemplateAction,
+    sceneEquipment: string,
+  ) => {
+    const context: FeedActionContext = {
+      route_id: routeId,
+      action_node_id: action.id,
+      placement: 'action_node',
+      action_domain: selectedPost?.id === routeId ? selectedPost?.domain : undefined,
+      scene_equipment: sceneEquipment,
+    };
+    const requestId = ++contextualFeedRequestRef.current;
+    contextualFeedLoadingMoreRef.current = false;
+    setContextualFeedContext(context);
+    setContextualAction(action);
+    setContextualOffers([]);
+    setContextualOffersError(false);
+    setContextualOffersLoading(true);
+    setContextualResources([]);
+    setContextualResourcesError(false);
+    setContextualResourcesLoading(true);
+    setContextualFeed({
+      request_id: `contextual-${requestId}`,
+      items: [],
+      meta: { sourced: 0, filtered: 0, selected: 0 },
+    });
+    setContextualFeedLoading(true);
+    setActiveTab('discover');
+    closePostDetail();
+    getFeed(undefined, undefined, 'home', context)
+      .then((next) => {
+        if (requestId !== contextualFeedRequestRef.current) return;
+        setContextualFeed(attachFeedAttribution(next, 'home'));
+      })
+      .catch(() => {
+        if (requestId !== contextualFeedRequestRef.current) return;
+        setContextualFeed({
+          request_id: `contextual-${requestId}`,
+          items: [],
+          meta: { sourced: 0, filtered: 0, selected: 0, degraded: true },
+        });
+        setOffline(true);
+      })
+      .finally(() => {
+        if (requestId === contextualFeedRequestRef.current) setContextualFeedLoading(false);
+      });
+    getRouteNodeOffers(routeId, action.id)
+      .then((response) => {
+        if (requestId !== contextualFeedRequestRef.current) return;
+        setContextualOffers(response.items);
+      })
+      .catch(() => {
+        if (requestId !== contextualFeedRequestRef.current) return;
+        setContextualOffersError(true);
+      })
+      .finally(() => {
+        if (requestId === contextualFeedRequestRef.current) setContextualOffersLoading(false);
+      });
+    getRouteNodeResources(routeId, action.id)
+      .then((response) => {
+        if (requestId !== contextualFeedRequestRef.current) return;
+        setContextualResources(response.items);
+      })
+      .catch(() => {
+        if (requestId !== contextualFeedRequestRef.current) return;
+        setContextualResourcesError(true);
+      })
+      .finally(() => {
+        if (requestId === contextualFeedRequestRef.current) setContextualResourcesLoading(false);
+      });
   };
 
   const handleLoadMoreComments = async (postId: string) => {
@@ -1109,6 +1308,7 @@ export default function App() {
       actions: actions.map((action) => {
         const stageIndex = journey.stages.findIndex((stage) => stage.id === action.stage_id);
         return {
+          id: action.id,
           title: action.title.trim(),
           detail: action.detail.trim(),
           estimated_minutes: action.estimated_minutes,
@@ -1151,7 +1351,7 @@ export default function App() {
 
   const screen = {
     today: <TodayScreen companion={companion} journeys={journeys} notificationCount={notificationPage.unread_count} onComplete={handleComplete} onCreateJourney={() => setCreatingJourney(true)} onDiscover={() => setActiveTab('discover')} onNotifications={openNotifications} onOpenAction={openAction} today={today} />,
-    discover: <DiscoverScreen bookmarkedPostIds={bookmarkedPostIds} feed={feed} feedLoadingMore={feedLoadingMore} followingFeed={followingFeed} followingFeedLoadingMore={followingFeedLoadingMore} joinedRouteIds={joinedRouteIds} joiningRouteIds={joiningRouteIds} likedPostIds={likedPostIds} offline={offline} onBookmark={handleBookmark} onHide={requestHide} onJoin={handleJoinRoute} onLike={handleLike} onLoadMoreFeed={loadMoreFeed} onOpen={openPost} onOpenAuthor={openAuthorProfile} routeParticipantCounts={routeParticipantCounts} />,
+    discover: <DiscoverScreen bookmarkedPostIds={bookmarkedPostIds} contextualAction={contextualAction} contextualFeed={contextualFeed} contextualFeedContext={contextualFeedContext} contextualFeedLoading={contextualFeedLoading} contextualOffers={contextualOffers} contextualOffersError={contextualOffersError} contextualOffersLoading={contextualOffersLoading} contextualResources={contextualResources} contextualResourcesError={contextualResourcesError} contextualResourcesLoading={contextualResourcesLoading} feed={feed} feedLoadingMore={feedLoadingMore} followingFeed={followingFeed} followingFeedLoadingMore={followingFeedLoadingMore} joinedRouteIds={joinedRouteIds} joiningRouteIds={joiningRouteIds} likedPostIds={likedPostIds} offline={offline} onBookmark={handleBookmark} onClearContextualFeed={clearContextualFeed} onCreateOrder={createMallOrder} onHide={requestHide} onJoin={handleJoinRoute} onLike={handleLike} onLoadMoreFeed={loadMoreFeed} onOpen={openPost} onOpenAuthor={openAuthorProfile} routeParticipantCounts={routeParticipantCounts} />,
     journeys: <JourneysScreen journeys={journeys} onCreate={() => setCreatingJourney(true)} onOpen={openJourney} />,
     profile: <ProfileScreen entries={entries} journeys={journeys} moderator={canModerate} onOpenFeedback={() => setFeedbackVisible(true)} onOpenLibrary={() => setReadingLibraryVisible(true)} onOpenMessages={() => openMessages()} onOpenModeration={() => setModerationVisible(true)} onOpenPublicResources={() => setResourceCatalogVisible(true)} onOpenSection={setProfileSection} profile={profile} today={today} />,
   }[activeTab];
@@ -1160,7 +1360,7 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView edges={['top', 'left', 'right']} style={styles.safeArea}>
         <View style={styles.screen}>{screen}</View>
-        <TabBar active={activeTab} onChange={setActiveTab} onCreate={() => setCreateMenuVisible(true)} />
+        <TabBar active={activeTab} onChange={changeTab} onCreate={() => setCreateMenuVisible(true)} />
       </SafeAreaView>
       <CreateMenuModal onClose={() => setCreateMenuVisible(false)} onCreateEntry={() => { setCreateMenuVisible(false); setEntryContext({}); }} onCreateJourney={() => { setCreateMenuVisible(false); setCreatingJourney(true); }} onCreatePost={() => { setCreateMenuVisible(false); setCreatingPost(true); }} visible={createMenuVisible} />
       <CreateJourneyModal onClose={() => setCreatingJourney(false)} onSubmit={handleCreateJourney} visible={creatingJourney} />
@@ -1169,9 +1369,11 @@ export default function App() {
       <ActionDetailModal action={selectedAction} journeyTitle={journeys.find((journey) => journey.id === selectedAction?.journey_id)?.title} onClose={() => setSelectedActionId(undefined)} onComplete={handleComplete} onCreateEntry={(action, elapsedSeconds) => { setSelectedActionId(undefined); setEntryContext({ actionId: action.id, journeyId: action.journey_id, durationMinutes: elapsedSeconds > 0 ? Math.max(1, Math.round(elapsedSeconds / 60)) : undefined }); }} onUpdate={handleUpdateAction} visible={Boolean(selectedAction)} />
       <JourneyDetailModal actions={selectedJourneyActions} journey={selectedJourney} onAddAction={handleAddAction} onClose={() => setSelectedJourneyId(undefined)} onOpenAction={openAction} onPublish={handlePublishJourney} onUpdateJourney={handleUpdateJourney} visible={Boolean(selectedJourney)} />
       <AuthorProfileModal author={selectedAuthor} blocked={Boolean(selectedAuthor && blockedAuthorIds.has(selectedAuthor.id))} contents={authorContents} error={authorContentsError} following={Boolean(selectedAuthor && followingAuthorIds.has(selectedAuthor.id))} loading={authorContentsLoading} loadingMore={authorContentsLoadingMore} muted={Boolean(selectedAuthor && mutedAuthorIds.has(selectedAuthor.id))} nextCursor={authorContentsNextCursor} onClose={closeAuthorProfile} onFollow={handleFollowAuthor} onLoadMore={loadMoreAuthorContents} onMessage={(authorId) => { closeAuthorProfile(); openMessages(authorId); }} onOpenContent={(content) => { if (!content.post) return; closeAuthorProfile(); openPostDetail(content.post, content.author_id, content); }} onSetRelationship={handleCreatorRelationship} />
-      <PostDetailModal bookmarked={Boolean(selectedPost && bookmarkedPostIds.has(selectedPost.id))} capturedKnowledge={Boolean(selectedPost && knowledgeResources.some((resource) => resource.source_content_id === selectedPost.id))} comments={selectedPost ? commentsByPost[selectedPost.id] ?? [] : []} content={selectedContent} currentUserId={currentUserId} following={Boolean(selectedPostAuthorId && followingAuthorIds.has(selectedPostAuthorId))} hasMoreComments={Boolean(selectedPost && commentNextCursorByPost[selectedPost.id])} joinCount={selectedPost ? routeParticipantCounts[selectedPost.id] : undefined} joined={Boolean(selectedPost && joinedRouteIds.has(selectedPost.id))} joining={Boolean(selectedPost && joiningRouteIds.has(selectedPost.id))} liked={Boolean(selectedPost && likedPostIds.has(selectedPost.id))} loadingMoreComments={Boolean(selectedPost && loadingCommentPostIds.has(selectedPost.id))} onAcceptAnswer={handleAcceptQuestionAnswer} onBookmark={(postId) => handleBookmark(postId, selectedPostRecommendationContext)} onCaptureKnowledge={(postId) => handleCapturePostAsKnowledge(postId, selectedPostRecommendationContext)} onClose={() => { postDetailRequestRef.current += 1; setSelectedPost(undefined); setSelectedPostAuthorId(undefined); setSelectedContent(undefined); setSelectedPostRecommendationContext(undefined); }} onComment={handleComment} onDeleteComment={handleDeleteComment} onFollow={handleFollow} onHide={(postId) => requestHide(postId, selectedPostRecommendationContext)} onJoin={(post) => handleJoinRoute(post, selectedPostRecommendationContext)} onLike={(postId) => handleLike(postId, selectedPostRecommendationContext)} onLoadMoreComments={handleLoadMoreComments} onOpenAuthor={openPostAuthorProfile} onReport={handleReport} post={selectedPost} visible={Boolean(selectedPost)} />
+      <PostDetailModal bookmarked={Boolean(selectedPost && bookmarkedPostIds.has(selectedPost.id))} canForkRoute={Boolean(selectedPost && selectedPostAuthorId && selectedPostAuthorId !== currentUserId)} capturedKnowledge={Boolean(selectedPost && knowledgeResources.some((resource) => resource.source_content_id === selectedPost.id))} comments={selectedPost ? commentsByPost[selectedPost.id] ?? [] : []} content={selectedContent} currentUserId={currentUserId} following={Boolean(selectedPostAuthorId && followingAuthorIds.has(selectedPostAuthorId))} hasMoreComments={Boolean(selectedPost && commentNextCursorByPost[selectedPost.id])} joinCount={selectedPost ? routeParticipantCounts[selectedPost.id] : undefined} joined={Boolean(selectedPost && joinedRouteIds.has(selectedPost.id))} joining={Boolean(selectedPost && joiningRouteIds.has(selectedPost.id))} liked={Boolean(selectedPost && likedPostIds.has(selectedPost.id))} loadingMoreComments={Boolean(selectedPost && loadingCommentPostIds.has(selectedPost.id))} onAcceptAnswer={handleAcceptQuestionAnswer} onBookmark={(postId) => handleBookmark(postId, selectedPostRecommendationContext)} onCaptureKnowledge={(postId) => handleCapturePostAsKnowledge(postId, selectedPostRecommendationContext)} onClose={closePostDetail} onComment={handleComment} onDeleteComment={handleDeleteComment} onFollow={handleFollow} onForkRoute={openForkRoute} onHide={(postId) => requestHide(postId, selectedPostRecommendationContext)} onJoin={(post) => handleJoinRoute(post, selectedPostRecommendationContext)} onLike={(postId) => handleLike(postId, selectedPostRecommendationContext)} onLoadMoreComments={handleLoadMoreComments} onOpenActionContext={openActionContext} onOpenAuthor={openPostAuthorProfile} onReport={handleReport} post={selectedPost} visible={Boolean(selectedPost)} />
+      <ForkRouteModal onClose={() => setForkSourcePost(undefined)} onSubmit={handleForkRoute} sourceTitle={forkSourcePost?.route_title || forkSourcePost?.title || ''} visible={Boolean(forkSourcePost)} />
+      <RouteDraftModal content={selectedRouteDraft} onClose={() => setSelectedRouteDraft(undefined)} onPublish={publishRouteDraft} onSave={saveRouteDraft} visible={Boolean(selectedRouteDraft)} />
       <HideFeedbackModal onClose={() => setHideFeedback(undefined)} onSelect={submitHideFeedback} visible={Boolean(hideFeedback)} />
-      <ProfileSectionModal entries={entries} journeys={journeys} onApplyReviewSuggestion={handleApplyReviewSuggestion} onClose={() => setProfileSection(undefined)} onRetryEntryPublication={handleRetryEntryPublication} retryingEntryIds={retryingEntryIds} review={weeklyReview} savedPosts={savedPosts} section={profileSection} visible={Boolean(profileSection)} />
+      <ProfileSectionModal entries={entries} journeys={journeys} onApplyReviewSuggestion={handleApplyReviewSuggestion} onClose={() => setProfileSection(undefined)} onOpenRouteDraft={openRouteDraft} onRetryEntryPublication={handleRetryEntryPublication} retryingEntryIds={retryingEntryIds} review={weeklyReview} savedPosts={savedPosts} section={profileSection} visible={Boolean(profileSection)} />
       <FeedbackModal onClose={() => setFeedbackVisible(false)} visible={feedbackVisible} />
       <ModerationCommentsModal onClose={() => setModerationVisible(false)} visible={moderationVisible} />
       <NotificationsModal failedNotificationId={failedNotificationId} loading={notificationsLoading} loadingMore={notificationsLoadingMore} nextCursor={notificationPage.next_cursor} notifications={notificationPage.items} onClose={() => { notificationOpenRequestRef.current += 1; setOpeningNotificationId(undefined); setNotificationsVisible(false); }} onLoadMore={() => void loadMoreNotifications()} onOpenNotification={openNotification} onRefresh={() => void refreshNotifications()} openingNotificationId={openingNotificationId} unreadCount={notificationPage.unread_count} visible={notificationsVisible} />
@@ -1231,8 +1433,8 @@ function upsertById<T extends { id: string }>(items: T[], item: T) {
 }
 
 function mergeFeedPages(current: Feed, incoming: Feed): Feed {
-  const knownIds = new Set(current.items.map((item) => item.post.id));
-  const items = [...current.items, ...incoming.items.filter((item) => !knownIds.has(item.post.id))];
+  const knownIds = new Set(current.items.map(feedItemKey));
+  const items = [...current.items, ...incoming.items.filter((item) => !knownIds.has(feedItemKey(item)))];
   return {
     ...incoming,
     items,
@@ -1384,10 +1586,16 @@ function knowledgeAccent(id: string) {
 function updateFeedLikeCount(current: Feed, postId: string, active: boolean): Feed {
   return {
     ...current,
-    items: current.items.map((item) => item.post.id === postId
-      ? { ...item, post: { ...item.post, like_count: Math.max(0, item.post.like_count + (active ? 1 : -1)) } }
-      : item),
+    items: current.items.map((item) => {
+      if (!item.post || item.post.id !== postId) return item;
+      return { ...item, post: { ...item.post, like_count: Math.max(0, item.post.like_count + (active ? 1 : -1)) } };
+    }),
   };
+}
+
+function feedItemKey(item: FeedItem): string {
+  if (item.ad) return `ad:${item.ad.request_id}:${item.ad.campaign_id}`;
+  return `post:${item.post?.id ?? item.source}`;
 }
 
 function chunk<T>(items: T[], size: number) {

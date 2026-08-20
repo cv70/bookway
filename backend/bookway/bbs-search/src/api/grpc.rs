@@ -43,9 +43,12 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
         .await;
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(pb::bbs_search_server::BbsSearchServer::new(GrpcServer {
-            domain: domain.clone(),
-        }))
+        .add_service(pb::bbs_search_server::BbsSearchServer::with_interceptor(
+            GrpcServer {
+                domain: domain.clone(),
+            },
+            bookway_runtime::grpc_service_auth_interceptor,
+        ))
         .serve(domain.config.listen_addr)
         .await
 }

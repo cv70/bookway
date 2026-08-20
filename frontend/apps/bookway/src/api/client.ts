@@ -24,6 +24,7 @@ import {
   CreateKnowledgeResourceInput,
   CreatePostInput,
   Feed,
+  FeedAd,
   GrowthEntry,
   Journey,
   JourneyDetail,
@@ -50,8 +51,14 @@ import {
   UserNotification,
   WeeklyReview,
   UpdateKnowledgeResourceInput,
+  UpdatePostInput,
   UpdateAccountProfileInput,
   NegativeFeedbackReason,
+  FeedActionContext,
+  MallOrder,
+  MallOrderItemInput,
+  NodeOfferList,
+  RouteNodeResourcePage,
 } from '../types';
 import { localScheduleContext } from '../utils/scheduling';
 import { analyticsSessionId } from '../analytics/session';
@@ -106,7 +113,9 @@ const actionIdempotencyKeys = new Map<string, string>();
 const entryIdempotencyKeys = new Map<string, string>();
 const commentIdempotencyKeys = new Map<string, string>();
 const feedbackIdempotencyKeys = new Map<string, string>();
+const mallOrderIdempotencyKeys = new Map<string, string>();
 const contentSubmissionStates = new Map<string, { idempotencyKey: string; postId?: string }>();
+const forkIdempotencyKeys = new Map<string, string>();
 
 type ViewerClaims = { sub?: unknown; roles?: unknown };
 
@@ -265,16 +274,95 @@ export function getJourneys(): Promise<Journey[]> {
   return request('/v1/journeys');
 }
 
-export function getFeed(interests = 'learning,movement,travel', cursor?: string, surface: 'home' | 'following' = 'home'): Promise<Feed> {
+export function getFeed(
+  interests = 'learning,movement,travel',
+  cursor?: string,
+  surface: 'home' | 'following' = 'home',
+  actionContext?: FeedActionContext,
+): Promise<Feed> {
   const query = new URLSearchParams({ interests, limit: '10', session_id: analyticsSessionId(), surface });
   if (cursor) query.set('cursor', cursor);
+  if (actionContext) {
+    if (actionContext.route_id.trim()) query.set('route_id', actionContext.route_id.trim());
+    if (actionContext.action_node_id.trim()) query.set('action_node_id', actionContext.action_node_id.trim());
+    if (actionContext.placement?.trim()) query.set('placement', actionContext.placement.trim());
+    if (actionContext.action_domain) query.set('action_domain', actionContext.action_domain);
+    if (actionContext.scene_equipment?.trim()) query.set('scene_equipment', actionContext.scene_equipment.trim());
+  }
   return request(
     `/v1/feed?${query.toString()}`,
   );
 }
 
+export function getRouteNodeOffers(routeId: string, actionNodeId: string): Promise<NodeOfferList> {
+  const query = new URLSearchParams({ limit: '20' });
+  return request(`/v1/routes/${encodeURIComponent(routeId)}/nodes/${encodeURIComponent(actionNodeId)}/offers?${query.toString()}`);
+}
+
+export function getRouteNodeResources(routeId: string, actionNodeId: string): Promise<RouteNodeResourcePage> {
+  return request(`/v1/routes/${encodeURIComponent(routeId)}/nodes/${encodeURIComponent(actionNodeId)}/resources`);
+}
+
+export function createMallOrder(nodeOfferId: string, items: MallOrderItemInput[]): Promise<MallOrder> {
+  const normalizedItems = items
+    .map((item) => ({ sku_id: item.sku_id.trim(), quantity: Math.max(1, Math.floor(item.quantity)) }))
+    .filter((item) => item.sku_id);
+  const fingerprint = JSON.stringify([nodeOfferId.trim(), normalizedItems]);
+  const idempotencyKey = mallOrderIdempotencyKeys.get(fingerprint)
+    ?? `mall-order-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  mallOrderIdempotencyKeys.set(fingerprint, idempotencyKey);
+  return request<MallOrder>('/v1/orders', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify({ node_offer_id: nodeOfferId.trim(), items: normalizedItems }),
+  }).then((order) => {
+    mallOrderIdempotencyKeys.delete(fingerprint);
+    return order;
+  });
+}
+
+export function reportAdEvent(ad: FeedAd, eventType: 'impression' | 'click'): Promise<{ event_id: string; accepted: boolean; duplicate: boolean }> {
+  const eventId = `${ad.request_id}:${ad.campaign_id}:${eventType}`;
+  return request('/v1/ads/events', {
+    method: 'POST',
+    body: JSON.stringify({
+      event_id: eventId,
+      request_id: ad.request_id,
+      campaign_id: ad.campaign_id,
+      event_type: eventType === 'impression' ? 0 : 1,
+    }),
+  });
+}
+
 export function getPost(postId: string): Promise<ContentDetail> {
   return request(`/v1/posts/${encodeURIComponent(postId)}`);
+}
+
+export function forkRoute(sourceRouteId: string, title?: string, summary?: string): Promise<ContentDetail> {
+  const normalized = {
+    sourceRouteId: sourceRouteId.trim(),
+    title: title?.trim() || undefined,
+    summary: summary?.trim() || undefined,
+  };
+  const fingerprint = JSON.stringify(normalized);
+  const idempotencyKey = forkIdempotencyKeys.get(fingerprint)
+    ?? `route-fork-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  forkIdempotencyKeys.set(fingerprint, idempotencyKey);
+  return request<ContentDetail>(`/v1/posts/${encodeURIComponent(normalized.sourceRouteId)}/fork`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify({ title: normalized.title, summary: normalized.summary }),
+  }).then((content) => {
+    forkIdempotencyKeys.delete(fingerprint);
+    return content;
+  });
+}
+
+export function updatePost(postId: string, input: UpdatePostInput): Promise<ContentDetail> {
+  return request(`/v1/posts/${encodeURIComponent(postId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
 }
 
 export function getAuthorPosts(authorId: string, cursor?: string): Promise<PublicContentPage> {

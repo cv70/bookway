@@ -96,10 +96,8 @@ fn mix_contextual_ad(
             && ad.placement == context.placement
             && ad.scene_equipment == context.scene_equipment.clone().unwrap_or_default()
     }) else {
-        if degraded {
-            if let Some(meta) = &mut response.meta {
-                meta.degraded = true;
-            }
+        if degraded && let Some(meta) = &mut response.meta {
+            meta.degraded = true;
         }
         return;
     };
@@ -132,10 +130,8 @@ fn mix_contextual_ad(
         },
     );
     response.items.truncate(limit);
-    if degraded {
-        if let Some(meta) = &mut response.meta {
-            meta.degraded = true;
-        }
+    if degraded && let Some(meta) = &mut response.meta {
+        meta.degraded = true;
     }
 }
 
