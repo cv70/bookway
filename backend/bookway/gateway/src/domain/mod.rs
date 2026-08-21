@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     conf::Config,
-    datasource::{CommunityNotificationJob, CommunityNotificationJobRepository, UpstreamError},
+    datasource::{CommunityNotificationJob, CommunityNotificationJobDao, UpstreamError},
 };
 use bookway_account_api::pb as account_pb;
 use bookway_ad_center_api::pb as ad_center_pb;
@@ -58,7 +58,7 @@ pub(crate) struct Domain {
 
 #[derive(Clone)]
 enum CommunityNotificationSink {
-    Postgres(CommunityNotificationJobRepository),
+    Postgres(CommunityNotificationJobDao),
     Direct,
 }
 
@@ -109,7 +109,7 @@ impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, DomainInitError> {
         let community_notifications = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Postgres => CommunityNotificationSink::Postgres(
-                CommunityNotificationJobRepository::new(bookway_data::postgres_pool().await?),
+                CommunityNotificationJobDao::new(bookway_data::postgres_pool().await?),
             ),
             // Keep the local memory-mode workflow usable. Production deploys
             // PostgreSQL and therefore always uses the durable queue below.
@@ -665,6 +665,19 @@ impl Domain {
             knowledge_catalog,
             "knowledge-catalog",
             detach_node_resource,
+            request
+        )
+    }
+
+    pub(crate) async fn retrieve_route_node_rag_context(
+        &self,
+        request: catalog_pb::RetrieveRagContextRequest,
+    ) -> Result<catalog_pb::RetrieveRagContextResponse, UpstreamError> {
+        grpc_call!(
+            self,
+            knowledge_catalog,
+            "knowledge-catalog",
+            retrieve_rag_context,
             request
         )
     }
@@ -1631,7 +1644,7 @@ impl Domain {
         request: growth_pb::CreateNotificationRequest,
     ) {
         match &self.community_notifications {
-            CommunityNotificationSink::Postgres(repository) => {
+            CommunityNotificationSink::Postgres(Dao) => {
                 let job = match community_notification_job(recipient_user_id, request) {
                     Ok(job) => job,
                     Err(error) => {
@@ -1639,7 +1652,7 @@ impl Domain {
                         return;
                     }
                 };
-                if let Err(error) = repository.enqueue(job).await {
+                if let Err(error) = Dao.enqueue(job).await {
                     // The interaction is already owned and committed by another
                     // service, so do not turn a successful user action into an
                     // ambiguous failure. Operations must alert on this signal.

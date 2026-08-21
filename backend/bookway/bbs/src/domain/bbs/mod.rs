@@ -9,7 +9,7 @@ impl Domain {
     ) -> Result<pb::SocialContext, BbsError> {
         validate_user_id(&request.user_id)?;
         let user_id = request.user_id;
-        Ok(self.repository.context(&user_id).await?)
+        Ok(self.dao.context(&user_id).await?)
     }
 
     pub(crate) async fn visibility_context(
@@ -17,7 +17,7 @@ impl Domain {
         request: pb::ContextRequest,
     ) -> Result<pb::SocialVisibility, BbsError> {
         validate_user_id(&request.user_id)?;
-        Ok(self.repository.visibility_context(&request.user_id).await?)
+        Ok(self.dao.visibility_context(&request.user_id).await?)
     }
 
     pub(crate) async fn set_edge(
@@ -30,7 +30,7 @@ impl Domain {
             return Err(BbsError::Validation("不能对自己建立社交关系".to_string()));
         }
         Ok(self
-            .repository
+            .dao
             .set_edge(
                 &request.user_id,
                 &request.target_user_id,
@@ -47,7 +47,7 @@ impl Domain {
     ) -> Result<Vec<pb::RouteParticipation>, BbsError> {
         validate_user_id(&request.user_id)?;
         Ok(self
-            .repository
+            .dao
             .list_route_participations(&request.user_id)
             .await?)
     }
@@ -71,7 +71,7 @@ impl Domain {
         route_ids.sort();
         route_ids.dedup();
         Ok(self
-            .repository
+            .dao
             .route_context(&request.user_id, &route_ids)
             .await?)
     }
@@ -92,7 +92,7 @@ impl Domain {
             return Err(BbsError::Validation("参与意图版本超出范围".to_string()));
         }
         Ok(self
-            .repository
+            .dao
             .set_route_participation(
                 &request.user_id,
                 &request.route_id,
@@ -125,15 +125,15 @@ mod tests {
     use tokio::task::JoinSet;
 
     use super::*;
-    use crate::{conf::Config, datasource::MemoryBbsRepository};
+    use crate::{conf::Config, datasource::MemoryBbsDao};
 
     fn domain() -> Domain {
-        Domain::from_repository(
+        Domain::from_dao(
             Config {
                 listen_addr: "127.0.0.1:0".parse().expect("valid HTTP address"),
                 grpc_addr: "127.0.0.1:0".parse().expect("valid gRPC address"),
             },
-            Arc::new(MemoryBbsRepository::seeded()),
+            Arc::new(MemoryBbsDao::seeded()),
         )
     }
 

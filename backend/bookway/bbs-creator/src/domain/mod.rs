@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::{
     conf::Config,
     datasource::{
-        CreatorRepository, MemoryCreatorRepository, PostgresCreatorRepository, RepositoryError,
+        CreatorDao, MemoryCreatorDao, PostgresCreatorDao, DaoError,
     },
 };
 
@@ -16,28 +16,28 @@ pub(crate) enum CreatorError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Repository(#[from] RepositoryError),
+    Dao(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) repository: Arc<dyn CreatorRepository>,
+    pub(crate) Dao: Arc<dyn CreatorDao>,
 }
 
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, bookway_data::DataError> {
-        let repository: Arc<dyn CreatorRepository> = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryCreatorRepository::default()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresCreatorRepository::new(
+        let Dao: Arc<dyn CreatorDao> = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryCreatorDao::default()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresCreatorDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
-        Ok(Self { config, repository })
+        Ok(Self { config, Dao })
     }
 
     #[cfg(test)]
-    pub(crate) fn from_repository(config: Config, repository: Arc<dyn CreatorRepository>) -> Self {
-        Self { config, repository }
+    pub(crate) fn from_dao(config: Config, Dao: Arc<dyn CreatorDao>) -> Self {
+        Self { config, Dao }
     }
 }

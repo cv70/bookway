@@ -5,8 +5,8 @@ use thiserror::Error;
 use crate::{
     conf::Config,
     datasource::{
-        BbsRepository, CachedBbsRepository, MemoryBbsRepository, PostgresBbsRepository,
-        RepositoryError,
+        BbsDao, CachedBbsDao, MemoryBbsDao, PostgresBbsDao,
+        DaoError,
     },
 };
 
@@ -15,20 +15,20 @@ pub(crate) enum BbsError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Repository(#[from] RepositoryError),
+    Dao(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) repository: Arc<dyn BbsRepository>,
+    pub(crate) dao: Arc<dyn BbsDao>,
 }
 
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, bookway_data::DataError> {
-        let repository: Arc<dyn BbsRepository> = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryBbsRepository::seeded()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresBbsRepository::new(
+        let dao: Arc<dyn BbsDao> = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryBbsDao::seeded()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresBbsDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
@@ -41,12 +41,12 @@ impl Domain {
         };
         Ok(Self {
             config,
-            repository: Arc::new(CachedBbsRepository::new(repository, redis)),
+            dao: Arc::new(CachedBbsDao::new(dao, redis)),
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn from_repository(config: Config, repository: Arc<dyn BbsRepository>) -> Self {
-        Self { config, repository }
+    pub(crate) fn from_dao(config: Config, dao: Arc<dyn BbsDao>) -> Self {
+        Self { config, dao }
     }
 }

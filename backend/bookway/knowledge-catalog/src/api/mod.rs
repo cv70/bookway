@@ -82,6 +82,30 @@ impl KnowledgeCatalog for GrpcServer {
                 .map_err(status)?,
         ))
     }
+
+    async fn upsert_rag_embedding(
+        &self,
+        request: Request<pb::UpsertRagEmbeddingRequest>,
+    ) -> Result<Response<pb::UpsertRagEmbeddingResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .upsert_rag_embedding(request.into_inner())
+                .await
+                .map_err(status)?,
+        ))
+    }
+
+    async fn search_rag_embeddings(
+        &self,
+        request: Request<pb::SearchRagEmbeddingsRequest>,
+    ) -> Result<Response<pb::SearchRagEmbeddingsResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .search_rag_embeddings(request.into_inner())
+                .await
+                .map_err(status)?,
+        ))
+    }
 }
 
 pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
@@ -104,13 +128,13 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
 fn status(error: DomainError) -> Status {
     match error {
         DomainError::Validation(message) => Status::invalid_argument(message),
-        DomainError::Repository(crate::datasource::RepositoryError::NotFound(message)) => {
+        DomainError::Dao(crate::datasource::DaoError::NotFound(message)) => {
             Status::not_found(message)
         }
-        DomainError::Repository(crate::datasource::RepositoryError::Conflict(message)) => {
+        DomainError::Dao(crate::datasource::DaoError::Conflict(message)) => {
             Status::already_exists(message)
         }
-        DomainError::Repository(error) => Status::internal(error.to_string()),
+        DomainError::Dao(error) => Status::internal(error.to_string()),
         DomainError::Upstream(message) => Status::internal(message),
     }
 }

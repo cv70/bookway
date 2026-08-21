@@ -37,6 +37,7 @@ struct CandidateRankingSignals {
     p_ctr: f64,
     p_cvr: f64,
     p_wegu: f64,
+    route_completion_rate: f64,
 }
 
 impl CandidateRankingSignals {
@@ -77,6 +78,9 @@ impl CandidateRankingSignals {
             p_wegu: candidate
                 .map(|candidate| predicted(candidate.p_wegu, candidate.action_completion_rate))
                 .unwrap_or(0.0001),
+            route_completion_rate: candidate
+                .map(|candidate| finite(candidate.route_completion_rate).clamp(0.0, 1.0))
+                .unwrap_or(0.0),
         }
     }
 }
@@ -108,11 +112,13 @@ pub(crate) fn rank(
             + 0.22 * candidate_signals.author_affinity
             - 0.32 * candidate_signals.impression_fatigue
             - 0.80 * candidate_signals.direct_negative_feedback;
-        // Explicit multi-objective predictions dominate vanity signals:
-        // WEGU (action completion) carries the largest online objective weight.
+        // Explicit multi-objective predictions dominate vanity signals. WEGU
+        // captures immediate action conversion; route completion is a
+        // separate population prior for the whole executable path.
         candidate.score += 0.18 * candidate_signals.p_ctr
             + 0.20 * candidate_signals.p_cvr
-            + 0.42 * candidate_signals.p_wegu
+            + 0.30 * candidate_signals.p_wegu
+            + 0.20 * candidate_signals.route_completion_rate
             + 0.08 * candidate_signals.save_rate;
         candidate.p_ctr = candidate_signals.p_ctr;
         candidate.p_cvr = candidate_signals.p_cvr;
@@ -263,5 +269,35 @@ mod tests {
         );
 
         assert_eq!(ranked[0].content_id, "action-proven");
+    }
+
+    #[test]
+    fn route_completion_signal_outweighs_a_click_only_candidate() {
+        let candidate = |content_id: &str| Candidate {
+            content_id: content_id.to_string(),
+            score: 1.0,
+            ..Default::default()
+        };
+        let ranked = rank(
+            vec![candidate("click-only"), candidate("route-proven")],
+            Some(&pb::RankFeatures {
+                candidates: vec![
+                    pb::CandidateFeatures {
+                        content_id: "click-only".to_string(),
+                        click_through_rate: 1.0,
+                        ..Default::default()
+                    },
+                    pb::CandidateFeatures {
+                        content_id: "route-proven".to_string(),
+                        route_completion_rate: 1.0,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            3,
+        );
+
+        assert_eq!(ranked[0].content_id, "route-proven");
     }
 }

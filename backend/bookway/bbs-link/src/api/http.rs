@@ -134,19 +134,19 @@ impl IntoResponse for HttpError {
         let (status, code) = match &self.0 {
             ContentError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
             ContentError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
-            ContentError::Repository(crate::datasource::RepositoryError::NotFound(_)) => {
+            ContentError::Dao(crate::datasource::DaoError::NotFound(_)) => {
                 (StatusCode::NOT_FOUND, "content_not_found")
             }
-            ContentError::Repository(crate::datasource::RepositoryError::IdempotencyConflict(
+            ContentError::Dao(crate::datasource::DaoError::IdempotencyConflict(
                 _,
             )) => (StatusCode::CONFLICT, "idempotency_conflict"),
-            ContentError::Repository(
-                crate::datasource::RepositoryError::Database(_)
-                | crate::datasource::RepositoryError::Serialization(_)
-                | crate::datasource::RepositoryError::InvalidTimestamp(_)
-                | crate::datasource::RepositoryError::InvalidContent(_),
+            ContentError::Dao(
+                crate::datasource::DaoError::Database(_)
+                | crate::datasource::DaoError::Serialization(_)
+                | crate::datasource::DaoError::InvalidTimestamp(_)
+                | crate::datasource::DaoError::InvalidContent(_),
             ) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
-            ContentError::Repository(crate::datasource::RepositoryError::VersionConflict) => {
+            ContentError::Dao(crate::datasource::DaoError::VersionConflict) => {
                 (StatusCode::CONFLICT, "version_conflict")
             }
             ContentError::Audit(_) => (StatusCode::BAD_GATEWAY, "audit_unavailable"),

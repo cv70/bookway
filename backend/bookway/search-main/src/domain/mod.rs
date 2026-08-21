@@ -18,11 +18,11 @@ use crate::{
     api::pb as api_pb,
     conf::Config,
     datasource::{
-        MemoryQueryRewriteRepository, MemorySearchExposureStore, MemorySearchSessionStore,
-        PostgresQueryRewriteRepository, PostgresSearchExposureStore, PostgresSearchSessionStore,
+        MemoryQueryRewriteDao, MemorySearchExposureStore, MemorySearchSessionStore,
+        PostgresQueryRewriteDao, PostgresSearchExposureStore, PostgresSearchSessionStore,
         QueryRewriteDictionary, RecallSource, RecallState, SearchAttribution, SearchExposure,
         SearchExposureError, SearchExposureItem, SearchPipelineSession, SearchSessionError,
-        SearchSessionStore, SharedQueryRewriteRepository, SharedSearchExposureStore,
+        SearchSessionStore, SharedQueryRewriteDao, SharedSearchExposureStore,
         builtin_query_rewrite_dictionary,
     },
 };
@@ -77,7 +77,7 @@ struct QueryRewriteCacheState {
 }
 
 struct QueryRewriteCache {
-    repository: SharedQueryRewriteRepository,
+    dao: SharedQueryRewriteDao,
     state: RwLock<Option<QueryRewriteCacheState>>,
     // Only one request refreshes the dictionary after expiry; concurrent
     // readers reuse the refreshed state instead of stampeding the database.
@@ -85,9 +85,9 @@ struct QueryRewriteCache {
 }
 
 impl QueryRewriteCache {
-    fn new(repository: SharedQueryRewriteRepository) -> Self {
+    fn new(dao: SharedQueryRewriteDao) -> Self {
         Self {
-            repository,
+            dao,
             state: RwLock::new(None),
             refresh_lock: Mutex::new(()),
         }
@@ -121,7 +121,7 @@ impl QueryRewriteCache {
                 };
             }
         }
-        match self.repository.active().await {
+        match self.dao.active().await {
             Ok(Some(dictionary)) => match sanitize_dictionary(dictionary) {
                 Some(dictionary) => {
                     self.state.write().await.replace(QueryRewriteCacheState {
@@ -224,9 +224,9 @@ impl Domain {
             Some(pool) => Arc::new(PostgresSearchExposureStore::new(pool.clone())),
             None => Arc::new(MemorySearchExposureStore::default()),
         };
-        let query_rewrites: SharedQueryRewriteRepository = match pool {
-            Some(pool) => Arc::new(PostgresQueryRewriteRepository::new(pool)),
-            None => Arc::new(MemoryQueryRewriteRepository),
+        let query_rewrites: SharedQueryRewriteDao = match pool {
+            Some(pool) => Arc::new(PostgresQueryRewriteDao::new(pool)),
+            None => Arc::new(MemoryQueryRewriteDao),
         };
         Ok(Self {
             config,
@@ -263,7 +263,7 @@ impl Domain {
             sessions,
             exposures,
             query_rewrites: Arc::new(QueryRewriteCache::new(Arc::new(
-                MemoryQueryRewriteRepository,
+                MemoryQueryRewriteDao,
             ))),
         }
     }
@@ -1170,10 +1170,12 @@ fn rerank_results(
             let p_ctr = finite_probability(candidate.click_through_rate);
             let p_cvr = finite_probability(candidate.purchase_conversion_rate);
             let p_wegu = finite_probability(candidate.action_completion_rate);
+            let route_completion = finite_probability(candidate.route_completion_rate);
             // Search remains lexical-first, but verified action completion is
             // the largest behavioral contribution. This favors routes users
             // can finish over results that only attract clicks.
-            item.score += 3.0 * (0.15 * p_ctr + 0.25 * p_cvr + 0.60 * p_wegu);
+            item.score +=
+                3.0 * (0.10 * p_ctr + 0.20 * p_cvr + 0.45 * p_wegu + 0.25 * route_completion);
         }
     }
     sort_results(items);
@@ -1493,6 +1495,20 @@ mod tests {
         ) -> Result<Response<catalog_pb::RetrieveRagContextResponse>, Status> {
             Err(Status::unimplemented("not used by Search Main"))
         }
+
+        async fn upsert_rag_embedding(
+            &self,
+            _request: Request<catalog_pb::UpsertRagEmbeddingRequest>,
+        ) -> Result<Response<catalog_pb::UpsertRagEmbeddingResponse>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
+
+        async fn search_rag_embeddings(
+            &self,
+            _request: Request<catalog_pb::SearchRagEmbeddingsRequest>,
+        ) -> Result<Response<catalog_pb::SearchRagEmbeddingsResponse>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
     }
 
     #[tonic::async_trait]
@@ -1709,6 +1725,34 @@ mod tests {
         rerank_results(&mut items, "行动", SearchIntent::Generic, &features);
 
         assert_eq!(items[0].id, "action-proven");
+    }
+
+    #[test]
+    fn route_completion_outweighs_click_signal_in_search_rerank() {
+        let mut items = vec![
+            item("click-only", "行动路线", 1.0),
+            item("route-proven", "行动路线", 1.0),
+        ];
+        let features = HashMap::from([
+            (
+                "click-only".to_string(),
+                feature_pb::CandidateFeatures {
+                    click_through_rate: 1.0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "route-proven".to_string(),
+                feature_pb::CandidateFeatures {
+                    route_completion_rate: 1.0,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        rerank_results(&mut items, "行动", SearchIntent::Generic, &features);
+
+        assert_eq!(items[0].id, "route-proven");
     }
 
     fn response(items: Vec<pb::SearchResult>, next_cursor: Option<&str>) -> pb::SearchResponse {
@@ -2047,10 +2091,10 @@ mod tests {
         assert!(sanitize_dictionary(empty).is_none());
     }
 
-    struct FailingQueryRewriteRepository;
+    struct FailingQueryRewriteDao;
 
     #[async_trait::async_trait]
-    impl crate::datasource::QueryRewriteRepository for FailingQueryRewriteRepository {
+    impl crate::datasource::QueryRewriteDao for FailingQueryRewriteDao {
         async fn active(
             &self,
         ) -> Result<Option<QueryRewriteDictionary>, crate::datasource::QueryRewriteError> {
@@ -2062,7 +2106,7 @@ mod tests {
 
     #[tokio::test]
     async fn rewrite_cache_falls_back_to_a_known_dictionary_when_configuration_fails() {
-        let cache = QueryRewriteCache::new(Arc::new(FailingQueryRewriteRepository));
+        let cache = QueryRewriteCache::new(Arc::new(FailingQueryRewriteDao));
 
         let resolution = cache.active().await;
 

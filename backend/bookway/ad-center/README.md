@@ -16,6 +16,11 @@ time under the campaign row lock: `frequency_cap` limits a user/campaign/day and
 `global_frequency_cap` limits a campaign/day across all users. A rejected
 receipt never consumes campaign budget.
 
+Click receipts are accepted only after the same user has an accepted impression
+for the same request and campaign. A click that arrives first is rejected and
+does not consume CPC budget; retries remain idempotent after the impression is
+recorded.
+
 Its internal control plane supports create, update and campaign lookup. The
 lookup response includes current-day spend, impressions and clicks, so an
 operator can observe a campaign after it is activated without querying serving

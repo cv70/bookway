@@ -2,8 +2,8 @@ use crate::api::pb;
 use crate::{
     Config,
     datasource::{
-        InventoryRepository, MemoryInventoryRepository, PostgresInventoryRepository,
-        RedisInventoryRepository, RepositoryError,
+        InventoryDao, MemoryInventoryDao, PostgresInventoryDao,
+        RedisInventoryDao, DaoError,
     },
 };
 use std::sync::Arc;
@@ -19,22 +19,22 @@ pub(crate) enum InventoryError {
     #[error("reservation conflict: {0}")]
     Conflict(String),
     #[error("inventory operation failed: {0}")]
-    Repository(String),
+    Dao(String),
 }
 #[derive(Clone)]
 pub struct Domain {
     config: Config,
-    repository: Arc<dyn InventoryRepository>,
+    Dao: Arc<dyn InventoryDao>,
 }
 impl Domain {
     pub async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let repository: Arc<dyn InventoryRepository> = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryInventoryRepository::default()),
+        let Dao: Arc<dyn InventoryDao> = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryInventoryDao::default()),
             bookway_data::StorageMode::Postgres => {
                 let postgres =
-                    PostgresInventoryRepository::new(bookway_data::postgres_pool().await?);
+                    PostgresInventoryDao::new(bookway_data::postgres_pool().await?);
                 match bookway_data::redis_connection().await {
-                    Ok(Some(redis)) => Arc::new(RedisInventoryRepository::new(postgres, redis)),
+                    Ok(Some(redis)) => Arc::new(RedisInventoryDao::new(postgres, redis)),
                     Ok(None) => Arc::new(postgres),
                     Err(error) => {
                         tracing::warn!(%error, "redis unavailable at startup; inventory uses PostgreSQL reservations");
@@ -43,7 +43,7 @@ impl Domain {
                 }
             }
         };
-        Ok(Self { config, repository })
+        Ok(Self { config, Dao })
     }
     pub(crate) fn config(&self) -> &Config {
         &self.config
@@ -57,7 +57,7 @@ impl Domain {
                 "sku_id and a non-negative available count are required".to_string(),
             ));
         }
-        self.repository.set_stock(request).await.map_err(repo_error)
+        self.Dao.set_stock(request).await.map_err(repo_error)
     }
     pub(crate) async fn stock(
         &self,
@@ -66,7 +66,7 @@ impl Domain {
         if request.id.trim().is_empty() {
             return Err(InventoryError::Validation("sku id is required".to_string()));
         }
-        self.repository.stock(&request.id).await.map_err(repo_error)
+        self.Dao.stock(&request.id).await.map_err(repo_error)
     }
     pub(crate) async fn reserve(
         &self,
@@ -102,13 +102,13 @@ impl Domain {
                 .unwrap_or(self.config.reservation_ttl_seconds)
                 .clamp(60, 3_600),
         );
-        self.repository.reserve(request).await.map_err(repo_error)
+        self.Dao.reserve(request).await.map_err(repo_error)
     }
     pub(crate) async fn confirm(
         &self,
         request: pb::IdRequest,
     ) -> Result<pb::Reservation, InventoryError> {
-        self.repository
+        self.Dao
             .confirm(&request.id)
             .await
             .map_err(repo_error)
@@ -117,7 +117,7 @@ impl Domain {
         &self,
         request: pb::IdRequest,
     ) -> Result<pb::Reservation, InventoryError> {
-        self.repository
+        self.Dao
             .release(&request.id)
             .await
             .map_err(repo_error)
@@ -128,18 +128,18 @@ impl Domain {
     ) -> Result<pb::ExpireReservationsResponse, InventoryError> {
         Ok(pb::ExpireReservationsResponse {
             expired: self
-                .repository
+                .Dao
                 .expire(usize::try_from(request.limit.clamp(1, 1_000)).unwrap_or(1_000))
                 .await
                 .map_err(repo_error)?,
         })
     }
 }
-fn repo_error(error: RepositoryError) -> InventoryError {
+fn repo_error(error: DaoError) -> InventoryError {
     match error {
-        RepositoryError::NotFound(value) => InventoryError::NotFound(value),
-        RepositoryError::Insufficient(value) => InventoryError::Insufficient(value),
-        RepositoryError::Conflict(value) => InventoryError::Conflict(value),
-        RepositoryError::Failed(value) => InventoryError::Repository(value),
+        DaoError::NotFound(value) => InventoryError::NotFound(value),
+        DaoError::Insufficient(value) => InventoryError::Insufficient(value),
+        DaoError::Conflict(value) => InventoryError::Conflict(value),
+        DaoError::Failed(value) => InventoryError::Dao(value),
     }
 }

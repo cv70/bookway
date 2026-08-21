@@ -5,8 +5,8 @@ use thiserror::Error;
 use crate::{
     conf::Config,
     datasource::{
-        CachedInteractionStatusRepository, InteractionStatusRepository,
-        MemoryInteractionStatusRepository, PostgresInteractionStatusRepository, RepositoryError,
+        CachedInteractionStatusDao, InteractionStatusDao,
+        MemoryInteractionStatusDao, PostgresInteractionStatusDao, DaoError,
     },
 };
 
@@ -15,23 +15,23 @@ pub(crate) enum InteractionStatusError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Repository(#[from] RepositoryError),
+    Dao(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) repository: Arc<dyn InteractionStatusRepository>,
+    pub(crate) Dao: Arc<dyn InteractionStatusDao>,
 }
 
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, bookway_data::DataError> {
-        let repository: Arc<dyn InteractionStatusRepository> = match bookway_data::storage_mode()? {
+        let Dao: Arc<dyn InteractionStatusDao> = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => {
-                Arc::new(MemoryInteractionStatusRepository::seeded())
+                Arc::new(MemoryInteractionStatusDao::seeded())
             }
             bookway_data::StorageMode::Postgres => Arc::new(
-                PostgresInteractionStatusRepository::new(bookway_data::postgres_pool().await?),
+                PostgresInteractionStatusDao::new(bookway_data::postgres_pool().await?),
             ),
         };
         let redis = match bookway_data::redis_connection().await {
@@ -43,15 +43,15 @@ impl Domain {
         };
         Ok(Self {
             config,
-            repository: Arc::new(CachedInteractionStatusRepository::new(repository, redis)),
+            Dao: Arc::new(CachedInteractionStatusDao::new(Dao, redis)),
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn from_repository(
+    pub(crate) fn from_dao(
         config: Config,
-        repository: Arc<dyn InteractionStatusRepository>,
+        Dao: Arc<dyn InteractionStatusDao>,
     ) -> Self {
-        Self { config, repository }
+        Self { config, Dao }
     }
 }

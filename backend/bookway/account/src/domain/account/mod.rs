@@ -11,7 +11,7 @@ impl Domain {
     /// the reference user-profile service's get-or-create behaviour.
     pub(crate) async fn profile(&self, user_id: &str) -> Result<pb::AccountProfile, AccountError> {
         let user_id = validate_user_id(user_id)?;
-        self.repository
+        self.Dao
             .get_or_create(&user_id)
             .await
             .map_err(Into::into)
@@ -28,7 +28,7 @@ impl Domain {
                 "至少提供一项要更新的资料".to_string(),
             ));
         }
-        self.repository
+        self.Dao
             .update(&user_id, request)
             .await
             .map_err(Into::into)
@@ -102,14 +102,14 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{conf::Config, datasource::MemoryAccountRepository, domain::Domain};
+    use crate::{conf::Config, datasource::MemoryAccountDao, domain::Domain};
 
     fn domain() -> Domain {
-        Domain::from_repository(
+        Domain::from_dao(
             Config {
                 listen_addr: "127.0.0.1:0".parse().expect("valid address"),
             },
-            Arc::new(MemoryAccountRepository::default()),
+            Arc::new(MemoryAccountDao::default()),
         )
     }
 

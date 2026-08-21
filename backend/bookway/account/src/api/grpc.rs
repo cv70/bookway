@@ -2,7 +2,7 @@
 
 use super::pb::{self, account_server::Account};
 use crate::{
-    datasource::RepositoryError,
+    datasource::DaoError,
     domain::{AccountError, Domain},
 };
 use tonic::{Request, Response, Status};
@@ -61,7 +61,7 @@ fn account_error(error: AccountError) -> Status {
     let message = error.to_string();
     match error {
         AccountError::Validation(_) => Status::invalid_argument(message),
-        AccountError::Repository(RepositoryError::NotFound(_)) => Status::not_found(message),
-        AccountError::Repository(RepositoryError::Database(_)) => Status::internal(message),
+        AccountError::Dao(DaoError::NotFound(_)) => Status::not_found(message),
+        AccountError::Dao(DaoError::Database(_)) => Status::internal(message),
     }
 }

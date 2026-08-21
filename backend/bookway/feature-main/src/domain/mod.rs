@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::conf::Config;
 use crate::{
     api::pb,
-    datasource::{FeatureCache, FeatureRepository},
+    datasource::{FeatureCache, FeatureDao},
 };
 
 #[cfg(test)]
@@ -12,7 +12,7 @@ use crate::datasource::CandidateFeatures;
 #[derive(Clone)]
 pub struct Domain {
     pub(crate) config: Config,
-    repository: Arc<FeatureRepository>,
+    Dao: Arc<FeatureDao>,
     cache: Arc<FeatureCache>,
     model_version: String,
 }
@@ -32,7 +32,7 @@ impl Domain {
         let model_version = config.model_version.clone();
         Ok(Self {
             config,
-            repository: Arc::new(FeatureRepository::new(pool, model_version.clone())),
+            Dao: Arc::new(FeatureDao::new(pool, model_version.clone())),
             cache: Arc::new(FeatureCache::new(redis)),
             model_version,
         })
@@ -60,7 +60,7 @@ impl Domain {
                         miss_guard.release().await;
                         return HashMap::new();
                     }
-                    let features = self.repository.load(&request.user_id).await;
+                    let features = self.Dao.load(&request.user_id).await;
                     self.cache.store(&request.user_id, &features).await;
                     miss_guard.release().await;
                     features
@@ -68,7 +68,7 @@ impl Domain {
             }
         };
         let candidate_features = self
-            .repository
+            .Dao
             .load_candidates(&request.user_id, &request.content_ids);
         let (persisted, candidate_features) = tokio::join!(user_features, candidate_features);
         values.extend(persisted);
@@ -99,6 +99,7 @@ impl Domain {
                     save_rate: features.save_rate,
                     action_completion_rate: features.action_completion_rate,
                     purchase_conversion_rate: features.purchase_conversion_rate,
+                    route_completion_rate: features.route_completion_rate,
                 })
                 .collect(),
         }
@@ -153,6 +154,7 @@ mod tests {
                     save_rate: features.save_rate,
                     action_completion_rate: features.action_completion_rate,
                     purchase_conversion_rate: features.purchase_conversion_rate,
+                    route_completion_rate: features.route_completion_rate,
                 })
                 .collect(),
             ..Default::default()

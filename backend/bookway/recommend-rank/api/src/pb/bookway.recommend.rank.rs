@@ -27,6 +27,8 @@ pub struct CandidateFeatures {
     pub p_cvr: f64,
     #[prost(double, tag = "12")]
     pub p_wegu: f64,
+    #[prost(double, tag = "13")]
+    pub route_completion_rate: f64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

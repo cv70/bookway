@@ -12,8 +12,8 @@ use tonic::transport::Channel;
 use uuid::Uuid;
 
 use super::datasource::{
-    AcceptedEvent, MemoryEventRepository, PostgresEventRepository, RepositoryError,
-    SharedEventRepository,
+    AcceptedEvent, MemoryEventDao, PostgresEventDao, DaoError,
+    SharedEventDao,
 };
 use crate::{api::pb, conf::Config};
 
@@ -32,7 +32,7 @@ pub(crate) enum IngestError {
     #[error("trusted user identity is required")]
     MissingUser,
     #[error(transparent)]
-    Repository(#[from] RepositoryError),
+    Dao(#[from] DaoError),
 }
 
 #[async_trait]
@@ -66,7 +66,7 @@ impl FeatureCacheInvalidator for RedisFeatureCacheInvalidator {
 
 #[derive(Clone)]
 pub(crate) struct UserEventService {
-    repository: SharedEventRepository,
+    Dao: SharedEventDao,
     feature_cache: Option<SharedFeatureCacheInvalidator>,
     recommend_main: Option<RecommendMainClient<Channel>>,
     search_main: Option<SearchMainClient<Channel>>,
@@ -84,9 +84,9 @@ impl Domain {
         recommend_main: RecommendMainClient<Channel>,
         search_main: SearchMainClient<Channel>,
     ) -> Result<Self, bookway_data::DataError> {
-        let repository: SharedEventRepository = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryEventRepository::default()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresEventRepository::new(
+        let Dao: SharedEventDao = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryEventDao::default()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresEventDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
@@ -104,7 +104,7 @@ impl Domain {
         Ok(Self {
             config,
             events: UserEventService::with_clients(
-                repository,
+                Dao,
                 feature_cache,
                 Some(recommend_main),
                 Some(search_main),
@@ -116,29 +116,29 @@ impl Domain {
 impl UserEventService {
     #[cfg(test)]
     pub(crate) fn with_feature_cache(
-        repository: SharedEventRepository,
+        Dao: SharedEventDao,
         feature_cache: Option<SharedFeatureCacheInvalidator>,
     ) -> Self {
-        Self::with_feature_cache_and_recommend_main(repository, feature_cache, None)
+        Self::with_feature_cache_and_recommend_main(Dao, feature_cache, None)
     }
 
     #[cfg(test)]
     pub(crate) fn with_feature_cache_and_recommend_main(
-        repository: SharedEventRepository,
+        Dao: SharedEventDao,
         feature_cache: Option<SharedFeatureCacheInvalidator>,
         recommend_main: Option<RecommendMainClient<Channel>>,
     ) -> Self {
-        Self::with_clients(repository, feature_cache, recommend_main, None)
+        Self::with_clients(Dao, feature_cache, recommend_main, None)
     }
 
     pub(crate) fn with_clients(
-        repository: SharedEventRepository,
+        Dao: SharedEventDao,
         feature_cache: Option<SharedFeatureCacheInvalidator>,
         recommend_main: Option<RecommendMainClient<Channel>>,
         search_main: Option<SearchMainClient<Channel>>,
     ) -> Self {
         Self {
-            repository,
+            Dao,
             feature_cache,
             recommend_main,
             search_main,
@@ -176,7 +176,7 @@ impl UserEventService {
         self.validate_attribution(&user_id, &mut accepted_events, &mut rejected)
             .await;
 
-        let stored = self.repository.store(accepted_events).await?;
+        let stored = self.Dao.store(accepted_events).await?;
         if stored.accepted > 0 {
             self.invalidate_user_features(&user_id).await;
         }
@@ -474,7 +474,7 @@ mod tests {
         FeatureCacheInvalidator, IngestError, UserEventService, is_valid,
         retain_verified_attributions,
     };
-    use crate::datasource::{AcceptedEvent, MemoryEventRepository};
+    use crate::datasource::{AcceptedEvent, MemoryEventDao};
 
     #[derive(Default)]
     struct RecordingFeatureCache {
@@ -524,7 +524,7 @@ mod tests {
     #[tokio::test]
     async fn counts_accepted_rejected_and_duplicate_events() {
         let service =
-            UserEventService::with_feature_cache(Arc::new(MemoryEventRepository::default()), None);
+            UserEventService::with_feature_cache(Arc::new(MemoryEventDao::default()), None);
         let first = service
             .ingest(request(vec![
                 event("01980000-0000-7000-8000-000000000001", "impression"),
@@ -550,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_empty_batches() {
         let service =
-            UserEventService::with_feature_cache(Arc::new(MemoryEventRepository::default()), None);
+            UserEventService::with_feature_cache(Arc::new(MemoryEventDao::default()), None);
         let error = service
             .ingest(request(Vec::new()))
             .await
@@ -561,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_opaque_content_ids_for_feedback() {
         let service =
-            UserEventService::with_feature_cache(Arc::new(MemoryEventRepository::default()), None);
+            UserEventService::with_feature_cache(Arc::new(MemoryEventDao::default()), None);
         let mut impression = event("01980000-0000-7000-8000-000000000003", "impression");
         impression.content_id = Some("post-reading".to_string());
         let result = service
@@ -576,7 +576,7 @@ mod tests {
     async fn invalidates_online_features_only_after_a_new_event_is_stored() {
         let cache = Arc::new(RecordingFeatureCache::default());
         let service = UserEventService::with_feature_cache(
-            Arc::new(MemoryEventRepository::default()),
+            Arc::new(MemoryEventDao::default()),
             Some(cache.clone()),
         );
         let event = event("01980000-0000-7000-8000-000000000004", "like");
@@ -606,7 +606,7 @@ mod tests {
             fails: true,
         });
         let service = UserEventService::with_feature_cache(
-            Arc::new(MemoryEventRepository::default()),
+            Arc::new(MemoryEventDao::default()),
             Some(cache),
         );
 

@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::{
     conf::Config,
     datasource::{
-        GrowthRepository, MemoryGrowthRepository, PostgresGrowthRepository, RepositoryError,
+        GrowthDao, MemoryGrowthDao, PostgresGrowthDao, DaoError,
     },
 };
 
@@ -14,28 +14,28 @@ pub(crate) enum GrowthError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Repository(#[from] RepositoryError),
+    Dao(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) repository: Arc<dyn GrowthRepository>,
+    pub(crate) Dao: Arc<dyn GrowthDao>,
 }
 
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, bookway_data::DataError> {
-        let repository: Arc<dyn GrowthRepository> = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryGrowthRepository::seeded()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresGrowthRepository::new(
+        let Dao: Arc<dyn GrowthDao> = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryGrowthDao::seeded()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresGrowthDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
-        Ok(Self { config, repository })
+        Ok(Self { config, Dao })
     }
 
     #[cfg(test)]
-    pub(crate) fn from_repository(config: Config, repository: Arc<dyn GrowthRepository>) -> Self {
-        Self { config, repository }
+    pub(crate) fn from_dao(config: Config, Dao: Arc<dyn GrowthDao>) -> Self {
+        Self { config, Dao }
     }
 }

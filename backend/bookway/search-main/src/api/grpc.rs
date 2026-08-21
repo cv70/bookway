@@ -19,13 +19,9 @@ impl SearchMain for GrpcServer {
         &self,
         request: Request<search_pb::SearchRequest>,
     ) -> Result<Response<search_pb::SearchResponse>, Status> {
-        let response = tokio::time::timeout(
-            SEARCH_REQUEST_BUDGET,
-            self.domain.search(request.into_inner()),
-        )
-        .await
-        .map_err(|_| Status::deadline_exceeded("search request exceeded the 140ms budget"))?
-        .map_err(internal_error)?;
+        let response = within_search_budget(self.domain.search(request.into_inner()))
+            .await?
+            .map_err(internal_error)?;
         Ok(Response::new(response))
     }
 
@@ -33,13 +29,9 @@ impl SearchMain for GrpcServer {
         &self,
         request: Request<search_pb::SuggestionsRequest>,
     ) -> Result<Response<search_pb::SuggestionsResponse>, Status> {
-        let response = tokio::time::timeout(
-            SEARCH_REQUEST_BUDGET,
-            self.domain.suggestions(request.into_inner()),
-        )
-        .await
-        .map_err(|_| Status::deadline_exceeded("suggestions request exceeded the 140ms budget"))?
-        .map_err(internal_error)?;
+        let response = within_search_budget(self.domain.suggestions(request.into_inner()))
+            .await?
+            .map_err(internal_error)?;
         Ok(Response::new(response))
     }
 
@@ -61,6 +53,14 @@ impl SearchMain for GrpcServer {
             })?;
         Ok(Response::new(response))
     }
+}
+
+async fn within_search_budget<T>(
+    operation: impl std::future::Future<Output = T>,
+) -> Result<T, Status> {
+    tokio::time::timeout(SEARCH_REQUEST_BUDGET, operation)
+        .await
+        .map_err(|_| Status::deadline_exceeded("search request exceeded the 140ms budget"))
 }
 
 pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
@@ -99,5 +99,25 @@ fn internal_error(error: crate::domain::SearchMainError) -> Status {
         crate::domain::SearchMainError::InvalidContentSummary => {
             Status::unavailable(error.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::within_search_budget;
+
+    #[tokio::test]
+    async fn search_deadline_is_enforced_before_the_p99_limit() {
+        let result = within_search_budget(async {
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        assert_eq!(
+            result
+                .expect_err("slow search operation must time out")
+                .code(),
+            tonic::Code::DeadlineExceeded
+        );
     }
 }

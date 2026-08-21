@@ -39,7 +39,7 @@ enum ConfigError {
 }
 
 #[async_trait]
-trait IntentRepository: Send + Sync {
+trait IntentDao: Send + Sync {
     async fn claim(&self) -> Result<Vec<RouteParticipationIntent>, sqlx::Error>;
     async fn mark_applied(&self, intent: &RouteParticipationIntent) -> Result<(), sqlx::Error>;
     async fn mark_failed(
@@ -54,13 +54,13 @@ trait ParticipationTarget: Send + Sync {
     async fn apply(&self, intent: &RouteParticipationIntent) -> Result<(), TargetError>;
 }
 
-struct PostgresIntentRepository {
+struct PostgresIntentDao {
     pool: PgPool,
     batch_size: i64,
     lease_seconds: i32,
 }
 
-impl PostgresIntentRepository {
+impl PostgresIntentDao {
     fn new(pool: PgPool, batch_size: i64, lease_seconds: i32) -> Self {
         Self {
             pool,
@@ -71,7 +71,7 @@ impl PostgresIntentRepository {
 }
 
 #[async_trait]
-impl IntentRepository for PostgresIntentRepository {
+impl IntentDao for PostgresIntentDao {
     async fn claim(&self) -> Result<Vec<RouteParticipationIntent>, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let rows = sqlx::query_as::<_, (String, String, Option<String>, bool, i64)>(
@@ -166,7 +166,7 @@ impl ParticipationTarget for BbsGrpcTarget {
 }
 
 struct Reconciler<R, T> {
-    repository: Arc<R>,
+    Dao: Arc<R>,
     target: Arc<T>,
     concurrency: usize,
     request_timeout: Duration,
@@ -174,17 +174,17 @@ struct Reconciler<R, T> {
 
 impl<R, T> Reconciler<R, T>
 where
-    R: IntentRepository + 'static,
+    R: IntentDao + 'static,
     T: ParticipationTarget + 'static,
 {
     fn new(
-        repository: Arc<R>,
+        Dao: Arc<R>,
         target: Arc<T>,
         concurrency: usize,
         request_timeout: Duration,
     ) -> Self {
         Self {
-            repository,
+            Dao,
             target,
             concurrency,
             request_timeout,
@@ -192,7 +192,7 @@ where
     }
 
     async fn run_once(&self) -> Result<usize, ReconcileError> {
-        let intents = self.repository.claim().await?;
+        let intents = self.Dao.claim().await?;
         let count = intents.len();
         let results = stream::iter(intents)
             .map(|intent| self.reconcile(intent))
@@ -209,7 +209,7 @@ where
         let result = tokio::time::timeout(self.request_timeout, self.target.apply(&intent)).await;
         let failure = match result {
             Ok(Ok(())) => {
-                self.repository.mark_applied(&intent).await?;
+                self.Dao.mark_applied(&intent).await?;
                 tracing::debug!(
                     user_id = %intent.user_id,
                     route_id = %intent.route_id,
@@ -222,7 +222,7 @@ where
             Ok(Err(error)) => error,
             Err(_) => TargetError::Timeout(self.request_timeout.as_millis() as u64),
         };
-        self.repository
+        self.Dao
             .mark_failed(&intent, &failure.to_string())
             .await?;
         tracing::warn!(
@@ -275,14 +275,14 @@ where
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("route-participation-reconciler");
     let config = Config::from_env()?;
-    let repository = Arc::new(PostgresIntentRepository::new(
+    let Dao = Arc::new(PostgresIntentDao::new(
         bookway_data::postgres_pool().await?,
         config.batch_size,
         config.lease_seconds,
     ));
     let target = Arc::new(BbsGrpcTarget::connect(config.bbs_url).await?);
     let reconciler = Reconciler::new(
-        repository,
+        Dao,
         target,
         config.concurrency,
         config.request_timeout,
@@ -306,14 +306,14 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct MemoryRepository {
+    struct MemoryDao {
         pending: Mutex<Vec<RouteParticipationIntent>>,
         applied: Mutex<Vec<(String, i64)>>,
         failed: Mutex<Vec<(String, i64, String)>>,
     }
 
     #[async_trait]
-    impl IntentRepository for MemoryRepository {
+    impl IntentDao for MemoryDao {
         async fn claim(&self) -> Result<Vec<RouteParticipationIntent>, sqlx::Error> {
             Ok(std::mem::take(
                 &mut *self.pending.lock().expect("pending lock"),
@@ -370,8 +370,8 @@ mod tests {
 
     #[tokio::test]
     async fn applies_and_acknowledges_the_exact_claimed_version() {
-        let repository = Arc::new(MemoryRepository::default());
-        repository
+        let Dao = Arc::new(MemoryDao::default());
+        Dao
             .pending
             .lock()
             .expect("pending lock")
@@ -381,7 +381,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         });
         let reconciler = Reconciler::new(
-            repository.clone(),
+            Dao.clone(),
             target.clone(),
             4,
             Duration::from_secs(1),
@@ -389,17 +389,17 @@ mod tests {
 
         assert_eq!(reconciler.run_once().await.expect("run once"), 1);
         assert_eq!(
-            *repository.applied.lock().expect("applied lock"),
+            *Dao.applied.lock().expect("applied lock"),
             vec![("route-a".to_string(), 7)]
         );
         assert!(!target.calls.lock().expect("calls lock")[0].desired_active);
-        assert!(repository.failed.lock().expect("failed lock").is_empty());
+        assert!(Dao.failed.lock().expect("failed lock").is_empty());
     }
 
     #[tokio::test]
     async fn records_target_failures_without_acknowledging_the_intent() {
-        let repository = Arc::new(MemoryRepository::default());
-        repository
+        let Dao = Arc::new(MemoryDao::default());
+        Dao
             .pending
             .lock()
             .expect("pending lock")
@@ -408,11 +408,11 @@ mod tests {
             fail: true,
             calls: Mutex::new(Vec::new()),
         });
-        let reconciler = Reconciler::new(repository.clone(), target, 4, Duration::from_secs(1));
+        let reconciler = Reconciler::new(Dao.clone(), target, 4, Duration::from_secs(1));
 
         assert_eq!(reconciler.run_once().await.expect("run once"), 1);
-        assert!(repository.applied.lock().expect("applied lock").is_empty());
-        let failed = repository.failed.lock().expect("failed lock");
+        assert!(Dao.applied.lock().expect("applied lock").is_empty());
+        let failed = Dao.failed.lock().expect("failed lock");
         assert_eq!(failed[0].0, "route-a");
         assert_eq!(failed[0].1, 3);
         assert!(failed[0].2.contains("bbs down"));

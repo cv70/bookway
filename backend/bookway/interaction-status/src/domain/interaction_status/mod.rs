@@ -20,7 +20,7 @@ impl Domain {
         }
         post_ids.sort_unstable();
         post_ids.dedup();
-        Ok(self.repository.context(&user_id, &post_ids).await?)
+        Ok(self.Dao.context(&user_id, &post_ids).await?)
     }
 
     pub(crate) async fn set_reaction(
@@ -35,7 +35,7 @@ impl Domain {
             ));
         }
         Ok(self
-            .repository
+            .Dao
             .set_reaction(
                 &request.user_id,
                 &request.post_id,
@@ -53,16 +53,16 @@ mod tests {
     use crate::api::pb;
 
     use super::*;
-    use crate::{conf::Config, datasource::MemoryInteractionStatusRepository};
+    use crate::{conf::Config, datasource::MemoryInteractionStatusDao};
 
     #[tokio::test]
     async fn repeated_like_is_idempotent() {
-        let domain = Domain::from_repository(
+        let domain = Domain::from_dao(
             Config {
                 listen_addr: "127.0.0.1:0".parse().expect("valid HTTP address"),
                 grpc_addr: "127.0.0.1:0".parse().expect("valid gRPC address"),
             },
-            Arc::new(MemoryInteractionStatusRepository::seeded()),
+            Arc::new(MemoryInteractionStatusDao::seeded()),
         );
         let request = pb::SetReactionRequest {
             user_id: "user-a".to_string(),
@@ -81,12 +81,12 @@ mod tests {
 
     #[tokio::test]
     async fn hide_is_returned_in_the_users_recommendation_context() {
-        let domain = Domain::from_repository(
+        let domain = Domain::from_dao(
             Config {
                 listen_addr: "127.0.0.1:0".parse().expect("valid HTTP address"),
                 grpc_addr: "127.0.0.1:0".parse().expect("valid gRPC address"),
             },
-            Arc::new(MemoryInteractionStatusRepository::seeded()),
+            Arc::new(MemoryInteractionStatusDao::seeded()),
         );
         domain
             .set_reaction(pb::SetReactionRequest {
@@ -111,12 +111,12 @@ mod tests {
 
     #[tokio::test]
     async fn context_rejects_oversized_batches() {
-        let domain = Domain::from_repository(
+        let domain = Domain::from_dao(
             Config {
                 listen_addr: "127.0.0.1:0".parse().expect("valid HTTP address"),
                 grpc_addr: "127.0.0.1:0".parse().expect("valid gRPC address"),
             },
-            Arc::new(MemoryInteractionStatusRepository::seeded()),
+            Arc::new(MemoryInteractionStatusDao::seeded()),
         );
         let error = domain
             .context(pb::ContextRequest {

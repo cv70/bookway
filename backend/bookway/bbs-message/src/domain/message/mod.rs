@@ -3,7 +3,7 @@ use bookway_content_audit_api::pb as audit_pb;
 use crate::{
     api::pb,
     datasource::{
-        ConversationCursor, CreateMessageReportInput, MessageCursor, ReportCursor, RepositoryError,
+        ConversationCursor, CreateMessageReportInput, MessageCursor, ReportCursor, DaoError,
         ReviewMessageReportInput, SendMessageInput,
     },
     domain::{Domain, MessageError},
@@ -39,7 +39,7 @@ impl Domain {
         if body.is_empty() || body.chars().count() > MAX_BODY_LENGTH {
             return Err(MessageError::Validation("私信正文无效".to_string()));
         }
-        if self.repository.sender_restricted(&sender_user_id).await? {
+        if self.Dao.sender_restricted(&sender_user_id).await? {
             return Err(MessageError::SenderRestricted);
         }
 
@@ -56,7 +56,7 @@ impl Domain {
             return Err(MessageError::Blocked);
         }
         if !self
-            .repository
+            .Dao
             .preferences(&recipient_user_id)
             .await?
             .allow_direct_messages
@@ -73,7 +73,7 @@ impl Domain {
             )
             .await?;
         allow_audited_message(audit.decision)?;
-        self.repository
+        self.Dao
             .send(SendMessageInput {
                 sender_user_id,
                 recipient_user_id,
@@ -83,8 +83,8 @@ impl Domain {
             })
             .await
             .map_err(|error| match error {
-                RepositoryError::SenderRestricted => MessageError::SenderRestricted,
-                error => MessageError::Repository(error),
+                DaoError::SenderRestricted => MessageError::SenderRestricted,
+                error => MessageError::Dao(error),
             })
     }
 
@@ -103,7 +103,7 @@ impl Domain {
         };
         let limit = page_size(request.limit, DEFAULT_CONVERSATION_PAGE_SIZE);
         let mut items = self
-            .repository
+            .Dao
             .list_conversations(user_id, cursor.as_ref(), limit + 1)
             .await?;
         let has_more = items.len() > limit;
@@ -132,12 +132,12 @@ impl Domain {
         };
         let limit = page_size(request.limit, DEFAULT_MESSAGE_PAGE_SIZE);
         let mut items = self
-            .repository
+            .Dao
             .list_messages(user_id, conversation_id, cursor.as_ref(), limit + 1)
             .await?;
         let has_more = items.len() > limit;
         if has_more {
-            // The repository fetches newest first then restores chronological
+            // The Dao fetches newest first then restores chronological
             // order. The extra item is the oldest and belongs to the next page.
             items.remove(0);
         }
@@ -164,7 +164,7 @@ impl Domain {
             return Err(MessageError::Validation("消息 ID 无效".to_string()));
         }
         Ok(self
-            .repository
+            .Dao
             .mark_read(
                 user_id,
                 conversation_id,
@@ -178,7 +178,7 @@ impl Domain {
         request: pb::UserRequest,
     ) -> Result<pb::DirectMessagePreferences, MessageError> {
         validate_user_id(&request.user_id)?;
-        Ok(self.repository.preferences(request.user_id.trim()).await?)
+        Ok(self.Dao.preferences(request.user_id.trim()).await?)
     }
 
     pub(crate) async fn update_preferences(
@@ -187,7 +187,7 @@ impl Domain {
     ) -> Result<pb::DirectMessagePreferences, MessageError> {
         validate_user_id(&request.user_id)?;
         Ok(self
-            .repository
+            .Dao
             .update_preferences(request.user_id.trim(), request.allow_direct_messages)
             .await?)
     }
@@ -206,7 +206,7 @@ impl Domain {
             ));
         }
         let idempotency_key = normalize_report_idempotency_key(request.idempotency_key)?;
-        self.repository
+        self.Dao
             .create_report(CreateMessageReportInput {
                 id: uuid::Uuid::now_v7().to_string(),
                 reporter_user_id: request.reporter_user_id.trim().to_string(),
@@ -234,7 +234,7 @@ impl Domain {
         };
         let limit = page_size(request.limit, DEFAULT_MESSAGE_PAGE_SIZE);
         let mut items = self
-            .repository
+            .Dao
             .list_reports(status.map(|value| value as i32), cursor.as_ref(), limit + 1)
             .await?;
         let has_more = items.len() > limit;
@@ -261,7 +261,7 @@ impl Domain {
             ));
         }
         validate_review_transition(status, action, &request.resolution)?;
-        self.repository
+        self.Dao
             .review_report(
                 request.report_id.trim(),
                 ReviewMessageReportInput {

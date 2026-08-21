@@ -73,7 +73,7 @@ impl IntoResponse for HttpError {
             IngestError::EmptyBatch | IngestError::BatchTooLarge => {
                 (StatusCode::BAD_REQUEST, "invalid_event_batch")
             }
-            IngestError::Repository(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
+            IngestError::Dao(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
         };
         (status, Json(ErrorResponse::new(code, self.0.to_string()))).into_response()
     }

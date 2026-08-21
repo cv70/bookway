@@ -100,6 +100,6 @@ fn inventory_error(error: InventoryError) -> Status {
         InventoryError::NotFound(message) => Status::not_found(message),
         InventoryError::Insufficient(message) => Status::failed_precondition(message),
         InventoryError::Conflict(message) => Status::already_exists(message),
-        InventoryError::Repository(message) => Status::internal(message),
+        InventoryError::Dao(message) => Status::internal(message),
     }
 }

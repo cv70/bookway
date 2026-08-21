@@ -3,12 +3,13 @@ use std::sync::Arc;
 use crate::api::pb;
 use bookway_bbs_link_api::pb::{self as bbs_link, bbs_link_client::BbsLinkClient};
 use thiserror::Error;
+use url::Url;
 
 use crate::{
     Config,
     datasource::{
-        CampaignRepository, DecisionRegistration, EligibleQuery, MemoryCampaignRepository,
-        PostgresCampaignRepository, RepositoryError,
+        CampaignDao, DecisionRegistration, EligibleQuery, MemoryCampaignDao,
+        PostgresCampaignDao, DaoError,
     },
 };
 
@@ -19,28 +20,28 @@ pub(crate) enum AdCenterError {
     #[error("campaign {0} was not found")]
     NotFound(String),
     #[error("commercial data operation failed: {0}")]
-    Repository(String),
+    Dao(String),
 }
 
 #[derive(Clone)]
 pub struct Domain {
     config: Config,
-    repository: Arc<dyn CampaignRepository>,
+    Dao: Arc<dyn CampaignDao>,
     bbs_link: BbsLinkClient<tonic::transport::Channel>,
 }
 
 impl Domain {
     pub async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let repository: Arc<dyn CampaignRepository> = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryCampaignRepository::default()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresCampaignRepository::new(
+        let Dao: Arc<dyn CampaignDao> = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryCampaignDao::default()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresCampaignDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
         let bbs_link = BbsLinkClient::connect(config.bbs_link_url.clone()).await?;
         Ok(Self {
             config,
-            repository,
+            Dao,
             bbs_link,
         })
     }
@@ -60,10 +61,10 @@ impl Domain {
             &request.scene_equipment,
         )
         .await?;
-        self.repository
+        self.Dao
             .create(request)
             .await
-            .map_err(repository_error)
+            .map_err(dao_error)
     }
 
     pub(crate) async fn update_campaign(
@@ -102,6 +103,15 @@ impl Domain {
                 "predicted CTR/CVR must be finite values between 0 and 1".to_string(),
             ));
         }
+        if request
+            .landing_url
+            .as_deref()
+            .is_some_and(|value| !valid_landing_url(value))
+        {
+            return Err(AdCenterError::Validation(
+                "landing_url must be an http(s) URL".to_string(),
+            ));
+        }
         let requested_status = request
             .status
             .map(pb::CampaignStatus::try_from)
@@ -109,10 +119,10 @@ impl Domain {
             .map_err(|_| AdCenterError::Validation("invalid campaign status".to_string()))?;
         let campaign_id = request.campaign_id.clone();
         let campaign = self
-            .repository
+            .Dao
             .get_for_advertiser(&campaign_id, &request.advertiser_id)
             .await
-            .map_err(repository_error)?;
+            .map_err(dao_error)?;
         if needs_current_action_context(
             request.scene_equipment.is_some(),
             requested_status,
@@ -128,10 +138,10 @@ impl Domain {
             )
             .await?;
         }
-        self.repository
+        self.Dao
             .update(&campaign_id, request)
             .await
-            .map_err(repository_error)
+            .map_err(dao_error)
     }
 
     pub(crate) async fn campaign(
@@ -143,10 +153,10 @@ impl Domain {
                 "campaign_id and advertiser_id are required".to_string(),
             ));
         }
-        self.repository
+        self.Dao
             .get_for_advertiser(&request.campaign_id, &request.advertiser_id)
             .await
-            .map_err(repository_error)
+            .map_err(dao_error)
     }
 
     pub(crate) async fn campaigns(
@@ -158,14 +168,14 @@ impl Domain {
                 "advertiser_id is required".to_string(),
             ));
         }
-        self.repository
+        self.Dao
             .list_for_advertiser(
                 &request.advertiser_id,
                 usize::try_from(request.limit.unwrap_or(50).clamp(1, 100)).unwrap_or(100),
             )
             .await
             .map(|items| pb::CampaignList { items })
-            .map_err(repository_error)
+            .map_err(dao_error)
     }
 
     pub(crate) async fn eligible(
@@ -183,7 +193,17 @@ impl Domain {
                     .to_string(),
             ));
         }
-        self.repository
+        // Campaign rows are durable, but a route can be restricted or its
+        // action vocabulary can change after activation. Re-read the public
+        // route on every eligibility request so stale commercial state can
+        // never become a served advertisement.
+        self.validate_public_action_node(
+            &request.route_id,
+            &request.action_node_id,
+            &request.scene_equipment,
+        )
+        .await?;
+        self.Dao
             .eligible(EligibleQuery {
                 user_id: &request.user_id,
                 placement: &request.placement,
@@ -195,7 +215,7 @@ impl Domain {
             })
             .await
             .map(|items| pb::CampaignList { items })
-            .map_err(repository_error)
+            .map_err(dao_error)
     }
 
     pub(crate) async fn record_event(
@@ -214,10 +234,10 @@ impl Domain {
         pb::EventType::try_from(request.event_type)
             .map_err(|_| AdCenterError::Validation("invalid event type".to_string()))?;
         let user_id = request.user_id.clone();
-        self.repository
+        self.Dao
             .record_event(&user_id, request)
             .await
-            .map_err(repository_error)
+            .map_err(dao_error)
     }
 
     pub(crate) async fn register_decisions(
@@ -237,7 +257,13 @@ impl Domain {
                 "user_id, request_id, placement, route, action node and 1-10 campaign ids are required".to_string(),
             ));
         }
-        self.repository
+        self.validate_public_action_node(
+            &request.route_id,
+            &request.action_node_id,
+            &request.scene_equipment,
+        )
+        .await?;
+        self.Dao
             .register_decisions(DecisionRegistration {
                 user_id: &request.user_id,
                 request_id: &request.request_id,
@@ -248,7 +274,7 @@ impl Domain {
                 campaign_ids: request.campaign_ids,
             })
             .await
-            .map_err(repository_error)
+            .map_err(dao_error)
     }
 
     async fn validate_public_action_node(
@@ -263,12 +289,12 @@ impl Domain {
                 bookway_runtime::grpc_service_request(bbs_link::IdRequest {
                     id: route_id.to_string(),
                 })
-                .map_err(|error| AdCenterError::Repository(error.to_string()))?,
+                .map_err(|error| AdCenterError::Dao(error.to_string()))?,
             )
             .await
             .map_err(|error| match error.code() {
                 tonic::Code::NotFound => AdCenterError::NotFound(route_id.to_string()),
-                _ => AdCenterError::Repository(format!("bbs-link get_public failed: {error}")),
+                _ => AdCenterError::Dao(format!("bbs-link get_public failed: {error}")),
             })?
             .into_inner();
         if route.content_type != bbs_link::ContentType::Route as i32 {
@@ -328,7 +354,7 @@ fn validate_campaign(request: &pb::CreateCampaignRequest) -> Result<(), AdCenter
             "advertiser_id, name, placement, route, action node, scene equipment, title and landing_url are required".to_string(),
         ));
     }
-    if !request.landing_url.starts_with("https://") && !request.landing_url.starts_with("http://") {
+    if !valid_landing_url(&request.landing_url) {
         return Err(AdCenterError::Validation(
             "landing_url must be an http(s) URL".to_string(),
         ));
@@ -352,16 +378,22 @@ fn valid_probability(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
 
-fn repository_error(error: RepositoryError) -> AdCenterError {
+fn valid_landing_url(value: &str) -> bool {
+    Url::parse(value)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+}
+
+fn dao_error(error: DaoError) -> AdCenterError {
     match error {
-        RepositoryError::NotFound(id) => AdCenterError::NotFound(id),
-        RepositoryError::Failed(message) => AdCenterError::Repository(message),
+        DaoError::NotFound(id) => AdCenterError::NotFound(id),
+        DaoError::Failed(message) => AdCenterError::Dao(message),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{needs_current_action_context, pb};
+    use super::{needs_current_action_context, pb, valid_landing_url};
 
     #[test]
     fn active_campaign_updates_require_a_current_action_context() {
@@ -385,5 +417,15 @@ mod tests {
             Some(pb::CampaignStatus::Paused),
             pb::CampaignStatus::Draft as i32,
         ));
+    }
+
+    #[test]
+    fn landing_urls_are_limited_to_http_schemes() {
+        assert!(valid_landing_url("https://example.test/path"));
+        assert!(valid_landing_url("http://example.test/path"));
+        assert!(!valid_landing_url("http://"));
+        assert!(!valid_landing_url("https://?missing-host"));
+        assert!(!valid_landing_url("javascript:alert(1)"));
+        assert!(!valid_landing_url("//example.test/path"));
     }
 }

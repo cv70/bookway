@@ -218,6 +218,10 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/routes/{route_id}/nodes/{action_node_id}/resources/{attachment_id}",
             delete(detach_route_node_resource),
         )
+        .route(
+            "/v1/routes/{route_id}/nodes/{action_node_id}/rag-context",
+            post(route_node_rag_context),
+        )
         .route("/v1/orders", get(mall_orders).post(create_mall_order))
         .route("/v1/orders/{order_id}", get(mall_order))
         .route("/v1/orders/{order_id}/cancel", post(cancel_mall_order))
@@ -1305,6 +1309,20 @@ async fn detach_route_node_resource(
     Ok(Json(ApiResponse::new(response.into())))
 }
 
+async fn route_node_rag_context(
+    State(state): State<AppState>,
+    Path((route_id, action_node_id)): Path<(String, String)>,
+    Json(request): Json<rest::RouteNodeRagContextRequest>,
+) -> Result<Json<ApiResponse<rest::RouteNodeRagContextResponse>>, HttpError> {
+    let response = state
+        .domain
+        .retrieve_route_node_rag_context(request.into_pb(route_id, action_node_id))
+        .await?;
+    Ok(Json(ApiResponse::new(
+        response.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
 async fn get_resource(
     State(state): State<AppState>,
     Path(resource_id): Path<String>,
@@ -1335,7 +1353,11 @@ async fn ingest_events(
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .ingest_events(request.into_pb(user_id(&headers)))
+            .ingest_events(
+                request
+                    .into_pb(user_id(&headers))
+                    .map_err(HttpError::InvalidRequest)?,
+            )
             .await?,
     )))
 }

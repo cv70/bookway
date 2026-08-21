@@ -28,6 +28,10 @@ pub struct CandidateFeatures {
     pub action_completion_rate: f64,
     #[prost(double, tag = "9")]
     pub purchase_conversion_rate: f64,
+    /// Distinct users completing a route action divided by distinct users who
+    /// joined that public route.
+    #[prost(double, tag = "10")]
+    pub route_completion_rate: f64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

@@ -10,7 +10,7 @@ use axum::{
 
 use crate::{
     api::pb,
-    datasource::RepositoryError,
+    datasource::DaoError,
     domain::{Domain, MediaError},
 };
 
@@ -112,10 +112,10 @@ impl IntoResponse for HttpError {
         let (status, code) = match &self.0 {
             MediaError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
             MediaError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
-            MediaError::Repository(RepositoryError::NotFound) => {
+            MediaError::Dao(DaoError::NotFound) => {
                 (StatusCode::NOT_FOUND, "media_not_found")
             }
-            MediaError::Repository(RepositoryError::Database(_)) => {
+            MediaError::Dao(DaoError::Database(_)) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
             }
             MediaError::Object(_) => (StatusCode::BAD_GATEWAY, "object_storage_unavailable"),

@@ -2,8 +2,8 @@ use crate::api::pb;
 use crate::{
     Config,
     datasource::{
-        CreateResult, MemoryOrderRepository, NewOrder, OrderRepository, PostgresOrderRepository,
-        RepositoryError,
+        CreateResult, MemoryOrderDao, NewOrder, OrderDao, PostgresOrderDao,
+        DaoError,
     },
 };
 use bookway_mall_api::pb as mall_pb;
@@ -31,13 +31,13 @@ pub(crate) enum OrderError {
     #[error("{0} request failed: {1}")]
     Upstream(&'static str, String),
     #[error("order operation failed: {0}")]
-    Repository(String),
+    Dao(String),
 }
 
 #[derive(Clone)]
 pub struct Domain {
     config: Config,
-    repository: Arc<dyn OrderRepository>,
+    Dao: Arc<dyn OrderDao>,
     mall: mall_pb::mall_client::MallClient<Channel>,
     inventory: inventory_pb::mall_inventory_client::MallInventoryClient<Channel>,
     user_event: user_event_pb::user_event_client::UserEventClient<Channel>,
@@ -45,9 +45,9 @@ pub struct Domain {
 
 impl Domain {
     pub async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let repository: Arc<dyn OrderRepository> = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryOrderRepository::default()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresOrderRepository::new(
+        let Dao: Arc<dyn OrderDao> = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryOrderDao::default()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresOrderDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
@@ -62,7 +62,7 @@ impl Domain {
         .await?;
         Ok(Self {
             config,
-            repository,
+            Dao,
             mall,
             inventory,
             user_event,
@@ -82,7 +82,7 @@ impl Domain {
         validate_items(&request.items)?;
         let request_fingerprint = request_fingerprint(&request);
         if let Some(order) = self
-            .repository
+            .Dao
             .find_idempotent(
                 &request.user_id,
                 &request.idempotency_key,
@@ -145,7 +145,7 @@ impl Domain {
             &node_offer,
         )?;
         let created = self
-            .repository
+            .Dao
             .create(NewOrder {
                 order,
                 idempotency_key: request.idempotency_key,
@@ -161,7 +161,7 @@ impl Domain {
         request: pb::UserRequest,
     ) -> Result<pb::OrderListResponse, OrderError> {
         let values = self
-            .repository
+            .Dao
             .list(&request.user_id)
             .await
             .map_err(repo_error)?;
@@ -189,7 +189,7 @@ impl Domain {
                     "payment reference belongs to a different payment".to_string(),
                 ));
             }
-            self.repository
+            self.Dao
                 .ensure_settlement(&order)
                 .await
                 .map_err(repo_error)?;
@@ -202,17 +202,17 @@ impl Domain {
                 request.order_id
             )));
         }
-        self.repository
+        self.Dao
             .claim_payment_reference(&request.order_id, &request.payment_reference)
             .await
             .map_err(repo_error)?;
         self.confirm_reservation(&request.order_id).await?;
         let paid = self
-            .repository
+            .Dao
             .transition(&request.order_id, pb::MallOrderStatus::Paid as i32, None)
             .await
             .map_err(repo_error)?;
-        self.repository
+        self.Dao
             .ensure_settlement(&paid)
             .await
             .map_err(repo_error)?;
@@ -227,7 +227,7 @@ impl Domain {
         validate_merchant_id(&request.merchant_id)?;
         let limit = usize::try_from(request.limit.unwrap_or(50).clamp(1, 100)).unwrap_or(100);
         let items = self
-            .repository
+            .Dao
             .merchant_orders(
                 &request.merchant_id,
                 request.status,
@@ -256,7 +256,7 @@ impl Domain {
                 "invalid fulfillment status".to_string(),
             ));
         }
-        self.repository
+        self.Dao
             .update_fulfillment(
                 &request.merchant_id,
                 &request.order_id,
@@ -274,7 +274,7 @@ impl Domain {
         validate_merchant_id(&request.merchant_id)?;
         let limit = usize::try_from(request.limit.unwrap_or(50).clamp(1, 100)).unwrap_or(100);
         let items = self
-            .repository
+            .Dao
             .settlements(
                 &request.merchant_id,
                 request.status,
@@ -300,7 +300,7 @@ impl Domain {
                 "settlement id is required".to_string(),
             ));
         }
-        self.repository
+        self.Dao
             .settle_affiliate(&request.merchant_id, &request.settlement_id)
             .await
             .map_err(repo_error)
@@ -319,7 +319,7 @@ impl Domain {
             ));
         }
         self.release_reservation(&request.order_id).await?;
-        self.repository
+        self.Dao
             .transition(
                 &request.order_id,
                 pb::MallOrderStatus::Cancelled as i32,
@@ -334,7 +334,7 @@ impl Domain {
         request: pb::BatchRequest,
     ) -> Result<pb::ExpirePendingResponse, OrderError> {
         let orders = self
-            .repository
+            .Dao
             .expired_pending(usize::try_from(request.limit.clamp(1, 1_000)).unwrap_or(1_000))
             .await
             .map_err(repo_error)?;
@@ -361,7 +361,7 @@ impl Domain {
     }
 
     async fn get_by_id(&self, user_id: &str, id: &str) -> Result<pb::Order, OrderError> {
-        self.expire_if_needed(self.repository.get(user_id, id).await.map_err(repo_error)?)
+        self.expire_if_needed(self.Dao.get(user_id, id).await.map_err(repo_error)?)
             .await
     }
 
@@ -396,7 +396,7 @@ impl Domain {
             return Ok(order);
         }
         self.release_reservation(&order.id).await?;
-        self.repository
+        self.Dao
             .transition(&order.id, pb::MallOrderStatus::Expired as i32, None)
             .await
             .map_err(repo_error)
@@ -720,12 +720,12 @@ fn upstream_status(service: &'static str, error: tonic::Status) -> OrderError {
     OrderError::Upstream(service, error.to_string())
 }
 
-fn repo_error(error: RepositoryError) -> OrderError {
+fn repo_error(error: DaoError) -> OrderError {
     match error {
-        RepositoryError::NotFound(value) => OrderError::NotFound(value),
-        RepositoryError::Conflict(value) => OrderError::Conflict(value),
-        RepositoryError::State(value) => OrderError::State(value),
-        RepositoryError::Failed(value) => OrderError::Repository(value),
+        DaoError::NotFound(value) => OrderError::NotFound(value),
+        DaoError::Conflict(value) => OrderError::Conflict(value),
+        DaoError::State(value) => OrderError::State(value),
+        DaoError::Failed(value) => OrderError::Dao(value),
     }
 }
 

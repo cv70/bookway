@@ -150,32 +150,32 @@ fn domain_error(error: crate::domain::MessageError) -> Status {
         crate::domain::MessageError::UnderReview => Status::failed_precondition(error.to_string()),
         crate::domain::MessageError::Restricted => Status::permission_denied(error.to_string()),
         crate::domain::MessageError::Audit(message) => Status::unavailable(message),
-        crate::domain::MessageError::Repository(crate::datasource::RepositoryError::NotFound(
+        crate::domain::MessageError::Dao(crate::datasource::DaoError::NotFound(
             _,
         )) => Status::not_found(error.to_string()),
-        crate::domain::MessageError::Repository(
-            crate::datasource::RepositoryError::NotParticipant,
+        crate::domain::MessageError::Dao(
+            crate::datasource::DaoError::NotParticipant,
         ) => Status::permission_denied(error.to_string()),
-        crate::domain::MessageError::Repository(
-            crate::datasource::RepositoryError::IdempotencyConflict,
+        crate::domain::MessageError::Dao(
+            crate::datasource::DaoError::IdempotencyConflict,
         ) => Status::already_exists(error.to_string()),
-        crate::domain::MessageError::Repository(
-            crate::datasource::RepositoryError::MessageNotFound(_)
-            | crate::datasource::RepositoryError::ReportNotFound(_),
+        crate::domain::MessageError::Dao(
+            crate::datasource::DaoError::MessageNotFound(_)
+            | crate::datasource::DaoError::ReportNotFound(_),
         ) => Status::not_found(error.to_string()),
-        crate::domain::MessageError::Repository(
-            crate::datasource::RepositoryError::NotMessageRecipient,
+        crate::domain::MessageError::Dao(
+            crate::datasource::DaoError::NotMessageRecipient,
         ) => Status::permission_denied(error.to_string()),
-        crate::domain::MessageError::Repository(
-            crate::datasource::RepositoryError::ReportIdempotencyConflict,
+        crate::domain::MessageError::Dao(
+            crate::datasource::DaoError::ReportIdempotencyConflict,
         ) => Status::already_exists(error.to_string()),
-        crate::domain::MessageError::Repository(
-            crate::datasource::RepositoryError::ReportConflict,
+        crate::domain::MessageError::Dao(
+            crate::datasource::DaoError::ReportConflict,
         ) => Status::aborted(error.to_string()),
-        crate::domain::MessageError::Repository(
-            crate::datasource::RepositoryError::SenderRestricted,
+        crate::domain::MessageError::Dao(
+            crate::datasource::DaoError::SenderRestricted,
         ) => Status::permission_denied(error.to_string()),
         crate::domain::MessageError::Upstream(message) => Status::unavailable(message),
-        crate::domain::MessageError::Repository(_) => Status::internal(error.to_string()),
+        crate::domain::MessageError::Dao(_) => Status::internal(error.to_string()),
     }
 }

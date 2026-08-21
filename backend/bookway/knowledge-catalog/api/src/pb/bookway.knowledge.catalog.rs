@@ -162,6 +162,12 @@ pub struct RetrieveRagContextRequest {
     pub question: ::prost::alloc::string::String,
     #[prost(uint32, optional, tag = "4")]
     pub limit: ::core::option::Option<u32>,
+    /// Optional embedding supplied by the trusted RAG orchestrator. When absent
+    /// the catalog keeps the deterministic lexical fallback below.
+    #[prost(string, tag = "5")]
+    pub embedding_model: ::prost::alloc::string::String,
+    #[prost(float, repeated, tag = "6")]
+    pub query_embedding: ::prost::alloc::vec::Vec<f32>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -182,6 +188,61 @@ pub struct RetrieveRagContextResponse {
     pub embedding_collections: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag = "3")]
     pub retrieval_mode: ::prost::alloc::string::String,
+}
+/// Vector writes are deliberately separate from resource metadata writes. The
+/// caller must identify an attached public node so vectors can never become a
+/// global, context-free knowledge index.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpsertRagEmbeddingRequest {
+    #[prost(string, tag = "1")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub attachment_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub embedding_model: ::prost::alloc::string::String,
+    #[prost(float, repeated, tag = "5")]
+    pub embedding: ::prost::alloc::vec::Vec<f32>,
+    #[prost(string, tag = "6")]
+    pub operator_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpsertRagEmbeddingResponse {
+    #[prost(bool, tag = "1")]
+    pub upserted: bool,
+    #[prost(string, tag = "2")]
+    pub embedding_collection: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchRagEmbeddingsRequest {
+    #[prost(string, tag = "1")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub embedding_model: ::prost::alloc::string::String,
+    #[prost(float, repeated, tag = "4")]
+    pub query_embedding: ::prost::alloc::vec::Vec<f32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub limit: ::core::option::Option<u32>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RagVectorHit {
+    #[prost(string, tag = "1")]
+    pub attachment_id: ::prost::alloc::string::String,
+    #[prost(double, tag = "2")]
+    pub relevance: f64,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchRagEmbeddingsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub hits: ::prost::alloc::vec::Vec<RagVectorHit>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -263,6 +324,7 @@ pub enum AttachmentKind {
     ToolChecklist = 4,
     AiActionGuide = 5,
     RagCorpus = 6,
+    ResourcePackage = 7,
 }
 impl AttachmentKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -278,6 +340,7 @@ impl AttachmentKind {
             Self::ToolChecklist => "ATTACHMENT_KIND_TOOL_CHECKLIST",
             Self::AiActionGuide => "ATTACHMENT_KIND_AI_ACTION_GUIDE",
             Self::RagCorpus => "ATTACHMENT_KIND_RAG_CORPUS",
+            Self::ResourcePackage => "ATTACHMENT_KIND_RESOURCE_PACKAGE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -290,6 +353,7 @@ impl AttachmentKind {
             "ATTACHMENT_KIND_TOOL_CHECKLIST" => Some(Self::ToolChecklist),
             "ATTACHMENT_KIND_AI_ACTION_GUIDE" => Some(Self::AiActionGuide),
             "ATTACHMENT_KIND_RAG_CORPUS" => Some(Self::RagCorpus),
+            "ATTACHMENT_KIND_RESOURCE_PACKAGE" => Some(Self::ResourcePackage),
             _ => None,
         }
     }
@@ -550,6 +614,64 @@ pub mod knowledge_catalog_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn upsert_rag_embedding(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpsertRagEmbeddingRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpsertRagEmbeddingResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.knowledge.catalog.KnowledgeCatalog/UpsertRagEmbedding",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "bookway.knowledge.catalog.KnowledgeCatalog",
+                        "UpsertRagEmbedding",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn search_rag_embeddings(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SearchRagEmbeddingsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SearchRagEmbeddingsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.knowledge.catalog.KnowledgeCatalog/SearchRagEmbeddings",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "bookway.knowledge.catalog.KnowledgeCatalog",
+                        "SearchRagEmbeddings",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -599,6 +721,20 @@ pub mod knowledge_catalog_server {
             request: tonic::Request<super::RetrieveRagContextRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RetrieveRagContextResponse>,
+            tonic::Status,
+        >;
+        async fn upsert_rag_embedding(
+            &self,
+            request: tonic::Request<super::UpsertRagEmbeddingRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpsertRagEmbeddingResponse>,
+            tonic::Status,
+        >;
+        async fn search_rag_embeddings(
+            &self,
+            request: tonic::Request<super::SearchRagEmbeddingsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SearchRagEmbeddingsResponse>,
             tonic::Status,
         >;
     }
@@ -948,6 +1084,104 @@ pub mod knowledge_catalog_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RetrieveRagContextSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.knowledge.catalog.KnowledgeCatalog/UpsertRagEmbedding" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpsertRagEmbeddingSvc<T: KnowledgeCatalog>(pub Arc<T>);
+                    impl<
+                        T: KnowledgeCatalog,
+                    > tonic::server::UnaryService<super::UpsertRagEmbeddingRequest>
+                    for UpsertRagEmbeddingSvc<T> {
+                        type Response = super::UpsertRagEmbeddingResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpsertRagEmbeddingRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KnowledgeCatalog>::upsert_rag_embedding(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpsertRagEmbeddingSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.knowledge.catalog.KnowledgeCatalog/SearchRagEmbeddings" => {
+                    #[allow(non_camel_case_types)]
+                    struct SearchRagEmbeddingsSvc<T: KnowledgeCatalog>(pub Arc<T>);
+                    impl<
+                        T: KnowledgeCatalog,
+                    > tonic::server::UnaryService<super::SearchRagEmbeddingsRequest>
+                    for SearchRagEmbeddingsSvc<T> {
+                        type Response = super::SearchRagEmbeddingsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SearchRagEmbeddingsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KnowledgeCatalog>::search_rag_embeddings(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SearchRagEmbeddingsSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

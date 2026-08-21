@@ -61,10 +61,10 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let (status, code) = match &self.0 {
             InteractionStatusError::Validation(_) => (StatusCode::BAD_REQUEST, "validation_error"),
-            InteractionStatusError::Repository(
-                crate::datasource::RepositoryError::CachePeerRefresh,
+            InteractionStatusError::Dao(
+                crate::datasource::DaoError::CachePeerRefresh,
             ) => (StatusCode::SERVICE_UNAVAILABLE, "context_cache_refreshing"),
-            InteractionStatusError::Repository(_) => {
+            InteractionStatusError::Dao(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
             }
         };

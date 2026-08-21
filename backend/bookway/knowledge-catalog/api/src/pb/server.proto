@@ -24,6 +24,7 @@ enum AttachmentKind {
   ATTACHMENT_KIND_TOOL_CHECKLIST = 4;
   ATTACHMENT_KIND_AI_ACTION_GUIDE = 5;
   ATTACHMENT_KIND_RAG_CORPUS = 6;
+  ATTACHMENT_KIND_RESOURCE_PACKAGE = 7;
 }
 
 message Resource {
@@ -115,6 +116,10 @@ message RetrieveRagContextRequest {
   string action_node_id = 2;
   string question = 3;
   optional uint32 limit = 4;
+  // Optional embedding supplied by the trusted RAG orchestrator. When absent
+  // the catalog keeps the deterministic lexical fallback below.
+  string embedding_model = 5;
+  repeated float query_embedding = 6;
 }
 
 message RagContext {
@@ -129,6 +134,34 @@ message RetrieveRagContextResponse {
   string retrieval_mode = 3;
 }
 
+// Vector writes are deliberately separate from resource metadata writes. The
+// caller must identify an attached public node so vectors can never become a
+// global, context-free knowledge index.
+message UpsertRagEmbeddingRequest {
+  string route_id = 1;
+  string action_node_id = 2;
+  string attachment_id = 3;
+  string embedding_model = 4;
+  repeated float embedding = 5;
+  string operator_id = 6;
+}
+message UpsertRagEmbeddingResponse {
+  bool upserted = 1;
+  string embedding_collection = 2;
+}
+message SearchRagEmbeddingsRequest {
+  string route_id = 1;
+  string action_node_id = 2;
+  string embedding_model = 3;
+  repeated float query_embedding = 4;
+  optional uint32 limit = 5;
+}
+message RagVectorHit {
+  string attachment_id = 1;
+  double relevance = 2;
+}
+message SearchRagEmbeddingsResponse { repeated RagVectorHit hits = 1; }
+
 service KnowledgeCatalog {
   rpc Search(SearchRequest) returns (SearchResponse);
   rpc Get(GetRequest) returns (Resource);
@@ -136,4 +169,6 @@ service KnowledgeCatalog {
   rpc AttachNodeResource(AttachNodeResourceRequest) returns (RouteNodeResourceAttachment);
   rpc DetachNodeResource(DetachNodeResourceRequest) returns (DetachNodeResourceResponse);
   rpc RetrieveRagContext(RetrieveRagContextRequest) returns (RetrieveRagContextResponse);
+  rpc UpsertRagEmbedding(UpsertRagEmbeddingRequest) returns (UpsertRagEmbeddingResponse);
+  rpc SearchRagEmbeddings(SearchRagEmbeddingsRequest) returns (SearchRagEmbeddingsResponse);
 }

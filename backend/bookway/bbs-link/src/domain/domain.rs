@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::{
     conf::Config,
     datasource::{
-        ContentRepository, MemoryContentRepository, PostgresContentRepository, RepositoryError,
+        ContentDao, MemoryContentDao, PostgresContentDao, DaoError,
     },
 };
 
@@ -18,7 +18,7 @@ pub(crate) enum ContentError {
     #[error("content belongs to another author")]
     Forbidden,
     #[error(transparent)]
-    Repository(#[from] RepositoryError),
+    Dao(#[from] DaoError),
     #[error("content audit unavailable: {0}")]
     Audit(String),
     #[error("media validation unavailable: {0}")]
@@ -28,7 +28,7 @@ pub(crate) enum ContentError {
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) repository: Arc<dyn ContentRepository>,
+    pub(crate) Dao: Arc<dyn ContentDao>,
     pub(crate) content_audit: Option<ContentAuditClient<tonic::transport::Channel>>,
     pub(crate) media: Option<MediaClient<tonic::transport::Channel>>,
 }
@@ -38,9 +38,9 @@ impl Domain {
         config: Config,
         media: Option<MediaClient<tonic::transport::Channel>>,
     ) -> Result<Self, bookway_data::DataError> {
-        let repository: Arc<dyn ContentRepository> = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryContentRepository::seeded()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresContentRepository::new(
+        let Dao: Arc<dyn ContentDao> = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryContentDao::seeded()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresContentDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
@@ -55,7 +55,7 @@ impl Domain {
         };
         Ok(Self {
             config,
-            repository,
+            Dao,
             content_audit,
             media,
         })
@@ -129,10 +129,10 @@ impl Domain {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_repository(config: Config, repository: Arc<dyn ContentRepository>) -> Self {
+    pub(crate) fn from_dao(config: Config, Dao: Arc<dyn ContentDao>) -> Self {
         Self {
             config,
-            repository,
+            Dao,
             content_audit: None,
             media: None,
         }

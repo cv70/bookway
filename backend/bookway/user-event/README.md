@@ -14,6 +14,8 @@
 
 `complete` 既可以描述普通客户端完成反馈，也可以由 Gateway 在 Growth 已持久化采用路线行动后以固定 UUID 写入。后者的 `content_id` 是公共路线而不是私有 Action ID，能安全参与“发现 → 加入 → 执行”的推荐特征；没有来源路线的私人行动不会生成该服务端信号。
 
+`gateway-*` 来源保留给 Gateway 的服务端动作事件。公开 Gateway 事件入口会拒绝客户端携带这些来源，避免伪造路线加入或完成信号污染特征；内部 gRPC 调用仍由服务令牌保护。
+
 ## 环境变量
 
 `USER_EVENT_ADDR` 和 `USER_EVENT_GRPC_ADDR`，默认分别监听 `127.0.0.1:8089`、`127.0.0.1:18089`。`RECOMMEND_MAIN_GRPC_URL` 默认 `http://127.0.0.1:8083`，用于内部归因核验；在 `SERVICE_AUTH_REQUIRED=true` 下会携带服务令牌。
@@ -22,4 +24,4 @@
 
 ## 数据与生产化
 
-默认内存 Repository 用于无依赖联调；`STORAGE_MODE=postgres` 时，事件以 `event_id` 幂等写入 PostgreSQL，并在同一事务写入 Outbox。`bookway-outbox-relay` 使用 `FOR UPDATE SKIP LOCKED` 认领事件，发布到 Kafka/Redpanda，失败指数退避，10 次后进入 `dead`。`feature-snapshot` Job 从这条已验证事件链生成带版本、窗口、TTL 和血缘的用户特征快照；后续补齐 Schema 管理、按用户分区的幂等消费者、ClickHouse/湖仓、死信重放、过载保护、采样与脱敏策略。
+默认内存 Dao 用于无依赖联调；`STORAGE_MODE=postgres` 时，事件以 `event_id` 幂等写入 PostgreSQL，并在同一事务写入 Outbox。`bookway-outbox-relay` 使用 `FOR UPDATE SKIP LOCKED` 认领事件，发布到 Kafka/Redpanda，失败指数退避，10 次后进入 `dead`。`feature-snapshot` Job 从这条已验证事件链生成带版本、窗口、TTL 和血缘的用户特征快照；后续补齐 Schema 管理、按用户分区的幂等消费者、ClickHouse/湖仓、死信重放、过载保护、采样与脱敏策略。

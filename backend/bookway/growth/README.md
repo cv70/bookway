@@ -40,4 +40,4 @@ Journey 通过 `journey_type` 区分 `habit`、`project`、`quantity`、`travel`
 
 ## 生产化待办
 
-`STORAGE_MODE=postgres` 已提供 SQLx/PostgreSQL Repository、用户归属条件、来源路线唯一约束、参与意图事务写入、行动精确安排、提醒窗口、静默时段、去重提醒命令、Provider 投递 Worker 和记录到行记的可恢复发布任务。客户端以 `Idempotency-Key` 创建行动时，同一用户、同一键和同一动作内容会返回已有行动；键被复用于不同内容则拒绝，避免弱网重试或重复点击生成第二条待办。下一阶段补齐设备 endpoint 静态加密、Provider 回执明细、客户端设备令牌注册和增量同步版本。
+`STORAGE_MODE=postgres` 已提供 SQLx/PostgreSQL Dao、用户归属条件、来源路线唯一约束、参与意图事务写入、行动精确安排、提醒窗口、静默时段、去重提醒命令、Provider 投递 Worker 和记录到行记的可恢复发布任务。客户端以 `Idempotency-Key` 创建行动时，同一用户、同一键和同一动作内容会返回已有行动；键被复用于不同内容则拒绝，避免弱网重试或重复点击生成第二条待办。下一阶段补齐设备 endpoint 静态加密、Provider 回执明细、客户端设备令牌注册和增量同步版本。

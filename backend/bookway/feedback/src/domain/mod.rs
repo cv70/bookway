@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     conf::Config,
-    datasource::{FeedbackRepository, RepositoryError},
+    datasource::{FeedbackDao, DaoError},
 };
 
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -21,13 +21,13 @@ pub(crate) enum FeedbackError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Repository(#[from] RepositoryError),
+    Dao(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub struct Domain {
     config: Config,
-    repository: Arc<FeedbackRepository>,
+    Dao: Arc<FeedbackDao>,
 }
 
 impl Domain {
@@ -38,7 +38,7 @@ impl Domain {
         };
         Ok(Self {
             config,
-            repository: Arc::new(FeedbackRepository::new(pool)),
+            Dao: Arc::new(FeedbackDao::new(pool)),
         })
     }
 
@@ -68,7 +68,7 @@ impl Domain {
             updated_at: timestamp,
         };
         let stored = self
-            .repository
+            .Dao
             .create(feedback.clone(), idempotency_key)
             .await?;
         if stored.user_id != feedback.user_id
@@ -90,7 +90,7 @@ impl Domain {
         request: pb::ListOwnFeedbackRequest,
     ) -> Result<pb::FeedbackList, FeedbackError> {
         validate_user_id(&request.user_id)?;
-        self.repository
+        self.Dao
             .list(
                 Some(request.user_id.trim()),
                 parse_status(request.status)?,
@@ -105,7 +105,7 @@ impl Domain {
         &self,
         request: pb::ListFeedbackRequest,
     ) -> Result<pb::FeedbackList, FeedbackError> {
-        self.repository
+        self.Dao
             .list(
                 None,
                 parse_status(request.status)?,
@@ -132,7 +132,7 @@ impl Domain {
                 "resolution exceeds {MAX_RESOLUTION_LENGTH} characters"
             )));
         }
-        self.repository
+        self.Dao
             .review(
                 request.feedback_id.trim(),
                 required_status(request.status)?,
@@ -249,7 +249,7 @@ mod tests {
                     .parse::<SocketAddr>()
                     .expect("valid socket address"),
             },
-            repository: Arc::new(FeedbackRepository::new(None)),
+            Dao: Arc::new(FeedbackDao::new(None)),
         }
     }
 

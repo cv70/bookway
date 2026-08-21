@@ -2,7 +2,7 @@ use crate::api::pb;
 use crate::{
     Config,
     datasource::{
-        CatalogRepository, MemoryCatalogRepository, PostgresCatalogRepository, RepositoryError,
+        CatalogDao, MemoryCatalogDao, PostgresCatalogDao, DaoError,
     },
 };
 use bookway_bbs_link_api::pb::{self as bbs_link, bbs_link_client::BbsLinkClient};
@@ -17,26 +17,26 @@ pub(crate) enum MallError {
     #[error("catalog conflict: {0}")]
     Conflict(String),
     #[error("catalog operation failed: {0}")]
-    Repository(String),
+    Dao(String),
 }
 #[derive(Clone)]
 pub struct Domain {
     config: Config,
-    repository: Arc<dyn CatalogRepository>,
+    Dao: Arc<dyn CatalogDao>,
     bbs_link: BbsLinkClient<tonic::transport::Channel>,
 }
 impl Domain {
     pub async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let repository: Arc<dyn CatalogRepository> = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryCatalogRepository::default()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresCatalogRepository::new(
+        let Dao: Arc<dyn CatalogDao> = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryCatalogDao::default()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresCatalogDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
         let bbs_link = BbsLinkClient::connect(config.bbs_link_url.clone()).await?;
         Ok(Self {
             config,
-            repository,
+            Dao,
             bbs_link,
         })
     }
@@ -48,7 +48,7 @@ impl Domain {
         request: pb::CreateProductRequest,
     ) -> Result<pb::MallProduct, MallError> {
         validate(&request)?;
-        self.repository.create(request).await.map_err(repo_error)
+        self.Dao.create(request).await.map_err(repo_error)
     }
     pub(crate) async fn update_product(
         &self,
@@ -58,13 +58,13 @@ impl Domain {
             return Err(MallError::Validation("product id is required".to_string()));
         }
         validate_update(&request)?;
-        self.repository.update(request).await.map_err(repo_error)
+        self.Dao.update(request).await.map_err(repo_error)
     }
     pub(crate) async fn products(
         &self,
         request: pb::ProductQueryRequest,
     ) -> Result<pb::ProductPage, MallError> {
-        self.repository.list(request).await.map_err(repo_error)
+        self.Dao.list(request).await.map_err(repo_error)
     }
     pub(crate) async fn product(
         &self,
@@ -73,7 +73,7 @@ impl Domain {
         if request.id.trim().is_empty() {
             return Err(MallError::Validation("product id is required".to_string()));
         }
-        self.repository.get(&request.id).await.map_err(repo_error)
+        self.Dao.get(&request.id).await.map_err(repo_error)
     }
     pub(crate) async fn skus(
         &self,
@@ -86,7 +86,7 @@ impl Domain {
         }
         Ok(pb::SkuListResponse {
             items: self
-                .repository
+                .Dao
                 .skus(request.ids)
                 .await
                 .map_err(repo_error)?,
@@ -124,14 +124,14 @@ impl Domain {
         )
         .await?;
         let skus = self
-            .repository
+            .Dao
             .skus(vec![request.sku_id.clone()])
             .await
             .map_err(repo_error)?;
         if skus.len() != 1 || skus[0].product_id != request.product_id {
             return Err(MallError::NotFound(request.sku_id));
         }
-        self.repository
+        self.Dao
             .attach_node_offer(request)
             .await
             .map_err(repo_error)
@@ -150,7 +150,7 @@ impl Domain {
             .await?;
         Ok(pb::NodeOfferList {
             items: self
-                .repository
+                .Dao
                 .node_offers(request)
                 .await
                 .map_err(repo_error)?,
@@ -167,7 +167,7 @@ impl Domain {
             ));
         }
         let offer = self
-            .repository
+            .Dao
             .node_offer(&request.id)
             .await
             .map_err(repo_error)?;
@@ -184,12 +184,12 @@ impl Domain {
         // The route association can remain addressable for historical
         // settlement, but checkout must resolve a currently saleable SKU.
         let product = self
-            .repository
+            .Dao
             .get(&offer.product_id)
             .await
             .map_err(repo_error)?;
         let skus = self
-            .repository
+            .Dao
             .skus(vec![offer.sku_id.clone()])
             .await
             .map_err(repo_error)?;
@@ -213,7 +213,7 @@ impl Domain {
         }
         // Historical attribution and affiliate settlement deliberately retain
         // the original context after a merchant withdraws an offer.
-        self.repository
+        self.Dao
             .node_offer(&request.id)
             .await
             .map_err(repo_error)
@@ -232,12 +232,12 @@ impl Domain {
                 bookway_runtime::grpc_service_request(bbs_link::IdRequest {
                     id: route_id.to_string(),
                 })
-                .map_err(|error| MallError::Repository(error.to_string()))?,
+                .map_err(|error| MallError::Dao(error.to_string()))?,
             )
             .await
             .map_err(|error| match error.code() {
                 tonic::Code::NotFound => MallError::NotFound(route_id.to_string()),
-                _ => MallError::Repository(format!("bbs-link get_public failed: {error}")),
+                _ => MallError::Dao(format!("bbs-link get_public failed: {error}")),
             })?
             .into_inner();
         validate_route_action_node(
@@ -368,11 +368,11 @@ fn validate_update(request: &pb::UpdateProductRequest) -> Result<(), MallError> 
     }
     Ok(())
 }
-fn repo_error(error: RepositoryError) -> MallError {
+fn repo_error(error: DaoError) -> MallError {
     match error {
-        RepositoryError::NotFound(value) => MallError::NotFound(value),
-        RepositoryError::Conflict(value) => MallError::Conflict(value),
-        RepositoryError::Failed(value) => MallError::Repository(value),
+        DaoError::NotFound(value) => MallError::NotFound(value),
+        DaoError::Conflict(value) => MallError::Conflict(value),
+        DaoError::Failed(value) => MallError::Dao(value),
     }
 }
 

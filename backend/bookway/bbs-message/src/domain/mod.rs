@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::{
     conf::Config,
     datasource::{
-        MemoryMessageRepository, MessageRepository, PostgresMessageRepository, RepositoryError,
+        MemoryMessageDao, MessageDao, PostgresMessageDao, DaoError,
     },
 };
 
@@ -32,13 +32,13 @@ pub(crate) enum MessageError {
     #[error("upstream social dependency failed: {0}")]
     Upstream(String),
     #[error(transparent)]
-    Repository(#[from] RepositoryError),
+    Dao(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) repository: Arc<dyn MessageRepository>,
+    pub(crate) Dao: Arc<dyn MessageDao>,
     pub(crate) bbs: BbsClient<tonic::transport::Channel>,
     pub(crate) content_audit: Option<ContentAuditClient<tonic::transport::Channel>>,
 }
@@ -46,9 +46,9 @@ pub(crate) struct Domain {
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let storage_mode = bookway_data::storage_mode()?;
-        let repository: Arc<dyn MessageRepository> = match storage_mode {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryMessageRepository::default()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresMessageRepository::new(
+        let Dao: Arc<dyn MessageDao> = match storage_mode {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryMessageDao::default()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresMessageDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
@@ -67,7 +67,7 @@ impl Domain {
             bbs: BbsClient::connect(config.bbs_grpc_url.clone()).await?,
             content_audit,
             config,
-            repository,
+            Dao,
         })
     }
 

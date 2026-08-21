@@ -125,7 +125,7 @@ backend/
 └── rust-toolchain.toml
 ```
 
-每一个微服务的 `README.md` 与该服务的 `Cargo.toml` 同级。服务内部统一由 `Domain` 持有配置、Repository、客户端和业务对象；`api/http.rs` 只承载外部 HTTP，`api/grpc.rs` 只承载内部 gRPC，服务启动入口由 `api` 暴露给 `main`：
+每一个微服务的 `README.md` 与该服务的 `Cargo.toml` 同级。服务内部统一由 `Domain` 持有配置、Dao、客户端和业务对象；`api/http.rs` 只承载外部 HTTP，`api/grpc.rs` 只承载内部 gRPC，服务启动入口由 `api` 暴露给 `main`：
 
 ```text
 main -> Domain -> api/http.rs or api/grpc.rs
@@ -350,7 +350,7 @@ cargo run -p bookway-gateway
 
 ## 已实现的生产能力
 
-- SQLx 连接池和按服务所有权拆分的 PostgreSQL Repository，写路径使用事务与幂等键。
+- SQLx 连接池和按服务所有权拆分的 PostgreSQL Dao，写路径使用事务与幂等键。
 - Redis 全局限流和特征缓存；Redis 故障 fail-open 并记录告警。
 - BBS 关系/可见性上下文 Redis 缓存、跨实例刷新租约、写后版本失效和安全 fail-closed 回退。
 - Transactional Outbox、Kafka/Redpanda Relay、`SKIP LOCKED`、退避和死信状态。

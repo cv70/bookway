@@ -1064,9 +1064,10 @@ impl AttachRouteNodeResourceRequest {
             "tool_checklist" => catalog_pb::AttachmentKind::ToolChecklist,
             "ai_action_guide" => catalog_pb::AttachmentKind::AiActionGuide,
             "rag_corpus" => catalog_pb::AttachmentKind::RagCorpus,
+            "resource_package" => catalog_pb::AttachmentKind::ResourcePackage,
             _ => {
                 return Err(
-                    "kind must be document, pdf, external_link, tool_checklist, ai_action_guide or rag_corpus"
+                    "kind must be document, pdf, external_link, tool_checklist, ai_action_guide, resource_package or rag_corpus"
                         .to_string(),
                 );
             }
@@ -1120,6 +1121,7 @@ impl TryFrom<catalog_pb::RouteNodeResourceAttachment> for RouteNodeResourceAttac
             Some(catalog_pb::AttachmentKind::ToolChecklist) => "tool_checklist",
             Some(catalog_pb::AttachmentKind::AiActionGuide) => "ai_action_guide",
             Some(catalog_pb::AttachmentKind::RagCorpus) => "rag_corpus",
+            Some(catalog_pb::AttachmentKind::ResourcePackage) => "resource_package",
             _ => {
                 return Err(format!(
                     "catalog returned unknown attachment kind {}",
@@ -1176,6 +1178,72 @@ impl From<catalog_pb::DetachNodeResourceResponse> for DetachRouteNodeResourceRes
         Self {
             detached: value.detached,
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RouteNodeRagContextRequest {
+    pub(crate) question: String,
+    pub(crate) limit: Option<u32>,
+}
+
+impl RouteNodeRagContextRequest {
+    pub(crate) fn into_pb(
+        self,
+        route_id: String,
+        action_node_id: String,
+    ) -> catalog_pb::RetrieveRagContextRequest {
+        catalog_pb::RetrieveRagContextRequest {
+            route_id,
+            action_node_id,
+            question: self.question,
+            limit: self.limit,
+            embedding_model: String::new(),
+            query_embedding: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct RouteNodeRagContext {
+    attachment: Option<RouteNodeResourceAttachment>,
+    excerpt: String,
+    relevance: f64,
+}
+
+impl TryFrom<catalog_pb::RagContext> for RouteNodeRagContext {
+    type Error = String;
+
+    fn try_from(value: catalog_pb::RagContext) -> Result<Self, Self::Error> {
+        Ok(Self {
+            attachment: value.attachment.map(TryInto::try_into).transpose()?,
+            excerpt: value.excerpt,
+            relevance: value.relevance,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct RouteNodeRagContextResponse {
+    contexts: Vec<RouteNodeRagContext>,
+    embedding_collections: Vec<String>,
+    retrieval_mode: String,
+}
+
+impl TryFrom<catalog_pb::RetrieveRagContextResponse> for RouteNodeRagContextResponse {
+    type Error = String;
+
+    fn try_from(value: catalog_pb::RetrieveRagContextResponse) -> Result<Self, Self::Error> {
+        Ok(Self {
+            contexts: value
+                .contexts
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            embedding_collections: value.embedding_collections,
+            retrieval_mode: value.retrieval_mode,
+        })
     }
 }
 
@@ -3938,6 +4006,10 @@ impl From<ClientEvent> for user_event_pb::Event {
     }
 }
 
+fn is_reserved_server_source(source: &str) -> bool {
+    source.trim().starts_with("gateway-")
+}
+
 // Payments are authoritative server-side facts.  Keeping them out of this
 // public request schema prevents a client from training recommendations with
 // a fabricated purchase conversion.
@@ -3985,11 +4057,18 @@ pub(crate) struct IngestEventsRequest {
 }
 
 impl IngestEventsRequest {
-    pub(crate) fn into_pb(self, user_id: String) -> user_event_pb::IngestRequest {
-        user_event_pb::IngestRequest {
+    pub(crate) fn into_pb(self, user_id: String) -> Result<user_event_pb::IngestRequest, String> {
+        if self
+            .events
+            .iter()
+            .any(|event| is_reserved_server_source(&event.source))
+        {
+            return Err("gateway-* event sources are reserved for server actions".to_string());
+        }
+        Ok(user_event_pb::IngestRequest {
             user_id,
             events: self.events.into_iter().map(Into::into).collect(),
-        }
+        })
     }
 }
 
@@ -4768,9 +4847,9 @@ mod tests {
         GrowthDomain, IngestEventsRequest, KnowledgeResource, ModerationCommentQuery,
         NotificationPage, OwnCommentAppealQuery, PublicResource, Reaction, ResourceSearchQuery,
         ReviewCommentReportRequest, ReviewCommentRequest, ReviewDirectMessageReportRequest,
-        RouteNodeResourceAttachment, RouteParticipationRequest, RouteTemplate, RouteTemplateKind,
-        SaveWeeklyReviewRequest, SearchQuery, SetReactionRequest, SetRelationshipRequest,
-        StartKnowledgeJourneyRequest, UpdateAccountProfileRequest,
+        RouteNodeRagContextRequest, RouteNodeResourceAttachment, RouteParticipationRequest,
+        RouteTemplate, RouteTemplateKind, SaveWeeklyReviewRequest, SearchQuery, SetReactionRequest,
+        SetRelationshipRequest, StartKnowledgeJourneyRequest, UpdateAccountProfileRequest,
         UpdateReminderPreferencesRequest,
     };
     use bookway_bbs_link_api::pb as bbs_link_pb;
@@ -5452,7 +5531,9 @@ mod tests {
             }]
         }))
         .expect("mobile event JSON should deserialize");
-        let events = events.into_pb("user-1".to_string());
+        let events = events
+            .into_pb("user-1".to_string())
+            .expect("client event request should convert");
         assert_eq!(events.user_id, "user-1");
         assert_eq!(
             events.events[0].attribution_source,
@@ -5462,6 +5543,20 @@ mod tests {
             events.events[0].negative_feedback_reason,
             Some(bookway_user_event_api::pb::NegativeFeedbackReason::AlreadySeen as i32)
         );
+
+        let reserved_source = serde_json::from_value::<IngestEventsRequest>(serde_json::json!({
+            "events": [{
+                "event_id": "event-reserved-source",
+                "event_type": "complete",
+                "session_id": "session-1",
+                "component_id": "route-action",
+                "content_id": "route-1",
+                "occurred_at": "2026-08-16T00:00:00Z",
+                "source": " gateway-route-completion "
+            }]
+        }))
+        .expect("reserved-source payload should deserialize");
+        assert!(reserved_source.into_pb("user-1".to_string()).is_err());
 
         let fabricated_purchase =
             serde_json::from_value::<IngestEventsRequest>(serde_json::json!({
@@ -5700,6 +5795,22 @@ mod tests {
     }
 
     #[test]
+    fn rag_context_request_forces_server_side_lexical_boundary() {
+        let request: RouteNodeRagContextRequest = serde_json::from_value(serde_json::json!({
+            "question": "如何开始这一步？",
+            "limit": 4
+        }))
+        .expect("RAG question JSON should deserialize");
+        let request = request.into_pb("route-1".to_string(), "node-1".to_string());
+        assert_eq!(request.route_id, "route-1");
+        assert_eq!(request.action_node_id, "node-1");
+        assert_eq!(request.question, "如何开始这一步？");
+        assert_eq!(request.limit, Some(4));
+        assert!(request.embedding_model.is_empty());
+        assert!(request.query_embedding.is_empty());
+    }
+
+    #[test]
     fn route_node_resource_attach_uses_gateway_identity_and_idempotency_header() {
         let request: AttachRouteNodeResourceRequest = serde_json::from_value(serde_json::json!({
             "resource_id": "resource-mdn-web",
@@ -5727,6 +5838,27 @@ mod tests {
             catalog_pb::AttachmentKind::AiActionGuide as i32
         );
         assert!(request.rag_enabled);
+    }
+
+    #[test]
+    fn route_node_resource_attach_accepts_a_typed_resource_package() {
+        let request: AttachRouteNodeResourceRequest = serde_json::from_value(serde_json::json!({
+            "resource_id": "resource-ocw-learning",
+            "kind": "resource_package"
+        }))
+        .expect("resource package JSON should deserialize");
+        let request = request
+            .into_pb(
+                "route-1".to_string(),
+                "node-1".to_string(),
+                "creator-1".to_string(),
+                Some("resource-package-key-1".to_string()),
+            )
+            .expect("resource package should map to the catalog contract");
+        assert_eq!(
+            request.kind,
+            catalog_pb::AttachmentKind::ResourcePackage as i32
+        );
     }
 
     #[test]

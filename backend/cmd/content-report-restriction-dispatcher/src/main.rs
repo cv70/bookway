@@ -48,7 +48,7 @@ enum ConfigError {
 }
 
 #[async_trait]
-trait JobRepository: Send + Sync {
+trait JobDao: Send + Sync {
     async fn claim(&self) -> Result<Vec<RestrictionJob>, sqlx::Error>;
     async fn mark_delivered(&self, job: &RestrictionJob) -> Result<(), sqlx::Error>;
     async fn mark_failed(&self, job: &RestrictionJob, error: &str) -> Result<(), sqlx::Error>;
@@ -59,13 +59,13 @@ trait RestrictionTarget: Send + Sync {
     async fn restrict(&self, job: &RestrictionJob) -> Result<DeliveryDisposition, TargetError>;
 }
 
-struct PostgresJobRepository {
+struct PostgresJobDao {
     pool: PgPool,
     batch_size: i64,
     lease_seconds: i32,
 }
 
-impl PostgresJobRepository {
+impl PostgresJobDao {
     fn new(pool: PgPool, batch_size: i64, lease_seconds: i32) -> Self {
         Self {
             pool,
@@ -76,7 +76,7 @@ impl PostgresJobRepository {
 }
 
 #[async_trait]
-impl JobRepository for PostgresJobRepository {
+impl JobDao for PostgresJobDao {
     async fn claim(&self) -> Result<Vec<RestrictionJob>, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let rows = sqlx::query_as::<_, (String, String)>(
@@ -184,7 +184,7 @@ impl RestrictionTarget for GrpcRestrictionTarget {
 }
 
 struct Dispatcher<R, T> {
-    repository: Arc<R>,
+    Dao: Arc<R>,
     target: Arc<T>,
     concurrency: usize,
     request_timeout: Duration,
@@ -192,17 +192,17 @@ struct Dispatcher<R, T> {
 
 impl<R, T> Dispatcher<R, T>
 where
-    R: JobRepository + 'static,
+    R: JobDao + 'static,
     T: RestrictionTarget + 'static,
 {
     fn new(
-        repository: Arc<R>,
+        Dao: Arc<R>,
         target: Arc<T>,
         concurrency: usize,
         request_timeout: Duration,
     ) -> Self {
         Self {
-            repository,
+            Dao,
             target,
             concurrency,
             request_timeout,
@@ -210,7 +210,7 @@ where
     }
 
     async fn run_once(&self) -> Result<usize, DispatcherError> {
-        let jobs = self.repository.claim().await?;
+        let jobs = self.Dao.claim().await?;
         let count = jobs.len();
         let results = stream::iter(jobs)
             .map(|job| self.dispatch(job))
@@ -227,11 +227,11 @@ where
         let delivery = tokio::time::timeout(self.request_timeout, self.target.restrict(&job)).await;
         match delivery {
             Ok(Ok(DeliveryDisposition::Restricted)) => {
-                self.repository.mark_delivered(&job).await?;
+                self.Dao.mark_delivered(&job).await?;
                 tracing::debug!(report_id = %job.report_id, "content restriction delivered");
             }
             Ok(Ok(DeliveryDisposition::Deferred)) => {
-                self.repository
+                self.Dao
                     .mark_failed(
                         &job,
                         "waiting for public content read to become unavailable",
@@ -240,14 +240,14 @@ where
                 tracing::debug!(report_id = %job.report_id, "content restriction deferred");
             }
             Ok(Err(error)) => {
-                self.repository
+                self.Dao
                     .mark_failed(&job, &error.to_string())
                     .await?;
                 tracing::warn!(report_id = %job.report_id, error = %error, "content restriction failed");
             }
             Err(_) => {
                 let error = TargetError::Timeout(self.request_timeout.as_millis() as u64);
-                self.repository
+                self.Dao
                     .mark_failed(&job, &error.to_string())
                     .await?;
                 tracing::warn!(report_id = %job.report_id, error = %error, "content restriction timed out");
@@ -311,7 +311,7 @@ where
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("content-report-restriction-dispatcher");
     let config = Config::from_env()?;
-    let repository = Arc::new(PostgresJobRepository::new(
+    let Dao = Arc::new(PostgresJobDao::new(
         bookway_data::postgres_pool().await?,
         config.batch_size,
         config.lease_seconds,
@@ -320,7 +320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         GrpcRestrictionTarget::connect(config.bbs_link_url, config.service_auth_token).await?,
     );
     let dispatcher = Dispatcher::new(
-        repository,
+        Dao,
         target,
         config.concurrency,
         config.request_timeout,
@@ -344,14 +344,14 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct MemoryRepository {
+    struct MemoryDao {
         pending: Mutex<Vec<RestrictionJob>>,
         delivered: Mutex<Vec<String>>,
         failed: Mutex<Vec<(String, String)>>,
     }
 
     #[async_trait]
-    impl JobRepository for MemoryRepository {
+    impl JobDao for MemoryDao {
         async fn claim(&self) -> Result<Vec<RestrictionJob>, sqlx::Error> {
             Ok(std::mem::take(
                 &mut *self.pending.lock().expect("pending lock"),
@@ -400,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn confirmed_restrictions_are_acknowledged() {
-        let repository = Arc::new(MemoryRepository {
+        let Dao = Arc::new(MemoryDao {
             pending: Mutex::new(vec![job()]),
             ..Default::default()
         });
@@ -409,7 +409,7 @@ mod tests {
             received: Mutex::new(Vec::new()),
         });
         let dispatcher = Dispatcher::new(
-            Arc::clone(&repository),
+            Arc::clone(&Dao),
             Arc::clone(&target),
             1,
             Duration::from_secs(1),
@@ -417,20 +417,20 @@ mod tests {
 
         assert_eq!(dispatcher.run_once().await.expect("dispatch"), 1);
         assert_eq!(
-            repository
+            Dao
                 .delivered
                 .lock()
                 .expect("delivered lock")
                 .as_slice(),
             ["report-1"]
         );
-        assert!(repository.failed.lock().expect("failed lock").is_empty());
+        assert!(Dao.failed.lock().expect("failed lock").is_empty());
         assert_eq!(target.received.lock().expect("received lock").len(), 1);
     }
 
     #[tokio::test]
     async fn unconfirmed_restrictions_remain_retryable() {
-        let repository = Arc::new(MemoryRepository {
+        let Dao = Arc::new(MemoryDao {
             pending: Mutex::new(vec![job()]),
             ..Default::default()
         });
@@ -438,17 +438,17 @@ mod tests {
             disposition: DeliveryDisposition::Deferred,
             received: Mutex::new(Vec::new()),
         });
-        let dispatcher = Dispatcher::new(repository.clone(), target, 1, Duration::from_secs(1));
+        let dispatcher = Dispatcher::new(Dao.clone(), target, 1, Duration::from_secs(1));
 
         assert_eq!(dispatcher.run_once().await.expect("dispatch"), 1);
         assert!(
-            repository
+            Dao
                 .delivered
                 .lock()
                 .expect("delivered lock")
                 .is_empty()
         );
-        assert_eq!(repository.failed.lock().expect("failed lock").len(), 1);
+        assert_eq!(Dao.failed.lock().expect("failed lock").len(), 1);
     }
 
     #[test]

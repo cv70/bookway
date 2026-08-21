@@ -31,7 +31,7 @@ impl Domain {
             ));
         }
         Ok(self
-            .repository
+            .Dao
             .get(
                 request.post_id.trim(),
                 request.comment_id.trim(),
@@ -61,7 +61,7 @@ impl Domain {
             .clamp(1, MAX_PAGE_SIZE as u32) as usize;
         let excluded_author_ids = normalized_excluded_author_ids(request.excluded_author_ids);
         let mut items = self
-            .repository
+            .Dao
             .list(
                 &request.post_id,
                 cursor.as_ref(),
@@ -111,7 +111,7 @@ impl Domain {
         }
         let excluded_author_ids = normalized_excluded_author_ids(request.excluded_author_ids);
         let mut result = self
-            .repository
+            .Dao
             .create(CreateCommentInput {
                 user_id: &request.user_id,
                 post_id: &request.post_id,
@@ -123,7 +123,7 @@ impl Domain {
             })
             .await?;
         let comment = result.comment.as_mut().ok_or_else(|| {
-            CommentError::Repository(crate::datasource::RepositoryError::InvalidReplyHierarchy)
+            CommentError::Dao(crate::datasource::DaoError::InvalidReplyHierarchy)
         })?;
         if comment.status != pb::CommentStatus::Reviewing as i32 {
             return Ok(result);
@@ -149,7 +149,7 @@ impl Domain {
         }
         let comment_id = comment.id.clone();
         result.comment = Some(
-            self.repository
+            self.Dao
                 .set_moderation_status(&comment_id, status)
                 .await?,
         );
@@ -173,7 +173,7 @@ impl Domain {
             .unwrap_or(DEFAULT_MODERATION_PAGE_SIZE as u32)
             .clamp(1, MAX_MODERATION_PAGE_SIZE as u32) as usize;
         let mut items = self
-            .repository
+            .Dao
             .list_moderation(cursor.as_ref(), limit + 1)
             .await?;
         let has_more = items.len() > limit;
@@ -205,7 +205,7 @@ impl Domain {
             }
         };
         Ok(self
-            .repository
+            .Dao
             .review(comment_id, reviewer_id, status)
             .await?)
     }
@@ -228,7 +228,7 @@ impl Domain {
             request.idempotency_key,
             "Idempotency-Key 是举报评论所必需的有效标识",
         )?;
-        self.repository
+        self.Dao
             .create_report(CreateCommentReportInput {
                 id: uuid::Uuid::now_v7().to_string(),
                 reporter_id: request.reporter_id.trim().to_string(),
@@ -252,7 +252,7 @@ impl Domain {
         let cursor = decode_cursor(request.cursor, "评论举报游标无效")?;
         let limit = moderation_page_size(request.limit);
         let mut items = self
-            .repository
+            .Dao
             .list_reports(status.map(|value| value as i32), cursor.as_ref(), limit + 1)
             .await?;
         let has_more = items.len() > limit;
@@ -283,7 +283,7 @@ impl Domain {
             ));
         }
         validate_report_review_transition(status, action, &request.resolution)?;
-        self.repository
+        self.Dao
             .review_report(
                 request.report_id.trim(),
                 ReviewCommentReportInput {
@@ -313,7 +313,7 @@ impl Domain {
             request.idempotency_key,
             "Idempotency-Key 是评论申诉所必需的有效标识",
         )?;
-        self.repository
+        self.Dao
             .create_appeal(CreateCommentAppealInput {
                 id: uuid::Uuid::now_v7().to_string(),
                 author_id: request.author_id.trim().to_string(),
@@ -342,7 +342,7 @@ impl Domain {
         let cursor = decode_cursor(request.cursor, "评论申诉游标无效")?;
         let limit = moderation_page_size(request.limit);
         let mut items = self
-            .repository
+            .Dao
             .list_appeals(
                 author_id,
                 status.map(|value| value as i32),
@@ -378,7 +378,7 @@ impl Domain {
             ));
         }
         validate_appeal_review_transition(status, action, &request.resolution)?;
-        self.repository
+        self.Dao
             .review_appeal(
                 request.appeal_id.trim(),
                 ReviewCommentAppealInput {
@@ -396,7 +396,7 @@ impl Domain {
         if request.comment_id.trim().is_empty() {
             return Err(CommentError::Validation("评论 ID 不能为空".to_string()));
         }
-        self.repository
+        self.Dao
             .delete(&request.user_id, &request.post_id, &request.comment_id)
             .await?;
         Ok(())
@@ -577,7 +577,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{conf::Config, datasource::MemoryCommentRepository};
+    use crate::{conf::Config, datasource::MemoryCommentDao};
 
     fn domain() -> Domain {
         Domain {
@@ -586,14 +586,14 @@ mod tests {
                 grpc_addr: "127.0.0.1:0".parse().expect("valid gRPC address"),
                 content_audit_grpc_url: None,
             },
-            repository: Arc::new(MemoryCommentRepository::default()),
+            Dao: Arc::new(MemoryCommentDao::default()),
             content_audit: None,
         }
     }
 
     async fn pending_comment(domain: &Domain, comment_idempotency_key: &str) -> pb::CommentItem {
         domain
-            .repository
+            .Dao
             .create(CreateCommentInput {
                 user_id: "reader-a",
                 post_id: "post-a",
@@ -680,13 +680,13 @@ mod tests {
             .await;
         assert!(matches!(
             conflicting,
-            Err(CommentError::Repository(
-                crate::datasource::RepositoryError::ModerationConflict
+            Err(CommentError::Dao(
+                crate::datasource::DaoError::ModerationConflict
             ))
         ));
 
         let automatic = domain
-            .repository
+            .Dao
             .set_moderation_status(&pending.id, pb::CommentStatus::Published as i32)
             .await
             .expect("late automatic audit leaves manual decision intact");

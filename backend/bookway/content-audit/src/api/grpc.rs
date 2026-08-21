@@ -135,24 +135,24 @@ fn require_moderation_access<T>(request: &Request<T>) -> Result<(), Status> {
 fn audit_status(error: AuditError) -> Status {
     match error {
         AuditError::Validation(message) => Status::invalid_argument(message),
-        AuditError::Repository(crate::datasource::RepositoryError::ReportNotFound(id)) => {
+        AuditError::Dao(crate::datasource::DaoError::ReportNotFound(id)) => {
             Status::not_found(format!("report {id} was not found"))
         }
-        AuditError::Repository(crate::datasource::RepositoryError::AppealNotFound(id)) => {
+        AuditError::Dao(crate::datasource::DaoError::AppealNotFound(id)) => {
             Status::not_found(format!("appeal {id} was not found"))
         }
-        AuditError::Repository(crate::datasource::RepositoryError::ReportConflict) => {
+        AuditError::Dao(crate::datasource::DaoError::ReportConflict) => {
             Status::aborted("report is already in a terminal state")
         }
-        AuditError::Repository(crate::datasource::RepositoryError::AppealConflict) => {
+        AuditError::Dao(crate::datasource::DaoError::AppealConflict) => {
             Status::aborted("appeal is already in a terminal state")
         }
-        AuditError::Repository(crate::datasource::RepositoryError::InvalidReview(message)) => {
+        AuditError::Dao(crate::datasource::DaoError::InvalidReview(message)) => {
             Status::invalid_argument(message)
         }
-        AuditError::Repository(crate::datasource::RepositoryError::InvalidAppealReview(
+        AuditError::Dao(crate::datasource::DaoError::InvalidAppealReview(
             message,
         )) => Status::invalid_argument(message),
-        AuditError::Repository(error) => Status::internal(error.to_string()),
+        AuditError::Dao(error) => Status::internal(error.to_string()),
     }
 }

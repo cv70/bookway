@@ -17,6 +17,7 @@ message CandidateFeatures {
   double p_ctr = 10;
   double p_cvr = 11;
   double p_wegu = 12;
+  double route_completion_rate = 13;
 }
 message RankFeatures {
   double recent_positive_rate = 1;

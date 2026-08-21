@@ -137,6 +137,6 @@ fn order_error(error: OrderError) -> Status {
         OrderError::Conflict(message) => Status::already_exists(message),
         OrderError::State(message) => Status::failed_precondition(message),
         OrderError::Upstream(_, message) => Status::unavailable(message),
-        OrderError::Repository(message) => Status::internal(message),
+        OrderError::Dao(message) => Status::internal(message),
     }
 }

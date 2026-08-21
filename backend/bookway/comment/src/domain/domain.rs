@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::{
     conf::Config,
     datasource::{
-        CommentRepository, MemoryCommentRepository, PostgresCommentRepository, RepositoryError,
+        CommentDao, MemoryCommentDao, PostgresCommentDao, DaoError,
     },
 };
 
@@ -15,22 +15,22 @@ pub(crate) enum CommentError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Repository(#[from] RepositoryError),
+    Dao(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) repository: Arc<dyn CommentRepository>,
+    pub(crate) Dao: Arc<dyn CommentDao>,
     pub(crate) content_audit: Option<ContentAuditClient<tonic::transport::Channel>>,
 }
 
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let storage_mode = bookway_data::storage_mode()?;
-        let repository: Arc<dyn CommentRepository> = match storage_mode {
-            bookway_data::StorageMode::Memory => Arc::new(MemoryCommentRepository::default()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresCommentRepository::new(
+        let Dao: Arc<dyn CommentDao> = match storage_mode {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryCommentDao::default()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresCommentDao::new(
                 bookway_data::postgres_pool().await?,
             )),
         };
@@ -40,7 +40,7 @@ impl Domain {
         };
         Ok(Self {
             config,
-            repository,
+            Dao,
             content_audit,
         })
     }

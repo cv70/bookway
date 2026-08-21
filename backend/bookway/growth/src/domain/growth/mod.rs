@@ -10,7 +10,7 @@ impl Domain {
         &self,
         user_id: &str,
     ) -> Result<Vec<pb::Journey>, GrowthError> {
-        Ok(self.repository.list_journeys(user_id).await?)
+        Ok(self.Dao.list_journeys(user_id).await?)
     }
 
     pub(crate) async fn create_journey(
@@ -21,7 +21,7 @@ impl Domain {
         let idempotency_key = normalize_idempotency_key(request.idempotency_key.take())?;
         let (journey, first_action) = build_journey(request)?;
         Ok(self
-            .repository
+            .Dao
             .create_journey(user_id, journey, first_action, idempotency_key)
             .await?)
     }
@@ -42,7 +42,7 @@ impl Domain {
             additional_actions,
         )?);
         Ok(self
-            .repository
+            .Dao
             .create_route_journey(user_id, source_route_id, journey, actions)
             .await?)
     }
@@ -59,7 +59,7 @@ impl Domain {
             validate_identifier("私人路线 ID", journey_id)?;
         }
         Ok(self
-            .repository
+            .Dao
             .set_route_participation_intent(
                 user_id,
                 route_id,
@@ -74,7 +74,7 @@ impl Domain {
         user_id: &str,
         journey_id: &str,
     ) -> Result<pb::JourneyDetail, GrowthError> {
-        Ok(self.repository.get_journey(user_id, journey_id).await?)
+        Ok(self.Dao.get_journey(user_id, journey_id).await?)
     }
 
     pub(crate) async fn update_journey(
@@ -85,7 +85,7 @@ impl Domain {
     ) -> Result<pb::Journey, GrowthError> {
         validate_journey_update(&request)?;
         Ok(self
-            .repository
+            .Dao
             .update_journey(user_id, journey_id, request)
             .await?)
     }
@@ -104,7 +104,7 @@ impl Domain {
         let (scheduled_for, scheduled_timezone) =
             normalize_schedule(request.scheduled_for, request.scheduled_timezone)?;
         let journey = self
-            .repository
+            .Dao
             .get_journey(user_id, &request.journey_id)
             .await?;
         let stages = journey
@@ -132,7 +132,7 @@ impl Domain {
             state: pb::ActionState::Pending as i32,
         };
         Ok(self
-            .repository
+            .Dao
             .create_action(user_id, action, idempotency_key)
             .await?)
     }
@@ -145,7 +145,7 @@ impl Domain {
     ) -> Result<pb::TodaySummary, GrowthError> {
         let schedule_context = schedule_context(local_date, timezone)?;
         let actions = self
-            .repository
+            .Dao
             .today(user_id, schedule_context.local_date)
             .await?;
         let completed = actions
@@ -170,13 +170,13 @@ impl Domain {
         user_id: &str,
         action_id: &str,
     ) -> Result<pb::CompleteActionResponse, GrowthError> {
-        let action = self.repository.complete_action(user_id, action_id).await?;
+        let action = self.Dao.complete_action(user_id, action_id).await?;
         let source_route_id = self
-            .repository
+            .Dao
             .source_route_id_for_journey(user_id, &action.journey_id)
             .await?;
         let source_knowledge_content_id = if source_route_id.is_none() {
-            self.repository
+            self.Dao
                 .source_knowledge_content_id_for_journey(user_id, &action.journey_id)
                 .await?
         } else {
@@ -226,7 +226,7 @@ impl Domain {
             request.scheduled_timezone = scheduled_timezone;
         }
         Ok(self
-            .repository
+            .Dao
             .update_action(user_id, action_id, request)
             .await?)
     }
@@ -235,7 +235,7 @@ impl Domain {
         &self,
         user_id: &str,
     ) -> Result<pb::ReminderPreference, GrowthError> {
-        Ok(self.repository.reminder_preferences(user_id).await?)
+        Ok(self.Dao.reminder_preferences(user_id).await?)
     }
 
     pub(crate) async fn update_reminder_preferences(
@@ -252,7 +252,7 @@ impl Domain {
             .quiet_hours_end
             .map(|value| value.trim().to_string());
         Ok(self
-            .repository
+            .Dao
             .update_reminder_preferences(user_id, request)
             .await?)
     }
@@ -267,7 +267,7 @@ impl Domain {
         request.device_id = request.device_id.trim().to_string();
         request.endpoint = request.endpoint.trim().to_string();
         Ok(self
-            .repository
+            .Dao
             .register_push_device(user_id, request)
             .await?)
     }
@@ -278,7 +278,7 @@ impl Domain {
         device_id: &str,
     ) -> Result<(), GrowthError> {
         validate_identifier("设备 ID", device_id)?;
-        self.repository
+        self.Dao
             .revoke_push_device(user_id, device_id)
             .await?;
         Ok(())
@@ -290,7 +290,7 @@ impl Domain {
         mut request: pb::NotificationQueryRequest,
     ) -> Result<pb::NotificationPage, GrowthError> {
         request.cursor = normalize_notification_cursor(request.cursor)?;
-        Ok(self.repository.list_notifications(user_id, request).await?)
+        Ok(self.Dao.list_notifications(user_id, request).await?)
     }
 
     pub(crate) async fn create_notification(
@@ -304,7 +304,7 @@ impl Domain {
         request.title = request.title.trim().to_string();
         request.body = request.body.trim().to_string();
         Ok(self
-            .repository
+            .Dao
             .create_notification(user_id, request)
             .await?)
     }
@@ -317,7 +317,7 @@ impl Domain {
         Uuid::parse_str(notification_id)
             .map_err(|_| GrowthError::Validation("通知 ID 格式不正确".to_string()))?;
         Ok(self
-            .repository
+            .Dao
             .mark_notification_read(user_id, notification_id)
             .await?)
     }
@@ -326,7 +326,7 @@ impl Domain {
         &self,
         user_id: &str,
     ) -> Result<Vec<pb::GrowthEntry>, GrowthError> {
-        Ok(self.repository.list_entries(user_id).await?)
+        Ok(self.Dao.list_entries(user_id).await?)
     }
 
     pub(crate) async fn create_entry(
@@ -364,7 +364,7 @@ impl Domain {
             publication_error: None,
         };
         Ok(self
-            .repository
+            .Dao
             .create_entry(user_id, entry, idempotency_key)
             .await?)
     }
@@ -377,7 +377,7 @@ impl Domain {
         Uuid::parse_str(entry_id)
             .map_err(|_| GrowthError::Validation("记录 ID 格式不正确".to_string()))?;
         Ok(self
-            .repository
+            .Dao
             .retry_entry_publication(user_id, entry_id)
             .await?)
     }
@@ -386,7 +386,7 @@ impl Domain {
         &self,
         user_id: &str,
     ) -> Result<pb::WeeklyReviewSummary, GrowthError> {
-        let snapshot = self.repository.review_snapshot(user_id).await?;
+        let snapshot = self.Dao.review_snapshot(user_id).await?;
         let completed_actions = snapshot
             .actions
             .iter()
@@ -502,7 +502,7 @@ impl Domain {
             updated_at: timestamp,
             applied_adjustments: Vec::new(),
         };
-        Ok(self.repository.save_weekly_review(user_id, review).await?)
+        Ok(self.Dao.save_weekly_review(user_id, review).await?)
     }
 
     pub(crate) async fn apply_weekly_review_adjustment(
@@ -513,7 +513,7 @@ impl Domain {
         Uuid::parse_str(request.review_id.trim())
             .map_err(|_| GrowthError::Validation("复盘标识无效".to_string()))?;
         let applied = self
-            .repository
+            .Dao
             .apply_weekly_review_adjustment(user_id, &request.review_id, request.suggestion_index)
             .await?;
         Ok(pb::ApplyWeeklyReviewAdjustmentResponse {
@@ -530,8 +530,8 @@ impl Domain {
     ) -> Result<pb::CompanionBrief, GrowthError> {
         let schedule_context = schedule_context(local_date, timezone)?;
         let (actions, snapshot) = tokio::try_join!(
-            self.repository.today(user_id, schedule_context.local_date),
-            self.repository.review_snapshot(user_id),
+            self.Dao.today(user_id, schedule_context.local_date),
+            self.Dao.review_snapshot(user_id),
         )?;
         let active_journey_ids = snapshot
             .journeys
@@ -671,7 +671,7 @@ impl Domain {
     ) -> Result<Vec<pb::KnowledgeResource>, GrowthError> {
         query.q = normalize_query_filter(query.q, "检索词")?;
         query.tag = normalize_query_filter(query.tag, "标签")?;
-        Ok(self.repository.list_knowledge(user_id, query).await?)
+        Ok(self.Dao.list_knowledge(user_id, query).await?)
     }
 
     pub(crate) async fn create_knowledge(
@@ -704,7 +704,7 @@ impl Domain {
             source_content_id: trimmed_option(request.source_content_id),
         };
         Ok(self
-            .repository
+            .Dao
             .create_knowledge(user_id, resource, idempotency_key)
             .await?)
     }
@@ -736,7 +736,7 @@ impl Domain {
             idempotency_key: None,
         })?;
         Ok(self
-            .repository
+            .Dao
             .start_knowledge_journey(user_id, resource_id, journey, first_action)
             .await?)
     }
@@ -766,7 +766,7 @@ impl Domain {
         });
         request.last_opened_at = request.last_opened_at.map(|value| value.trim().to_string());
         Ok(self
-            .repository
+            .Dao
             .update_knowledge(user_id, resource_id, request)
             .await?)
     }
@@ -1547,14 +1547,14 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{conf::Config, datasource::MemoryGrowthRepository};
+    use crate::{conf::Config, datasource::MemoryGrowthDao};
 
     fn domain() -> Domain {
-        Domain::from_repository(
+        Domain::from_dao(
             Config {
                 listen_addr: "127.0.0.1:0".parse().expect("valid address"),
             },
-            Arc::new(MemoryGrowthRepository::seeded()),
+            Arc::new(MemoryGrowthDao::seeded()),
         )
     }
 
@@ -1807,7 +1807,7 @@ mod tests {
             .expect_err("one idempotency key cannot describe another Journey");
         assert!(matches!(
             error,
-            GrowthError::Repository(crate::datasource::RepositoryError::IdempotencyConflict)
+            GrowthError::Dao(crate::datasource::DaoError::IdempotencyConflict)
         ));
     }
 
@@ -1883,8 +1883,8 @@ mod tests {
             .await;
         assert!(matches!(
             conflict,
-            Err(GrowthError::Repository(
-                crate::datasource::RepositoryError::IdempotencyConflict
+            Err(GrowthError::Dao(
+                crate::datasource::DaoError::IdempotencyConflict
             ))
         ));
     }
@@ -2174,8 +2174,8 @@ mod tests {
                     },
                 )
                 .await,
-            Err(GrowthError::Repository(
-                crate::datasource::RepositoryError::ReviewNotFound(_)
+            Err(GrowthError::Dao(
+                crate::datasource::DaoError::ReviewNotFound(_)
             ))
         ));
     }
@@ -2210,8 +2210,8 @@ mod tests {
                     },
                 )
                 .await,
-            Err(GrowthError::Repository(
-                crate::datasource::RepositoryError::ReviewAdjustmentStale
+            Err(GrowthError::Dao(
+                crate::datasource::DaoError::ReviewAdjustmentStale
             ))
         ));
     }
@@ -2731,7 +2731,7 @@ mod tests {
             .expect_err("a reused key cannot represent another entry");
         assert!(matches!(
             error,
-            GrowthError::Repository(crate::datasource::RepositoryError::IdempotencyConflict)
+            GrowthError::Dao(crate::datasource::DaoError::IdempotencyConflict)
         ));
     }
 
@@ -3123,8 +3123,8 @@ mod tests {
             domain
                 .create_knowledge("demo-user", changed, Some("same-key".to_string()))
                 .await,
-            Err(GrowthError::Repository(
-                crate::datasource::RepositoryError::IdempotencyConflict
+            Err(GrowthError::Dao(
+                crate::datasource::DaoError::IdempotencyConflict
             ))
         ));
         let foreign_route = pb::CreateKnowledgeRequest {
@@ -3389,8 +3389,8 @@ mod tests {
         );
         assert!(matches!(
             domain.create_notification("reader", request).await,
-            Err(GrowthError::Repository(
-                crate::datasource::RepositoryError::NotificationSourceConflict(_)
+            Err(GrowthError::Dao(
+                crate::datasource::DaoError::NotificationSourceConflict(_)
             ))
         ));
     }

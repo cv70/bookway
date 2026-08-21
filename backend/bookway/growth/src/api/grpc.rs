@@ -431,31 +431,31 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
 fn internal_error(error: crate::domain::GrowthError) -> Status {
     match error {
         crate::domain::GrowthError::Validation(message) => Status::invalid_argument(message),
-        crate::domain::GrowthError::Repository(
-            crate::datasource::RepositoryError::JourneyNotFound(message)
-            | crate::datasource::RepositoryError::ActionNotFound(message)
-            | crate::datasource::RepositoryError::NotificationNotFound(message)
-            | crate::datasource::RepositoryError::EntryReferenceNotFound(message)
-            | crate::datasource::RepositoryError::EntryNotFound(message)
-            | crate::datasource::RepositoryError::KnowledgeNotFound(message)
-            | crate::datasource::RepositoryError::KnowledgeReferenceNotFound(message)
-            | crate::datasource::RepositoryError::ReviewNotFound(message),
+        crate::domain::GrowthError::Dao(
+            crate::datasource::DaoError::JourneyNotFound(message)
+            | crate::datasource::DaoError::ActionNotFound(message)
+            | crate::datasource::DaoError::NotificationNotFound(message)
+            | crate::datasource::DaoError::EntryReferenceNotFound(message)
+            | crate::datasource::DaoError::EntryNotFound(message)
+            | crate::datasource::DaoError::KnowledgeNotFound(message)
+            | crate::datasource::DaoError::KnowledgeReferenceNotFound(message)
+            | crate::datasource::DaoError::ReviewNotFound(message),
         ) => Status::not_found(message),
-        crate::domain::GrowthError::Repository(
-            crate::datasource::RepositoryError::IdempotencyConflict,
+        crate::domain::GrowthError::Dao(
+            crate::datasource::DaoError::IdempotencyConflict,
         ) => Status::already_exists("idempotency key was already used with different content"),
-        crate::domain::GrowthError::Repository(
-            crate::datasource::RepositoryError::NotificationSourceConflict(source_id),
+        crate::domain::GrowthError::Dao(
+            crate::datasource::DaoError::NotificationSourceConflict(source_id),
         ) => Status::already_exists(format!(
             "notification source {source_id} was already assigned to a different user"
         )),
-        crate::domain::GrowthError::Repository(
-            crate::datasource::RepositoryError::EntryPublicationNotRetryable,
+        crate::domain::GrowthError::Dao(
+            crate::datasource::DaoError::EntryPublicationNotRetryable,
         ) => Status::failed_precondition("entry publication cannot be retried yet"),
-        crate::domain::GrowthError::Repository(
-            crate::datasource::RepositoryError::ReviewAdjustmentNotFound(_)
-            | crate::datasource::RepositoryError::ReviewAdjustmentStale,
+        crate::domain::GrowthError::Dao(
+            crate::datasource::DaoError::ReviewAdjustmentNotFound(_)
+            | crate::datasource::DaoError::ReviewAdjustmentStale,
         ) => Status::failed_precondition("review adjustment is no longer applicable"),
-        crate::domain::GrowthError::Repository(error) => Status::internal(error.to_string()),
+        crate::domain::GrowthError::Dao(error) => Status::internal(error.to_string()),
     }
 }

@@ -40,10 +40,11 @@ impl Domain {
                 } else {
                     1.0
                 };
-                // Rank on expected billable value per thousand impressions,
-                // in the same micros unit used by ad-center's event ledger.
-                // CPM bids are already per thousand impressions; CPC bids
-                // need pCTR normalization. pCVR is not part of the charge.
+                // Rank on the versioned expected-value contract shared with
+                // campaign evaluation: bid * pCTR * pCVR. CPC bids are
+                // normalized to an impression-equivalent value before they
+                // are mixed with CPM bids; pCVR remains a quality signal and
+                // never changes the amount charged by ad-center.
                 let ecpm = expected_ecpm_micros(&campaign);
                 let score = ecpm + targeting_bonus + (remaining_budget * 0.05);
                 crate::api::pb::RankedCampaign {
@@ -70,19 +71,20 @@ impl Domain {
 
 fn finite_probability(value: f64) -> f64 {
     if value.is_finite() {
-        value.clamp(0.0001, 1.0)
+        value.clamp(0.0, 1.0)
     } else {
-        0.0001
+        0.0
     }
 }
 
 fn expected_ecpm_micros(campaign: &bookway_ad_center_api::pb::AdCampaign) -> f64 {
     let bid_micros = campaign.bid_micros.max(0) as f64;
+    let expected_value = bid_micros
+        * finite_probability(campaign.predicted_ctr)
+        * finite_probability(campaign.predicted_cvr);
     match bookway_ad_center_api::pb::PricingModel::try_from(campaign.pricing_model) {
-        Ok(bookway_ad_center_api::pb::PricingModel::Cpm) => bid_micros,
-        Ok(bookway_ad_center_api::pb::PricingModel::Cpc) => {
-            bid_micros * finite_probability(campaign.predicted_ctr) * 1_000.0
-        }
+        Ok(bookway_ad_center_api::pb::PricingModel::Cpm) => expected_value,
+        Ok(bookway_ad_center_api::pb::PricingModel::Cpc) => expected_value * 1_000.0,
         Err(_) => 0.0,
     }
 }
@@ -118,6 +120,7 @@ mod tests {
                         bid_micros: 1_000_000,
                         pricing_model: center::PricingModel::Cpc as i32,
                         predicted_ctr: 0.01,
+                        predicted_cvr: 1.0,
                         ..Default::default()
                     },
                     center::AdCampaign {
@@ -128,6 +131,7 @@ mod tests {
                         bid_micros: 500_000,
                         pricing_model: center::PricingModel::Cpc as i32,
                         predicted_ctr: 0.8,
+                        predicted_cvr: 1.0,
                         ..Default::default()
                     },
                 ],
@@ -166,6 +170,8 @@ mod tests {
                         scene_equipment: "shoes".to_string(),
                         pricing_model: center::PricingModel::Cpm as i32,
                         bid_micros: 6_000_000,
+                        predicted_ctr: 1.0,
+                        predicted_cvr: 1.0,
                         ..Default::default()
                     },
                     center::AdCampaign {
@@ -176,8 +182,6 @@ mod tests {
                         pricing_model: center::PricingModel::Cpc as i32,
                         bid_micros: 500_000,
                         predicted_ctr: 0.01,
-                        // Conversion quality does not change a CPC campaign's
-                        // billable eCPM.
                         predicted_cvr: 1.0,
                         ..Default::default()
                     },
@@ -195,5 +199,56 @@ mod tests {
         );
         assert!((response.items[0].score - 6_000_000.2).abs() < f64::EPSILON);
         assert!((response.items[1].score - 5_000_000.2).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn auction_includes_conversion_quality_in_expected_value() {
+        let domain = Domain::new(Config {
+            listen_addr: "127.0.0.1:0".parse().expect("valid address"),
+            model_version: "test".to_string(),
+        })
+        .await
+        .expect("domain should initialize");
+        let response = domain
+            .rank(pb::RankRequest {
+                user_id: "u".to_string(),
+                domain: String::new(),
+                route_id: "route".to_string(),
+                action_node_id: "node".to_string(),
+                scene_equipment: "shoes".to_string(),
+                candidates: vec![
+                    center::AdCampaign {
+                        id: "high-bid-low-cvr".to_string(),
+                        route_id: "route".to_string(),
+                        action_node_id: "node".to_string(),
+                        scene_equipment: "shoes".to_string(),
+                        pricing_model: center::PricingModel::Cpm as i32,
+                        bid_micros: 2_000_000,
+                        predicted_ctr: 0.8,
+                        predicted_cvr: 0.01,
+                        ..Default::default()
+                    },
+                    center::AdCampaign {
+                        id: "lower-bid-high-cvr".to_string(),
+                        route_id: "route".to_string(),
+                        action_node_id: "node".to_string(),
+                        scene_equipment: "shoes".to_string(),
+                        pricing_model: center::PricingModel::Cpm as i32,
+                        bid_micros: 1_000_000,
+                        predicted_ctr: 0.8,
+                        predicted_cvr: 0.8,
+                        ..Default::default()
+                    },
+                ],
+            })
+            .await;
+        assert_eq!(
+            response.items[0]
+                .campaign
+                .as_ref()
+                .expect("ranked campaign should be present")
+                .id,
+            "lower-bid-high-cvr"
+        );
     }
 }

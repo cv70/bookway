@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS route_node_resource_attachments (
             'external_link',
             'tool_checklist',
             'ai_action_guide',
-            'rag_corpus'
+            'rag_corpus',
+            'resource_package'
         )
     ),
     title_override TEXT NOT NULL DEFAULT '',
