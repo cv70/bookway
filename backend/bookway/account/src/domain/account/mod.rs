@@ -11,10 +11,7 @@ impl Domain {
     /// the reference user-profile service's get-or-create behaviour.
     pub(crate) async fn profile(&self, user_id: &str) -> Result<pb::AccountProfile, AccountError> {
         let user_id = validate_user_id(user_id)?;
-        self.Dao
-            .get_or_create(&user_id)
-            .await
-            .map_err(Into::into)
+        self.dao.get_or_create(&user_id).await.map_err(Into::into)
     }
 
     pub(crate) async fn update_profile(
@@ -28,10 +25,7 @@ impl Domain {
                 "至少提供一项要更新的资料".to_string(),
             ));
         }
-        self.Dao
-            .update(&user_id, request)
-            .await
-            .map_err(Into::into)
+        self.dao.update(&user_id, request).await.map_err(Into::into)
     }
 }
 

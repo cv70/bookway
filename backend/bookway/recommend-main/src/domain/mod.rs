@@ -94,7 +94,8 @@ fn mix_contextual_ad(
         ad.route_id == context.route_id
             && ad.action_node_id == context.action_node_id
             && ad.placement == context.placement
-            && ad.scene_equipment == context.scene_equipment.clone().unwrap_or_default()
+            && scene_equipment_key(&ad.scene_equipment)
+                == scene_equipment_key(context.scene_equipment.as_deref().unwrap_or_default())
     }) else {
         if degraded && let Some(meta) = &mut response.meta {
             meta.degraded = true;
@@ -130,9 +131,19 @@ fn mix_contextual_ad(
         },
     );
     response.items.truncate(limit);
+    // Organic selection is persisted before contextual mixing. Refresh the
+    // response count here so clients can reconcile the actual rendered page
+    // (including the ad) without treating the ad as an organic candidate.
+    if let Some(meta) = &mut response.meta {
+        meta.selected = u32::try_from(response.items.len()).unwrap_or(u32::MAX);
+    }
     if degraded && let Some(meta) = &mut response.meta {
         meta.degraded = true;
     }
+}
+
+fn scene_equipment_key(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 fn service_request<T>(
@@ -269,5 +280,68 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn contextual_mix_reports_the_rendered_item_count() {
+        let mut response = pb::FeedResponse {
+            request_id: "feed-3".to_string(),
+            items: (0..4).map(|index| organic(&index.to_string())).collect(),
+            meta: Some(pb::FeedMeta {
+                sourced: 4,
+                filtered: 0,
+                selected: 4,
+                next_cursor: None,
+                pipeline_id: "test".to_string(),
+                degraded: false,
+                model_version: None,
+                experiment_bucket: None,
+            }),
+        };
+        mix_contextual_ad(
+            &mut response,
+            ad_pb::DecisionResponse {
+                items: vec![ad_pb::AdDecision {
+                    campaign_id: "campaign-3".to_string(),
+                    placement: "route_feed".to_string(),
+                    route_id: "route-1".to_string(),
+                    action_node_id: "node-1".to_string(),
+                    scene_equipment: "trail shoes".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            &context(),
+            5,
+        );
+
+        assert_eq!(response.items.len(), 5);
+        assert_eq!(response.meta.as_ref().map(|meta| meta.selected), Some(5));
+    }
+
+    #[test]
+    fn contextual_ad_matching_is_case_insensitive_for_equipment_keys() {
+        let mut response = pb::FeedResponse {
+            items: (0..4).map(|index| organic(&index.to_string())).collect(),
+            ..Default::default()
+        };
+        let mut context = context();
+        context.scene_equipment = Some("Trail Shoes".to_string());
+        mix_contextual_ad(
+            &mut response,
+            ad_pb::DecisionResponse {
+                items: vec![ad_pb::AdDecision {
+                    route_id: "route-1".to_string(),
+                    action_node_id: "node-1".to_string(),
+                    placement: "route_feed".to_string(),
+                    scene_equipment: "trail shoes".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            &context,
+            5,
+        );
+        assert!(response.items.iter().any(|item| item.ad.is_some()));
     }
 }

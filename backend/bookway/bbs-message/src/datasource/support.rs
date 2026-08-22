@@ -468,38 +468,38 @@ mod tests {
 
     #[tokio::test]
     async fn retries_return_the_same_message_and_conflicts_are_rejected() {
-        let Dao = MemoryMessageDao::default();
-        let first = Dao
+        let dao = MemoryMessageDao::default();
+        let first = dao
             .send(input("reader-a", "creator-b", "client-1", "你好"))
             .await
             .expect("initial send");
-        let retry = Dao
+        let retry = dao
             .send(input("reader-a", "creator-b", "client-1", "你好"))
             .await
             .expect("retry");
-        let conflict = Dao
+        let conflict = dao
             .send(input("reader-a", "creator-b", "client-1", "另一条正文"))
             .await;
 
         assert_eq!(first.id, retry.id);
         assert!(matches!(conflict, Err(DaoError::IdempotencyConflict)));
-        let state = Dao.state.read().await;
+        let state = dao.state.read().await;
         assert_eq!(state.notification_message_ids.len(), 1);
         assert!(state.notification_message_ids.contains(&first.id));
     }
 
     #[tokio::test]
     async fn reading_marks_only_recipient_messages_and_conversation_is_visible_to_both_sides() {
-        let Dao = MemoryMessageDao::default();
-        let first = Dao
+        let dao = MemoryMessageDao::default();
+        let first = dao
             .send(input("reader-a", "creator-b", "client-1", "第一条"))
             .await
             .expect("first message");
-        Dao.send(input("creator-b", "reader-a", "client-2", "收到"))
+        dao.send(input("creator-b", "reader-a", "client-2", "收到"))
             .await
             .expect("reply");
 
-        let creator_page = Dao
+        let creator_page = dao
             .list_conversations("creator-b", None, 10)
             .await
             .expect("creator conversations");
@@ -507,17 +507,17 @@ mod tests {
         assert_eq!(creator_page[0].peer_user_id, "reader-a");
         assert_eq!(creator_page[0].unread_count, 1);
 
-        let read = Dao
+        let read = dao
             .mark_read("creator-b", &first.conversation_id, Some(&first.id))
             .await
             .expect("mark first message read");
         assert_eq!(read.marked_count, 1);
-        let reader_page = Dao
+        let reader_page = dao
             .list_conversations("reader-a", None, 10)
             .await
             .expect("reader conversations");
         assert_eq!(reader_page[0].unread_count, 1);
-        let creator_page = Dao
+        let creator_page = dao
             .list_conversations("creator-b", None, 10)
             .await
             .expect("creator conversations after read");
@@ -526,11 +526,11 @@ mod tests {
 
     #[tokio::test]
     async fn message_pages_are_chronological_and_continue_from_the_oldest_item() {
-        let Dao = MemoryMessageDao::default();
+        let dao = MemoryMessageDao::default();
         let mut messages = Vec::new();
         for index in 0..4 {
             messages.push(
-                Dao.send(input(
+                dao.send(input(
                     "reader-a",
                     "creator-b",
                     &format!("client-{index}"),
@@ -540,14 +540,14 @@ mod tests {
                 .expect("send message"),
             );
         }
-        let page = Dao
+        let page = dao
             .list_messages("reader-a", &messages[0].conversation_id, None, 2)
             .await
             .expect("first page");
         assert_eq!(page.len(), 2);
         assert!(page[0].created_at <= page[1].created_at);
         let cursor = MessageCursor::from_message(&page[0]).expect("cursor");
-        let older = Dao
+        let older = dao
             .list_messages("reader-a", &messages[0].conversation_id, Some(&cursor), 2)
             .await
             .expect("older page");
@@ -556,8 +556,8 @@ mod tests {
 
     #[tokio::test]
     async fn only_the_recipient_can_report_and_retries_are_idempotent() {
-        let Dao = MemoryMessageDao::default();
-        let message = Dao
+        let dao = MemoryMessageDao::default();
+        let message = dao
             .send(input(
                 "sender",
                 "recipient",
@@ -567,7 +567,7 @@ mod tests {
             .await
             .expect("send message");
 
-        let report = Dao
+        let report = dao
             .create_report(report_input(
                 "recipient",
                 &message.id,
@@ -576,7 +576,7 @@ mod tests {
             ))
             .await
             .expect("recipient report");
-        let retry = Dao
+        let retry = dao
             .create_report(report_input(
                 "recipient",
                 &message.id,
@@ -585,7 +585,7 @@ mod tests {
             ))
             .await
             .expect("report retry");
-        let sender_attempt = Dao
+        let sender_attempt = dao
             .create_report(report_input(
                 "sender",
                 &message.id,
@@ -593,7 +593,7 @@ mod tests {
                 "not allowed",
             ))
             .await;
-        let conflicting_retry = Dao
+        let conflicting_retry = dao
             .create_report(report_input(
                 "recipient",
                 &message.id,
@@ -621,16 +621,16 @@ mod tests {
 
     #[tokio::test]
     async fn resolved_restrictions_block_future_messages_and_terminal_reviews_conflict() {
-        let Dao = MemoryMessageDao::default();
-        let message = Dao
+        let dao = MemoryMessageDao::default();
+        let message = dao
             .send(input("sender", "recipient", "message-1", "unsafe message"))
             .await
             .expect("send message");
-        let report = Dao
+        let report = dao
             .create_report(report_input("recipient", &message.id, "report-1", "unsafe"))
             .await
             .expect("report message");
-        let reviewed = Dao
+        let reviewed = dao
             .review_report(
                 &report.id,
                 ReviewMessageReportInput {
@@ -642,7 +642,7 @@ mod tests {
             )
             .await
             .expect("restrict sender");
-        let conflicting_review = Dao
+        let conflicting_review = dao
             .review_report(
                 &report.id,
                 ReviewMessageReportInput {
@@ -653,7 +653,7 @@ mod tests {
                 },
             )
             .await;
-        let blocked_send = Dao
+        let blocked_send = dao
             .send(input(
                 "sender",
                 "other-recipient",
@@ -666,7 +666,7 @@ mod tests {
             reviewed.action,
             pb::DirectMessageModerationAction::RestrictSender as i32
         );
-        assert!(Dao.sender_restricted("sender").await.expect("restriction"));
+        assert!(dao.sender_restricted("sender").await.expect("restriction"));
         assert!(matches!(conflicting_review, Err(DaoError::ReportConflict)));
         assert!(matches!(blocked_send, Err(DaoError::SenderRestricted)));
     }

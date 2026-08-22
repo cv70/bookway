@@ -130,6 +130,6 @@ fn mall_error(error: MallError) -> Status {
         MallError::Validation(message) => Status::invalid_argument(message),
         MallError::NotFound(message) => Status::not_found(message),
         MallError::Conflict(message) => Status::already_exists(message),
-        MallError::Dao(message) => Status::internal(message),
+        MallError::Repository(message) => Status::internal(message),
     }
 }

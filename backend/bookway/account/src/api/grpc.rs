@@ -61,7 +61,7 @@ fn account_error(error: AccountError) -> Status {
     let message = error.to_string();
     match error {
         AccountError::Validation(_) => Status::invalid_argument(message),
-        AccountError::Dao(DaoError::NotFound(_)) => Status::not_found(message),
-        AccountError::Dao(DaoError::Database(_)) => Status::internal(message),
+        AccountError::Repository(DaoError::NotFound(_)) => Status::not_found(message),
+        AccountError::Repository(DaoError::Database(_)) => Status::internal(message),
     }
 }

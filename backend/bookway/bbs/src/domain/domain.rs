@@ -4,10 +4,7 @@ use thiserror::Error;
 
 use crate::{
     conf::Config,
-    datasource::{
-        BbsDao, CachedBbsDao, MemoryBbsDao, PostgresBbsDao,
-        DaoError,
-    },
+    datasource::{BbsDao, CachedBbsDao, DaoError, MemoryBbsDao, PostgresBbsDao},
 };
 
 #[derive(Debug, Error)]
@@ -15,7 +12,7 @@ pub(crate) enum BbsError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Dao(#[from] DaoError),
+    Repository(#[from] DaoError),
 }
 
 #[derive(Clone)]
@@ -28,9 +25,9 @@ impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, bookway_data::DataError> {
         let dao: Arc<dyn BbsDao> = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => Arc::new(MemoryBbsDao::seeded()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresBbsDao::new(
-                bookway_data::postgres_pool().await?,
-            )),
+            bookway_data::StorageMode::Postgres => {
+                Arc::new(PostgresBbsDao::new(bookway_data::postgres_pool().await?))
+            }
         };
         let redis = match bookway_data::redis_connection().await {
             Ok(redis) => redis,

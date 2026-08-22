@@ -92,13 +92,13 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let (status, code) = match &self.0 {
             CreatorError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
-            CreatorError::Dao(crate::datasource::DaoError::NotFound(_)) => {
+            CreatorError::Repository(crate::datasource::DaoError::NotFound(_)) => {
                 (StatusCode::NOT_FOUND, "creator_not_found")
             }
-            CreatorError::Dao(crate::datasource::DaoError::HandleTaken(_)) => {
+            CreatorError::Repository(crate::datasource::DaoError::HandleTaken(_)) => {
                 (StatusCode::CONFLICT, "handle_taken")
             }
-            CreatorError::Dao(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
+            CreatorError::Repository(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
         };
         (status, Json(ErrorResponse::new(code, self.0.to_string()))).into_response()
     }

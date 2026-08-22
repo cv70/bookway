@@ -5,8 +5,7 @@ use thiserror::Error;
 use crate::{
     conf::Config,
     datasource::{
-        MemoryMediaDao, ObjectError, ObjectStorage, PostgresMediaDao,
-        DaoError, SharedMediaDao,
+        DaoError, MemoryMediaDao, ObjectError, ObjectStorage, PostgresMediaDao, SharedMediaDao,
     },
 };
 
@@ -17,7 +16,7 @@ pub(crate) enum MediaError {
     #[error("proxy upload is disabled")]
     Forbidden,
     #[error(transparent)]
-    Dao(#[from] DaoError),
+    Repository(#[from] DaoError),
     #[error(transparent)]
     Object(#[from] ObjectError),
 }
@@ -25,7 +24,7 @@ pub(crate) enum MediaError {
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) Dao: SharedMediaDao,
+    pub(crate) dao: SharedMediaDao,
     pub(crate) objects: Arc<ObjectStorage>,
     pub(crate) bucket: String,
     pub(crate) cdn_base: String,
@@ -33,11 +32,11 @@ pub(crate) struct Domain {
 }
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let Dao: SharedMediaDao = match bookway_data::storage_mode()? {
+        let dao: SharedMediaDao = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => Arc::new(MemoryMediaDao::default()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresMediaDao::new(
-                bookway_data::postgres_pool().await?,
-            )),
+            bookway_data::StorageMode::Postgres => {
+                Arc::new(PostgresMediaDao::new(bookway_data::postgres_pool().await?))
+            }
         };
         let objects = Arc::new(ObjectStorage::new(
             &config.s3_endpoint,
@@ -48,7 +47,7 @@ impl Domain {
         )?);
         Ok(Self {
             config: config.clone(),
-            Dao,
+            dao,
             objects,
             bucket: config.s3_bucket,
             cdn_base: config.cdn_base,

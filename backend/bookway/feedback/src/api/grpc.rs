@@ -80,9 +80,9 @@ pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
 fn feedback_status(error: FeedbackError) -> Status {
     match error {
         FeedbackError::Validation(message) => Status::invalid_argument(message),
-        FeedbackError::Dao(crate::datasource::DaoError::NotFound(id)) => {
+        FeedbackError::Repository(crate::datasource::DaoError::NotFound(id)) => {
             Status::not_found(format!("feedback {id} was not found"))
         }
-        FeedbackError::Dao(error) => Status::internal(error.to_string()),
+        FeedbackError::Repository(error) => Status::internal(error.to_string()),
     }
 }

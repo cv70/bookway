@@ -166,7 +166,7 @@ impl ParticipationTarget for BbsGrpcTarget {
 }
 
 struct Reconciler<R, T> {
-    Dao: Arc<R>,
+    dao: Arc<R>,
     target: Arc<T>,
     concurrency: usize,
     request_timeout: Duration,
@@ -177,14 +177,9 @@ where
     R: IntentDao + 'static,
     T: ParticipationTarget + 'static,
 {
-    fn new(
-        Dao: Arc<R>,
-        target: Arc<T>,
-        concurrency: usize,
-        request_timeout: Duration,
-    ) -> Self {
+    fn new(dao: Arc<R>, target: Arc<T>, concurrency: usize, request_timeout: Duration) -> Self {
         Self {
-            Dao,
+            dao,
             target,
             concurrency,
             request_timeout,
@@ -192,7 +187,7 @@ where
     }
 
     async fn run_once(&self) -> Result<usize, ReconcileError> {
-        let intents = self.Dao.claim().await?;
+        let intents = self.dao.claim().await?;
         let count = intents.len();
         let results = stream::iter(intents)
             .map(|intent| self.reconcile(intent))
@@ -209,7 +204,7 @@ where
         let result = tokio::time::timeout(self.request_timeout, self.target.apply(&intent)).await;
         let failure = match result {
             Ok(Ok(())) => {
-                self.Dao.mark_applied(&intent).await?;
+                self.dao.mark_applied(&intent).await?;
                 tracing::debug!(
                     user_id = %intent.user_id,
                     route_id = %intent.route_id,
@@ -222,9 +217,7 @@ where
             Ok(Err(error)) => error,
             Err(_) => TargetError::Timeout(self.request_timeout.as_millis() as u64),
         };
-        self.Dao
-            .mark_failed(&intent, &failure.to_string())
-            .await?;
+        self.dao.mark_failed(&intent, &failure.to_string()).await?;
         tracing::warn!(
             user_id = %intent.user_id,
             route_id = %intent.route_id,
@@ -275,18 +268,13 @@ where
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("route-participation-reconciler");
     let config = Config::from_env()?;
-    let Dao = Arc::new(PostgresIntentDao::new(
+    let dao = Arc::new(PostgresIntentDao::new(
         bookway_data::postgres_pool().await?,
         config.batch_size,
         config.lease_seconds,
     ));
     let target = Arc::new(BbsGrpcTarget::connect(config.bbs_url).await?);
-    let reconciler = Reconciler::new(
-        Dao,
-        target,
-        config.concurrency,
-        config.request_timeout,
-    );
+    let reconciler = Reconciler::new(dao, target, config.concurrency, config.request_timeout);
     loop {
         match reconciler.run_once().await {
             Ok(0) => tokio::time::sleep(Duration::from_millis(500)).await,
@@ -370,9 +358,8 @@ mod tests {
 
     #[tokio::test]
     async fn applies_and_acknowledges_the_exact_claimed_version() {
-        let Dao = Arc::new(MemoryDao::default());
-        Dao
-            .pending
+        let dao = Arc::new(MemoryDao::default());
+        dao.pending
             .lock()
             .expect("pending lock")
             .push(intent(false, 7));
@@ -380,27 +367,21 @@ mod tests {
             fail: false,
             calls: Mutex::new(Vec::new()),
         });
-        let reconciler = Reconciler::new(
-            Dao.clone(),
-            target.clone(),
-            4,
-            Duration::from_secs(1),
-        );
+        let reconciler = Reconciler::new(dao.clone(), target.clone(), 4, Duration::from_secs(1));
 
         assert_eq!(reconciler.run_once().await.expect("run once"), 1);
         assert_eq!(
-            *Dao.applied.lock().expect("applied lock"),
+            *dao.applied.lock().expect("applied lock"),
             vec![("route-a".to_string(), 7)]
         );
         assert!(!target.calls.lock().expect("calls lock")[0].desired_active);
-        assert!(Dao.failed.lock().expect("failed lock").is_empty());
+        assert!(dao.failed.lock().expect("failed lock").is_empty());
     }
 
     #[tokio::test]
     async fn records_target_failures_without_acknowledging_the_intent() {
-        let Dao = Arc::new(MemoryDao::default());
-        Dao
-            .pending
+        let dao = Arc::new(MemoryDao::default());
+        dao.pending
             .lock()
             .expect("pending lock")
             .push(intent(true, 3));
@@ -408,11 +389,11 @@ mod tests {
             fail: true,
             calls: Mutex::new(Vec::new()),
         });
-        let reconciler = Reconciler::new(Dao.clone(), target, 4, Duration::from_secs(1));
+        let reconciler = Reconciler::new(dao.clone(), target, 4, Duration::from_secs(1));
 
         assert_eq!(reconciler.run_once().await.expect("run once"), 1);
-        assert!(Dao.applied.lock().expect("applied lock").is_empty());
-        let failed = Dao.failed.lock().expect("failed lock");
+        assert!(dao.applied.lock().expect("applied lock").is_empty());
+        let failed = dao.failed.lock().expect("failed lock");
         assert_eq!(failed[0].0, "route-a");
         assert_eq!(failed[0].1, 3);
         assert!(failed[0].2.contains("bbs down"));

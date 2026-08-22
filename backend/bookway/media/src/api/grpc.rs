@@ -81,10 +81,10 @@ fn internal_error(error: crate::domain::MediaError) -> Status {
     match error {
         crate::domain::MediaError::Validation(message) => Status::invalid_argument(message),
         crate::domain::MediaError::Forbidden => Status::permission_denied(error.to_string()),
-        crate::domain::MediaError::Dao(crate::datasource::DaoError::NotFound) => {
+        crate::domain::MediaError::Repository(crate::datasource::DaoError::NotFound) => {
             Status::not_found("media asset was not found or is not ready")
         }
-        crate::domain::MediaError::Dao(crate::datasource::DaoError::Database(_))
+        crate::domain::MediaError::Repository(crate::datasource::DaoError::Database(_))
         | crate::domain::MediaError::Object(_) => Status::unavailable(error.to_string()),
     }
 }

@@ -116,6 +116,6 @@ fn ad_error(error: AdCenterError) -> Status {
     match error {
         AdCenterError::Validation(message) => Status::invalid_argument(message),
         AdCenterError::NotFound(message) => Status::not_found(message),
-        AdCenterError::Dao(message) => Status::internal(message),
+        AdCenterError::Repository(message) => Status::internal(message),
     }
 }

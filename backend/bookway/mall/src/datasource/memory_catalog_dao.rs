@@ -55,6 +55,9 @@ impl CatalogDao for MemoryCatalogDao {
                 request.include_inactive || product.status == pb::MallProductStatus::Active as i32
             })
             .filter(|product| {
+                request.include_inactive || product.skus.iter().any(|sku| sku.saleable)
+            })
+            .filter(|product| {
                 merchant_id.is_empty()
                     || product_merchants
                         .get(&product.id)
@@ -63,6 +66,13 @@ impl CatalogDao for MemoryCatalogDao {
             .filter(|product| product.id > cursor)
             .filter(|product| query.is_empty() || product.title.to_lowercase().contains(&query))
             .cloned()
+            .map(|product| {
+                if request.include_inactive {
+                    product
+                } else {
+                    customer_product(&product)
+                }
+            })
             .collect::<Vec<_>>();
         values.sort_by(|left, right| left.id.cmp(&right.id));
         let next_cursor = if values.len() > limit {
@@ -82,7 +92,11 @@ impl CatalogDao for MemoryCatalogDao {
             .await
             .get(id)
             .cloned()
-            .filter(|product| product.status == pb::MallProductStatus::Active as i32)
+            .filter(|product| {
+                product.status == pb::MallProductStatus::Active as i32
+                    && product.skus.iter().any(|sku| sku.saleable)
+            })
+            .map(|product| customer_product(&product))
             .ok_or_else(|| DaoError::NotFound(id.to_string()))
     }
     async fn skus(&self, ids: Vec<String>) -> Result<Vec<pb::MallSku>, DaoError> {
@@ -173,7 +187,7 @@ impl CatalogDao for MemoryCatalogDao {
                         .any(|sku| sku.id == offer.sku_id && sku.saleable);
                 saleable.then(|| {
                     let mut offer = offer.clone();
-                    offer.product = Some(product.clone());
+                    offer.product = Some(customer_product(product));
                     offer
                 })
             })
@@ -190,4 +204,10 @@ impl CatalogDao for MemoryCatalogDao {
             .cloned()
             .ok_or_else(|| DaoError::NotFound(id.to_string()))
     }
+}
+
+fn customer_product(product: &pb::MallProduct) -> pb::MallProduct {
+    let mut product = product.clone();
+    product.skus.retain(|sku| sku.saleable);
+    product
 }

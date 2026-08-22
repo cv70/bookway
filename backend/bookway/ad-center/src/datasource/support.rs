@@ -19,7 +19,7 @@ pub(crate) struct EligibleQuery<'a> {
 
 // A delivery receipt is valuable only if it can be traced back to the exact
 // action-node placement that selected the campaign. Keep that context in the
-// Dao boundary instead of trusting an upstream caller to retain it.
+// dao boundary instead of trusting an upstream caller to retain it.
 pub(crate) struct DecisionRegistration<'a> {
     pub(crate) user_id: &'a str,
     pub(crate) request_id: &'a str,
@@ -347,12 +347,12 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_only_tracked_and_once_per_decision_event() {
-        let Dao = MemoryCampaignDao::default();
-        let campaign = Dao
+        let dao = MemoryCampaignDao::default();
+        let campaign = dao
             .create(campaign_request())
             .await
             .expect("campaign should be created");
-        Dao.update(
+        dao.update(
             &campaign.id,
             pb::UpdateCampaignRequest {
                 advertiser_id: campaign.advertiser_id.clone(),
@@ -363,7 +363,7 @@ mod tests {
         .await
         .expect("campaign should be activated");
 
-        let untracked = Dao
+        let untracked = dao
             .record_event(
                 "user-1",
                 pb::RecordEventRequest {
@@ -378,14 +378,14 @@ mod tests {
             .expect("untracked receipt has a valid response");
         assert!(!untracked.accepted);
 
-        Dao.register_decisions(registration(
+        dao.register_decisions(registration(
             "user-1",
             "request-1",
             vec![campaign.id.clone()],
         ))
         .await
         .expect("decision should be registered");
-        let accepted = Dao
+        let accepted = dao
             .record_event(
                 "user-1",
                 pb::RecordEventRequest {
@@ -401,7 +401,7 @@ mod tests {
         assert!(accepted.accepted);
         assert!(!accepted.duplicate);
 
-        let duplicate = Dao
+        let duplicate = dao
             .record_event(
                 "user-1",
                 pb::RecordEventRequest {
@@ -420,14 +420,14 @@ mod tests {
 
     #[tokio::test]
     async fn requires_an_accepted_impression_before_accepting_a_click() {
-        let Dao = MemoryCampaignDao::default();
+        let dao = MemoryCampaignDao::default();
         let mut request = campaign_request();
         request.pricing_model = pb::PricingModel::Cpc as i32;
-        let campaign = Dao
+        let campaign = dao
             .create(request)
             .await
             .expect("campaign should be created");
-        Dao.update(
+        dao.update(
             &campaign.id,
             pb::UpdateCampaignRequest {
                 advertiser_id: campaign.advertiser_id.clone(),
@@ -437,7 +437,7 @@ mod tests {
         )
         .await
         .expect("campaign should be activated");
-        Dao.register_decisions(registration(
+        dao.register_decisions(registration(
             "user-1",
             "request-1",
             vec![campaign.id.clone()],
@@ -445,7 +445,7 @@ mod tests {
         .await
         .expect("decision should be registered");
 
-        let click_before_impression = Dao
+        let click_before_impression = dao
             .record_event(
                 "user-1",
                 pb::RecordEventRequest {
@@ -460,14 +460,14 @@ mod tests {
             .expect("early click has a valid response");
         assert!(!click_before_impression.accepted);
         assert!(!click_before_impression.duplicate);
-        let after_rejected_click = Dao
+        let after_rejected_click = dao
             .get_for_advertiser(&campaign.id, &campaign.advertiser_id)
             .await
             .expect("campaign should remain readable");
         assert_eq!(after_rejected_click.spent_today_micros, 0);
         assert_eq!(after_rejected_click.clicks, 0);
 
-        let impression = Dao
+        let impression = dao
             .record_event(
                 "user-1",
                 pb::RecordEventRequest {
@@ -482,7 +482,7 @@ mod tests {
             .expect("impression should be recorded");
         assert!(impression.accepted);
 
-        let click_after_impression = Dao
+        let click_after_impression = dao
             .record_event(
                 "user-1",
                 pb::RecordEventRequest {
@@ -497,7 +497,7 @@ mod tests {
             .expect("click after impression should be recorded");
         assert!(click_after_impression.accepted);
         assert!(!click_after_impression.duplicate);
-        let after_click = Dao
+        let after_click = dao
             .get_for_advertiser(&campaign.id, &campaign.advertiser_id)
             .await
             .expect("campaign should remain readable");
@@ -507,14 +507,14 @@ mod tests {
 
     #[tokio::test]
     async fn global_frequency_cap_blocks_a_second_user() {
-        let Dao = MemoryCampaignDao::default();
+        let dao = MemoryCampaignDao::default();
         let mut request = campaign_request();
         request.global_frequency_cap = 1;
-        let campaign = Dao
+        let campaign = dao
             .create(request)
             .await
             .expect("campaign should be created");
-        Dao.update(
+        dao.update(
             &campaign.id,
             pb::UpdateCampaignRequest {
                 advertiser_id: campaign.advertiser_id.clone(),
@@ -524,7 +524,7 @@ mod tests {
         )
         .await
         .expect("campaign should be activated");
-        Dao.register_decisions(registration(
+        dao.register_decisions(registration(
             "user-1",
             "request-1",
             vec![campaign.id.clone()],
@@ -532,7 +532,7 @@ mod tests {
         .await
         .expect("first decision should be tracked");
         assert!(
-            Dao.record_event(
+            dao.record_event(
                 "user-1",
                 pb::RecordEventRequest {
                     user_id: "user-1".to_string(),
@@ -546,7 +546,7 @@ mod tests {
             .expect("first impression should be accepted")
             .accepted
         );
-        Dao.register_decisions(registration(
+        dao.register_decisions(registration(
             "user-2",
             "request-2",
             vec![campaign.id.clone()],
@@ -554,7 +554,7 @@ mod tests {
         .await
         .expect("second decision should be tracked");
         assert!(
-            !Dao.record_event(
+            !dao.record_event(
                 "user-2",
                 pb::RecordEventRequest {
                     user_id: "user-2".to_string(),
@@ -572,12 +572,12 @@ mod tests {
 
     #[tokio::test]
     async fn event_id_cannot_be_reused_across_delivery_contexts() {
-        let Dao = MemoryCampaignDao::default();
-        let campaign = Dao
+        let dao = MemoryCampaignDao::default();
+        let campaign = dao
             .create(campaign_request())
             .await
             .expect("campaign should be created");
-        Dao.update(
+        dao.update(
             &campaign.id,
             pb::UpdateCampaignRequest {
                 advertiser_id: campaign.advertiser_id.clone(),
@@ -587,14 +587,14 @@ mod tests {
         )
         .await
         .expect("campaign should be activated");
-        Dao.register_decisions(registration(
+        dao.register_decisions(registration(
             "user-1",
             "request-1",
             vec![campaign.id.clone()],
         ))
         .await
         .expect("first decision should be tracked");
-        Dao.record_event(
+        dao.record_event(
             "user-1",
             pb::RecordEventRequest {
                 user_id: "user-1".to_string(),
@@ -606,14 +606,14 @@ mod tests {
         )
         .await
         .expect("first event should be accepted");
-        Dao.register_decisions(registration(
+        dao.register_decisions(registration(
             "user-2",
             "request-2",
             vec![campaign.id.clone()],
         ))
         .await
         .expect("second decision should be tracked");
-        let conflict = Dao
+        let conflict = dao
             .record_event(
                 "user-2",
                 pb::RecordEventRequest {
@@ -634,12 +634,12 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_a_decision_that_does_not_match_the_campaign_action_node() {
-        let Dao = MemoryCampaignDao::default();
-        let campaign = Dao
+        let dao = MemoryCampaignDao::default();
+        let campaign = dao
             .create(campaign_request())
             .await
             .expect("campaign should be created");
-        Dao.update(
+        dao.update(
             &campaign.id,
             pb::UpdateCampaignRequest {
                 advertiser_id: campaign.advertiser_id.clone(),
@@ -650,7 +650,7 @@ mod tests {
         .await
         .expect("campaign should be activated");
 
-        let rejected = Dao
+        let rejected = dao
             .register_decisions(DecisionRegistration {
                 action_node_id: "other-node",
                 ..registration("user-1", "request-wrong-context", vec![campaign.id.clone()])
@@ -658,7 +658,7 @@ mod tests {
             .await;
         assert!(matches!(rejected, Err(DaoError::Failed(_))));
 
-        let receipt = Dao
+        let receipt = dao
             .record_event(
                 "user-1",
                 pb::RecordEventRequest {
@@ -676,12 +676,12 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_a_decision_that_does_not_match_scene_equipment() {
-        let Dao = MemoryCampaignDao::default();
-        let campaign = Dao
+        let dao = MemoryCampaignDao::default();
+        let campaign = dao
             .create(campaign_request())
             .await
             .expect("campaign should be created");
-        Dao.update(
+        dao.update(
             &campaign.id,
             pb::UpdateCampaignRequest {
                 advertiser_id: campaign.advertiser_id.clone(),
@@ -692,7 +692,7 @@ mod tests {
         .await
         .expect("campaign should be activated");
 
-        let rejected = Dao
+        let rejected = dao
             .register_decisions(DecisionRegistration {
                 scene_equipment: "wrong equipment",
                 ..registration("user-1", "request-wrong-equipment", vec![campaign.id])
@@ -703,30 +703,30 @@ mod tests {
 
     #[tokio::test]
     async fn advertiser_catalog_is_isolated_for_reads_and_updates() {
-        let Dao = MemoryCampaignDao::default();
-        let first = Dao
+        let dao = MemoryCampaignDao::default();
+        let first = dao
             .create(campaign_request())
             .await
             .expect("first advertiser campaign should be created");
         let mut second_request = campaign_request();
         second_request.advertiser_id = "advertiser-2".to_string();
-        let second = Dao
+        let second = dao
             .create(second_request)
             .await
             .expect("second advertiser campaign should be created");
 
-        let first_campaigns = Dao
+        let first_campaigns = dao
             .list_for_advertiser("advertiser-1", 20)
             .await
             .expect("first advertiser list should load");
         assert_eq!(first_campaigns.len(), 1);
         assert_eq!(first_campaigns[0].id, first.id);
         assert!(matches!(
-            Dao.get_for_advertiser(&first.id, "advertiser-2").await,
+            dao.get_for_advertiser(&first.id, "advertiser-2").await,
             Err(DaoError::NotFound(_))
         ));
         assert!(matches!(
-            Dao.update(
+            dao.update(
                 &second.id,
                 pb::UpdateCampaignRequest {
                     advertiser_id: "advertiser-1".to_string(),

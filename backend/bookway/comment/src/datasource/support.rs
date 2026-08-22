@@ -888,8 +888,8 @@ fn format_timestamp(value: OffsetDateTime) -> String {
 mod tests {
     use super::*;
 
-    async fn published_comment(Dao: &MemoryCommentDao) -> pb::CommentItem {
-        let comment = Dao
+    async fn published_comment(dao: &MemoryCommentDao) -> pb::CommentItem {
+        let comment = dao
             .create(CreateCommentInput {
                 user_id: "author",
                 post_id: "post",
@@ -903,7 +903,7 @@ mod tests {
             .expect("create comment")
             .comment
             .expect("comment result");
-        Dao.set_moderation_status(&comment.id, pb::CommentStatus::Published as i32)
+        dao.set_moderation_status(&comment.id, pb::CommentStatus::Published as i32)
             .await
             .expect("publish comment")
     }
@@ -924,27 +924,27 @@ mod tests {
 
     #[tokio::test]
     async fn report_restriction_and_appeal_restore_public_visibility() {
-        let Dao = MemoryCommentDao::default();
-        let comment = published_comment(&Dao).await;
-        let report = Dao
+        let dao = MemoryCommentDao::default();
+        let comment = published_comment(&dao).await;
+        let report = dao
             .create_report(report_input(&comment.id, "repeated harassment"))
             .await
             .expect("report published comment");
-        let retry = Dao
+        let retry = dao
             .create_report(report_input(&comment.id, "repeated harassment"))
             .await
             .expect("idempotent report retry");
-        let conflicting_retry = Dao
+        let conflicting_retry = dao
             .create_report(report_input(&comment.id, "different details"))
             .await;
-        let own_report = Dao
+        let own_report = dao
             .create_report(CreateCommentReportInput {
                 reporter_id: "author".to_string(),
                 idempotency_key: "report-own".to_string(),
                 ..report_input(&comment.id, "self report")
             })
             .await;
-        let hidden_report = Dao
+        let hidden_report = dao
             .create_report(CreateCommentReportInput {
                 idempotency_key: "report-hidden".to_string(),
                 excluded_author_ids: vec!["author".to_string()],
@@ -960,7 +960,7 @@ mod tests {
         assert!(matches!(own_report, Err(DaoError::SelfReport)));
         assert!(matches!(hidden_report, Err(DaoError::NotReportable(_))));
 
-        let restricted = Dao
+        let restricted = dao
             .review_report(
                 &report.id,
                 ReviewCommentReportInput {
@@ -981,13 +981,13 @@ mod tests {
             pb::CommentStatus::Restricted as i32
         );
         assert!(
-            Dao.list("post", None, 10, &[])
+            dao.list("post", None, 10, &[])
                 .await
                 .expect("public comments after restriction")
                 .is_empty()
         );
 
-        let appeal = Dao
+        let appeal = dao
             .create_appeal(CreateCommentAppealInput {
                 id: uuid::Uuid::now_v7().to_string(),
                 author_id: "author".to_string(),
@@ -998,7 +998,7 @@ mod tests {
             })
             .await
             .expect("author appeal");
-        let restored = Dao
+        let restored = dao
             .review_appeal(
                 &appeal.id,
                 ReviewCommentAppealInput {
@@ -1010,7 +1010,7 @@ mod tests {
             )
             .await
             .expect("restore comment");
-        let conflicting_terminal_review = Dao
+        let conflicting_terminal_review = dao
             .review_report(
                 &report.id,
                 ReviewCommentReportInput {
@@ -1031,7 +1031,7 @@ mod tests {
             pb::CommentStatus::Published as i32
         );
         assert_eq!(
-            Dao.list("post", None, 10, &[])
+            dao.list("post", None, 10, &[])
                 .await
                 .expect("public comments after restore")
                 .len(),
@@ -1045,20 +1045,20 @@ mod tests {
 
     #[tokio::test]
     async fn get_returns_only_a_visible_published_comment_on_the_requested_post() {
-        let Dao = MemoryCommentDao::default();
-        let comment = published_comment(&Dao).await;
+        let dao = MemoryCommentDao::default();
+        let comment = published_comment(&dao).await;
 
-        let fetched = Dao
+        let fetched = dao
             .get("post", &comment.id, &[])
             .await
             .expect("published answer is readable");
         assert_eq!(fetched.id, comment.id);
         assert!(matches!(
-            Dao.get("post", &comment.id, &["author".to_string()]).await,
+            dao.get("post", &comment.id, &["author".to_string()]).await,
             Err(DaoError::NotFound(_))
         ));
         assert!(matches!(
-            Dao.get("other-post", &comment.id, &[]).await,
+            dao.get("other-post", &comment.id, &[]).await,
             Err(DaoError::NotFound(_))
         ));
     }

@@ -191,8 +191,8 @@ mod tests {
 
     #[tokio::test]
     async fn reservation_is_idempotent_and_confirmation_consumes_stock() {
-        let Dao = MemoryInventoryDao::default();
-        Dao.set_stock(pb::SetStockRequest {
+        let dao = MemoryInventoryDao::default();
+        dao.set_stock(pb::SetStockRequest {
             sku_id: "sku-1".to_string(),
             available: 2,
         })
@@ -206,16 +206,16 @@ mod tests {
             }],
             ttl_seconds: Some(900),
         };
-        let first = Dao
+        let first = dao
             .reserve(request.clone())
             .await
             .expect("stock should reserve");
-        let retry = Dao
+        let retry = dao
             .reserve(request)
             .await
             .expect("same order should return its reservation");
         assert_eq!(first.id, retry.id);
-        let conflict = Dao
+        let conflict = dao
             .reserve(pb::ReserveRequest {
                 reservation_id: "order-1".to_string(),
                 items: vec![pb::ReservationLine {
@@ -227,9 +227,9 @@ mod tests {
             .await
             .expect_err("a reservation id cannot be reused for a different payload");
         assert!(matches!(conflict, DaoError::Conflict(_)));
-        assert_eq!(Dao.stock("sku-1").await.expect("stock exists").reserved, 2);
+        assert_eq!(dao.stock("sku-1").await.expect("stock exists").reserved, 2);
 
-        let error = Dao
+        let error = dao
             .reserve(pb::ReserveRequest {
                 reservation_id: "order-2".to_string(),
                 items: vec![pb::ReservationLine {
@@ -242,14 +242,14 @@ mod tests {
             .expect_err("reserved stock must not be oversold");
         assert!(matches!(error, DaoError::Insufficient(_)));
 
-        Dao.confirm("order-1")
+        dao.confirm("order-1")
             .await
             .expect("reservation should commit");
-        let stock = Dao.stock("sku-1").await.expect("stock exists");
+        let stock = dao.stock("sku-1").await.expect("stock exists");
         assert_eq!(stock.available, 0);
         assert_eq!(stock.reserved, 0);
 
-        let released = Dao
+        let released = dao
             .release("order-without-reservation")
             .await
             .expect("compensation for a failed initial reservation is idempotent");
@@ -258,14 +258,14 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_releases_expired_reservations_without_a_follow_up_checkout() {
-        let Dao = MemoryInventoryDao::default();
-        Dao.set_stock(pb::SetStockRequest {
+        let dao = MemoryInventoryDao::default();
+        dao.set_stock(pb::SetStockRequest {
             sku_id: "sku-1".to_string(),
             available: 1,
         })
         .await
         .expect("stock should be initialized");
-        Dao.reserve(pb::ReserveRequest {
+        dao.reserve(pb::ReserveRequest {
             reservation_id: "order-1".to_string(),
             items: vec![pb::ReservationLine {
                 sku_id: "sku-1".to_string(),
@@ -276,9 +276,9 @@ mod tests {
         .await
         .expect("stock should reserve");
 
-        assert_eq!(Dao.expire(100).await.expect("sweep should work"), 1);
+        assert_eq!(dao.expire(100).await.expect("sweep should work"), 1);
         assert_eq!(
-            Dao.stock("sku-1")
+            dao.stock("sku-1")
                 .await
                 .expect("stock should exist")
                 .reserved,

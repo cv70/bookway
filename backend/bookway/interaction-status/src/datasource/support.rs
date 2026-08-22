@@ -95,9 +95,8 @@ enum RefreshLeaseDecision {
     Peer,
 }
 
-/// Redis accelerates repeated reaction-context reads. The wrapped Dao
+/// Redis accelerates repeated reaction-context reads. The wrapped dao
 /// remains the source of truth and is always used for mutations and misses.
-
 fn context_version_key(user_id: &str) -> String {
     format!(
         "bookway:interaction-status:version:{}",
@@ -162,13 +161,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cached_Dao_falls_back_without_redis() {
-        let Dao =
+    async fn cached_dao_falls_back_without_redis() {
+        let dao =
             CachedInteractionStatusDao::new(Arc::new(MemoryInteractionStatusDao::seeded()), None);
-        let context = Dao
+        let context = dao
             .context("demo-user", &["post-reading".to_string()])
             .await
-            .expect("Dao fallback should work");
+            .expect("dao fallback should work");
         assert_eq!(context.liked_post_ids, ["post-reading"]);
     }
 }

@@ -14,13 +14,14 @@ impl Domain {
         &self,
         request: crate::api::pb::RankRequest,
     ) -> crate::api::pb::RankResponse {
+        let scene_equipment = scene_equipment_key(&request.scene_equipment);
         let mut candidates = request
             .candidates
             .into_iter()
             .filter(|campaign| {
                 campaign.route_id == request.route_id
                     && campaign.action_node_id == request.action_node_id
-                    && campaign.scene_equipment == request.scene_equipment
+                    && scene_equipment_key(&campaign.scene_equipment) == scene_equipment
             })
             .map(|campaign| {
                 let targeting_bonus = if request.domain.is_empty()
@@ -67,6 +68,10 @@ impl Domain {
             degraded: false,
         }
     }
+}
+
+fn scene_equipment_key(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 fn finite_probability(value: f64) -> f64 {
@@ -144,6 +149,40 @@ mod tests {
                 .expect("ranked campaign should be present")
                 .id,
             "lower-bid-high-value"
+        );
+    }
+
+    #[tokio::test]
+    async fn auction_matches_equipment_with_a_case_insensitive_key() {
+        let domain = Domain::new(Config {
+            listen_addr: "127.0.0.1:0".parse().expect("valid address"),
+            model_version: "test".to_string(),
+        })
+        .await
+        .expect("domain should initialize");
+        let response = domain
+            .rank(pb::RankRequest {
+                route_id: "route".to_string(),
+                action_node_id: "node".to_string(),
+                scene_equipment: " Trail Shoes ".to_string(),
+                candidates: vec![center::AdCampaign {
+                    id: "case-insensitive".to_string(),
+                    route_id: "route".to_string(),
+                    action_node_id: "node".to_string(),
+                    scene_equipment: "trail shoes".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await;
+
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(
+            response.items[0]
+                .campaign
+                .as_ref()
+                .map(|campaign| campaign.id.as_str()),
+            Some("case-insensitive")
         );
     }
 

@@ -6,9 +6,7 @@ use thiserror::Error;
 
 use crate::{
     conf::Config,
-    datasource::{
-        ContentDao, MemoryContentDao, PostgresContentDao, DaoError,
-    },
+    datasource::{ContentDao, DaoError, MemoryContentDao, PostgresContentDao},
 };
 
 #[derive(Debug, Error)]
@@ -18,7 +16,7 @@ pub(crate) enum ContentError {
     #[error("content belongs to another author")]
     Forbidden,
     #[error(transparent)]
-    Dao(#[from] DaoError),
+    Repository(#[from] DaoError),
     #[error("content audit unavailable: {0}")]
     Audit(String),
     #[error("media validation unavailable: {0}")]
@@ -28,7 +26,7 @@ pub(crate) enum ContentError {
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) Dao: Arc<dyn ContentDao>,
+    pub(crate) dao: Arc<dyn ContentDao>,
     pub(crate) content_audit: Option<ContentAuditClient<tonic::transport::Channel>>,
     pub(crate) media: Option<MediaClient<tonic::transport::Channel>>,
 }
@@ -38,7 +36,7 @@ impl Domain {
         config: Config,
         media: Option<MediaClient<tonic::transport::Channel>>,
     ) -> Result<Self, bookway_data::DataError> {
-        let Dao: Arc<dyn ContentDao> = match bookway_data::storage_mode()? {
+        let dao: Arc<dyn ContentDao> = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => Arc::new(MemoryContentDao::seeded()),
             bookway_data::StorageMode::Postgres => Arc::new(PostgresContentDao::new(
                 bookway_data::postgres_pool().await?,
@@ -55,7 +53,7 @@ impl Domain {
         };
         Ok(Self {
             config,
-            Dao,
+            dao,
             content_audit,
             media,
         })
@@ -129,10 +127,10 @@ impl Domain {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_dao(config: Config, Dao: Arc<dyn ContentDao>) -> Self {
+    pub(crate) fn from_dao(config: Config, dao: Arc<dyn ContentDao>) -> Self {
         Self {
             config,
-            Dao,
+            dao,
             content_audit: None,
             media: None,
         }

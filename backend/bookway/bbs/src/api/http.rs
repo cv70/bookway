@@ -87,14 +87,14 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let (status, code) = match &self.0 {
             BbsError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
-            BbsError::Dao(crate::datasource::DaoError::BlockedRelationship) => {
+            BbsError::Repository(crate::datasource::DaoError::BlockedRelationship) => {
                 (StatusCode::CONFLICT, "blocked_relationship")
             }
-            BbsError::Dao(crate::datasource::DaoError::CachePeerRefresh) => (
+            BbsError::Repository(crate::datasource::DaoError::CachePeerRefresh) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "relationship_cache_refreshing",
             ),
-            BbsError::Dao(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
+            BbsError::Repository(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
         };
         (status, Json(ErrorResponse::new(code, self.0.to_string()))).into_response()
     }

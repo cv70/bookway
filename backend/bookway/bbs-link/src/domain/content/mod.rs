@@ -19,7 +19,7 @@ impl Domain {
                 "author_id 和 author_ids 不能同时使用".to_string(),
             ));
         }
-        let mut page = self.Dao.list(&query).await?;
+        let mut page = self.dao.list(&query).await?;
         page.items = page
             .items
             .into_iter()
@@ -84,15 +84,13 @@ impl Domain {
     }
 
     pub(crate) async fn get(&self, id: &str) -> Result<pb::Content, ContentError> {
-        Ok(normalize_content_summary(self.Dao.get(id).await?))
+        Ok(normalize_content_summary(self.dao.get(id).await?))
     }
 
     pub(crate) async fn get_public(&self, id: &str) -> Result<pb::Content, ContentError> {
-        let content = normalize_content_summary(self.Dao.get(id).await?);
+        let content = normalize_content_summary(self.dao.get(id).await?);
         if content.status != pb::ContentStatus::Published as i32 {
-            return Err(ContentError::Dao(DaoError::NotFound(
-                id.to_string(),
-            )));
+            return Err(ContentError::Repository(DaoError::NotFound(id.to_string())));
         }
         Ok(content)
     }
@@ -198,7 +196,7 @@ impl Domain {
             route_fork: None,
         };
         Ok(normalize_content_summary(
-            self.Dao
+            self.dao
                 .create(content, request.idempotency_key, request_fingerprint)
                 .await?,
         ))
@@ -234,7 +232,7 @@ impl Domain {
             ));
         }
         let source_post = source.post.as_ref().ok_or_else(|| {
-            ContentError::Dao(DaoError::InvalidContent(
+            ContentError::Repository(DaoError::InvalidContent(
                 "public route is missing its post summary".to_string(),
             ))
         })?;
@@ -315,7 +313,7 @@ impl Domain {
             }),
         };
         Ok(normalize_content_summary(
-            self.Dao
+            self.dao
                 .create(
                     content,
                     Some(idempotency_key.to_string()),
@@ -329,12 +327,12 @@ impl Domain {
         &self,
         request: pb::UpdateRequest,
     ) -> Result<pb::Content, ContentError> {
-        let mut content = normalize_content_summary(self.Dao.get(&request.id).await?);
+        let mut content = normalize_content_summary(self.dao.get(&request.id).await?);
         if content.author_id != request.user_id {
             return Err(ContentError::Forbidden);
         }
         let post = content.post.as_mut().ok_or_else(|| {
-            ContentError::Dao(DaoError::InvalidContent(
+            ContentError::Repository(DaoError::InvalidContent(
                 "content is missing its post summary".to_string(),
             ))
         })?;
@@ -394,9 +392,7 @@ impl Domain {
             content.status = pb::ContentStatus::Reviewing as i32;
             content.published_at = None;
         }
-        Ok(normalize_content_summary(
-            self.Dao.update(content).await?,
-        ))
+        Ok(normalize_content_summary(self.dao.update(content).await?))
     }
 
     pub(crate) async fn publish(
@@ -408,13 +404,13 @@ impl Domain {
             .map_err(|error| ContentError::Validation(error.to_string()))?;
         if let Some(key) = request.idempotency_key.as_deref()
             && let Some(content) = self
-                .Dao
+                .dao
                 .published_by_idempotency_key(&request.user_id, key, &request_fingerprint)
                 .await?
         {
             return Ok(normalize_content_summary(content));
         }
-        let mut content = normalize_content_summary(self.Dao.get(&request.id).await?);
+        let mut content = normalize_content_summary(self.dao.get(&request.id).await?);
         if content.author_id != request.user_id {
             return Err(ContentError::Forbidden);
         }
@@ -427,7 +423,7 @@ impl Domain {
             }
             Ok(pb::ContentStatus::Draft | pb::ContentStatus::Reviewing) => {}
             Err(_) => {
-                return Err(ContentError::Dao(DaoError::InvalidContent(
+                return Err(ContentError::Repository(DaoError::InvalidContent(
                     "content has an invalid status".to_string(),
                 )));
             }
@@ -441,7 +437,7 @@ impl Domain {
             .post
             .as_ref()
             .ok_or_else(|| {
-                ContentError::Dao(DaoError::InvalidContent(
+                ContentError::Repository(DaoError::InvalidContent(
                     "content is missing its post summary".to_string(),
                 ))
             })?
@@ -470,7 +466,7 @@ impl Domain {
         content.published_at = published_at;
         content.version = next_version;
         Ok(normalize_content_summary(
-            self.Dao
+            self.dao
                 .publish(content, request.idempotency_key, request_fingerprint)
                 .await?,
         ))
@@ -485,8 +481,7 @@ impl Domain {
                 "content id must not be empty".to_string(),
             ));
         }
-        let mut content =
-            normalize_content_summary(self.Dao.get(request.content_id.trim()).await?);
+        let mut content = normalize_content_summary(self.dao.get(request.content_id.trim()).await?);
         if matches!(
             pb::ContentStatus::try_from(content.status),
             Ok(pb::ContentStatus::Restricted | pb::ContentStatus::Deleted)
@@ -496,9 +491,7 @@ impl Domain {
         content.status = pb::ContentStatus::Restricted as i32;
         content.published_at = None;
         content.version = content.version.saturating_add(1);
-        Ok(normalize_content_summary(
-            self.Dao.update(content).await?,
-        ))
+        Ok(normalize_content_summary(self.dao.update(content).await?))
     }
 
     pub(crate) async fn accept_answer(
@@ -516,8 +509,7 @@ impl Domain {
         if request.answer_id.len() > 160 {
             return Err(ContentError::Validation("回答 ID 无效".to_string()));
         }
-        let mut question =
-            normalize_content_summary(self.Dao.get(&request.question_id).await?);
+        let mut question = normalize_content_summary(self.dao.get(&request.question_id).await?);
         if question.author_id != request.user_id {
             return Err(ContentError::Forbidden);
         }
@@ -533,9 +525,7 @@ impl Domain {
         }
         question.accepted_answer_id = Some(request.answer_id.trim().to_string());
         question.version = question.version.saturating_add(1);
-        Ok(normalize_content_summary(
-            self.Dao.update(question).await?,
-        ))
+        Ok(normalize_content_summary(self.dao.update(question).await?))
     }
 
     pub(crate) async fn restore(
@@ -547,8 +537,7 @@ impl Domain {
                 "content id must not be empty".to_string(),
             ));
         }
-        let mut content =
-            normalize_content_summary(self.Dao.get(request.content_id.trim()).await?);
+        let mut content = normalize_content_summary(self.dao.get(request.content_id.trim()).await?);
         if content.status == pb::ContentStatus::Published as i32 {
             return Ok(content);
         }
@@ -560,9 +549,7 @@ impl Domain {
         content.status = pb::ContentStatus::Published as i32;
         content.published_at = Some(now_rfc3339());
         content.version = content.version.saturating_add(1);
-        Ok(normalize_content_summary(
-            self.Dao.update(content).await?,
-        ))
+        Ok(normalize_content_summary(self.dao.update(content).await?))
     }
 
     async fn resolve_milestone(
@@ -598,14 +585,14 @@ impl Domain {
 
         // A milestone can only point to content that is currently public. The
         // snapshot below is public route metadata, never a private plan read.
-        let route = match self.Dao.get(&route_id).await {
+        let route = match self.dao.get(&route_id).await {
             Ok(route) => normalize_content_summary(route),
             Err(DaoError::NotFound(_)) => {
                 return Err(ContentError::Validation(
                     "关联路线不存在或当前不可公开访问".to_string(),
                 ));
             }
-            Err(error) => return Err(ContentError::Dao(error)),
+            Err(error) => return Err(ContentError::Repository(error)),
         };
         if route.status != pb::ContentStatus::Published as i32
             || route.content_type != pb::ContentType::Route as i32
@@ -615,7 +602,7 @@ impl Domain {
             ));
         }
         let post = route.post.as_ref().ok_or_else(|| {
-            ContentError::Dao(DaoError::InvalidContent(
+            ContentError::Repository(DaoError::InvalidContent(
                 "public route is missing its post summary".to_string(),
             ))
         })?;
@@ -664,14 +651,14 @@ impl Domain {
         let route_id = normalize_public_reference_id(&draft.route_id, "关联路线 ID")?;
         // This is intentionally a public content read. A question may describe
         // an execution blockage without exposing a private plan's progress.
-        let route = match self.Dao.get(&route_id).await {
+        let route = match self.dao.get(&route_id).await {
             Ok(route) => normalize_content_summary(route),
             Err(DaoError::NotFound(_)) => {
                 return Err(ContentError::Validation(
                     "关联路线不存在或当前不可公开访问".to_string(),
                 ));
             }
-            Err(error) => return Err(ContentError::Dao(error)),
+            Err(error) => return Err(ContentError::Repository(error)),
         };
         if route.status != pb::ContentStatus::Published as i32
             || route.content_type != pb::ContentType::Route as i32
@@ -681,7 +668,7 @@ impl Domain {
             ));
         }
         let post = route.post.as_ref().ok_or_else(|| {
-            ContentError::Dao(DaoError::InvalidContent(
+            ContentError::Repository(DaoError::InvalidContent(
                 "public route is missing its post summary".to_string(),
             ))
         })?;
@@ -1186,7 +1173,7 @@ mod tests {
             .await;
         assert!(matches!(
             private_fork,
-            Err(ContentError::Dao(DaoError::NotFound(_)))
+            Err(ContentError::Repository(DaoError::NotFound(_)))
         ));
 
         let own_fork = service
@@ -1424,7 +1411,7 @@ mod tests {
             .expect("create draft");
         assert!(matches!(
             service.get_public(&draft.id).await,
-            Err(ContentError::Dao(DaoError::NotFound(id))) if id == draft.id
+            Err(ContentError::Repository(DaoError::NotFound(id))) if id == draft.id
         ));
     }
 
@@ -1681,9 +1668,7 @@ mod tests {
                     idempotency_key: Some("publish-operation-conflict".to_string()),
                 })
                 .await,
-            Err(ContentError::Dao(
-                DaoError::IdempotencyConflict(_)
-            ))
+            Err(ContentError::Repository(DaoError::IdempotencyConflict(_)))
         ));
     }
 

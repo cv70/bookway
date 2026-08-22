@@ -19,7 +19,6 @@ pub(crate) enum UpstreamError {
 
 /// Gateway owns this cross-service work item because it resolves recipients
 /// while coordinating interactions owned by other services.
-
 pub(crate) struct CommunityNotificationJob {
     pub(crate) source_id: String,
     pub(crate) recipient_user_id: String,

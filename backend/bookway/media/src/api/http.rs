@@ -112,10 +112,10 @@ impl IntoResponse for HttpError {
         let (status, code) = match &self.0 {
             MediaError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
             MediaError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
-            MediaError::Dao(DaoError::NotFound) => {
+            MediaError::Repository(DaoError::NotFound) => {
                 (StatusCode::NOT_FOUND, "media_not_found")
             }
-            MediaError::Dao(DaoError::Database(_)) => {
+            MediaError::Repository(DaoError::Database(_)) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
             }
             MediaError::Object(_) => (StatusCode::BAD_GATEWAY, "object_storage_unavailable"),

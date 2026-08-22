@@ -46,10 +46,7 @@ impl Domain {
         request: pb::ContextRequest,
     ) -> Result<Vec<pb::RouteParticipation>, BbsError> {
         validate_user_id(&request.user_id)?;
-        Ok(self
-            .dao
-            .list_route_participations(&request.user_id)
-            .await?)
+        Ok(self.dao.list_route_participations(&request.user_id).await?)
     }
 
     pub(crate) async fn route_context(
@@ -70,10 +67,7 @@ impl Domain {
         }
         route_ids.sort();
         route_ids.dedup();
-        Ok(self
-            .dao
-            .route_context(&request.user_id, &route_ids)
-            .await?)
+        Ok(self.dao.route_context(&request.user_id, &route_ids).await?)
     }
 
     pub(crate) async fn set_route_participation(

@@ -262,9 +262,7 @@ impl Domain {
             feature_client: None,
             sessions,
             exposures,
-            query_rewrites: Arc::new(QueryRewriteCache::new(Arc::new(
-                MemoryQueryRewriteDao,
-            ))),
+            query_rewrites: Arc::new(QueryRewriteCache::new(Arc::new(MemoryQueryRewriteDao))),
         }
     }
 

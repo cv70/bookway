@@ -5,8 +5,8 @@ use thiserror::Error;
 use crate::{
     conf::Config,
     datasource::{
-        CachedInteractionStatusDao, InteractionStatusDao,
-        MemoryInteractionStatusDao, PostgresInteractionStatusDao, DaoError,
+        CachedInteractionStatusDao, DaoError, InteractionStatusDao, MemoryInteractionStatusDao,
+        PostgresInteractionStatusDao,
     },
 };
 
@@ -15,24 +15,22 @@ pub(crate) enum InteractionStatusError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Dao(#[from] DaoError),
+    Repository(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) Dao: Arc<dyn InteractionStatusDao>,
+    pub(crate) dao: Arc<dyn InteractionStatusDao>,
 }
 
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, bookway_data::DataError> {
-        let Dao: Arc<dyn InteractionStatusDao> = match bookway_data::storage_mode()? {
-            bookway_data::StorageMode::Memory => {
-                Arc::new(MemoryInteractionStatusDao::seeded())
-            }
-            bookway_data::StorageMode::Postgres => Arc::new(
-                PostgresInteractionStatusDao::new(bookway_data::postgres_pool().await?),
-            ),
+        let dao: Arc<dyn InteractionStatusDao> = match bookway_data::storage_mode()? {
+            bookway_data::StorageMode::Memory => Arc::new(MemoryInteractionStatusDao::seeded()),
+            bookway_data::StorageMode::Postgres => Arc::new(PostgresInteractionStatusDao::new(
+                bookway_data::postgres_pool().await?,
+            )),
         };
         let redis = match bookway_data::redis_connection().await {
             Ok(redis) => redis,
@@ -43,15 +41,12 @@ impl Domain {
         };
         Ok(Self {
             config,
-            Dao: Arc::new(CachedInteractionStatusDao::new(Dao, redis)),
+            dao: Arc::new(CachedInteractionStatusDao::new(dao, redis)),
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn from_dao(
-        config: Config,
-        Dao: Arc<dyn InteractionStatusDao>,
-    ) -> Self {
-        Self { config, Dao }
+    pub(crate) fn from_dao(config: Config, dao: Arc<dyn InteractionStatusDao>) -> Self {
+        Self { config, dao }
     }
 }

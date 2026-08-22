@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     api::pb,
-    datasource::{AuditDao, ReportCursor, DaoError},
+    datasource::{AuditDao, DaoError, ReportCursor},
 };
 
 const DEFAULT_REPORT_PAGE_SIZE: usize = 50;
@@ -17,13 +17,13 @@ pub(crate) enum AuditError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Dao(#[from] DaoError),
+    Repository(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub struct Domain {
     pub(crate) config: crate::conf::Config,
-    Dao: Arc<AuditDao>,
+    dao: Arc<AuditDao>,
     blocked: Arc<Vec<String>>,
     reviewing: Arc<Vec<String>>,
 }
@@ -38,7 +38,7 @@ impl Domain {
         let reviewing = config.reviewing.clone();
         Ok(Self {
             config,
-            Dao: Arc::new(AuditDao::new(pool)),
+            dao: Arc::new(AuditDao::new(pool)),
             blocked: Arc::new(blocked),
             reviewing: Arc::new(reviewing),
         })
@@ -74,7 +74,7 @@ impl Domain {
             reasons,
             provider: "bookway-rules-v1".to_string(),
         };
-        self.Dao.store(&request, &response).await?;
+        self.dao.store(&request, &response).await?;
         Ok(response)
     }
 
@@ -109,7 +109,7 @@ impl Domain {
             updated_at: timestamp,
         };
         let stored = self
-            .Dao
+            .dao
             .store_report(report.clone(), idempotency_key)
             .await?;
         if stored.reporter_id != report.reporter_id
@@ -142,7 +142,7 @@ impl Domain {
         }
         let cursor = decode_cursor(request.cursor.as_deref(), "report")?;
         let mut items = self
-            .Dao
+            .dao
             .list_reports(&request, cursor.as_ref(), limit.saturating_add(1))
             .await?;
         let has_more = items.len() > limit;
@@ -213,7 +213,7 @@ impl Domain {
             }
             _ => {}
         }
-        self.Dao
+        self.dao
             .review_report(&report_id, &reviewer_id, request)
             .await
             .map_err(AuditError::from)
@@ -249,7 +249,7 @@ impl Domain {
             updated_at: timestamp,
         };
         let stored = self
-            .Dao
+            .dao
             .store_appeal(appeal.clone(), idempotency_key)
             .await?;
         if stored.appellant_id != appeal.appellant_id
@@ -283,7 +283,7 @@ impl Domain {
         }
         let cursor = decode_cursor(request.cursor.as_deref(), "appeal")?;
         let mut items = self
-            .Dao
+            .dao
             .list_appeals(&request, cursor.as_ref(), limit.saturating_add(1))
             .await?;
         let has_more = items.len() > limit;
@@ -351,7 +351,7 @@ impl Domain {
             }
             _ => {}
         }
-        self.Dao
+        self.dao
             .review_appeal(&appeal_id, &reviewer_id, request)
             .await
             .map_err(AuditError::from)
@@ -428,7 +428,7 @@ mod tests {
                 blocked: Vec::new(),
                 reviewing: Vec::new(),
             },
-            Dao: Arc::new(AuditDao::new(None)),
+            dao: Arc::new(AuditDao::new(None)),
             blocked: Arc::new(Vec::new()),
             reviewing: Arc::new(Vec::new()),
         }
@@ -558,7 +558,7 @@ mod tests {
         assert_eq!(first.updated_at, retry.updated_at);
         assert!(matches!(
             conflict,
-            AuditError::Dao(DaoError::ReportConflict)
+            AuditError::Repository(DaoError::ReportConflict)
         ));
     }
 
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(resolved.action, pb::ContentAction::Restore as i32);
         assert!(matches!(
             conflict,
-            AuditError::Dao(DaoError::AppealConflict)
+            AuditError::Repository(DaoError::AppealConflict)
         ));
     }
 

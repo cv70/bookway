@@ -18,7 +18,7 @@ impl Domain {
         request: pb::CreatorProfileRequest,
     ) -> Result<pb::CreatorProfile, CreatorError> {
         validate_user_id(&request.user_id)?;
-        Ok(self.Dao.get(request.user_id.trim()).await?)
+        Ok(self.dao.get(request.user_id.trim()).await?)
     }
 
     pub(crate) async fn upsert_profile(
@@ -40,7 +40,7 @@ impl Domain {
         let state = pb::CreatorState::try_from(request.state)
             .map_err(|_| CreatorError::Validation("创作者状态无效".to_string()))?;
         Ok(self
-            .Dao
+            .dao
             .upsert(CreatorProfileInput {
                 user_id: request.user_id.trim().to_string(),
                 handle,
@@ -97,7 +97,7 @@ impl Domain {
             .unwrap_or(DEFAULT_PAGE_SIZE as u32)
             .clamp(1, MAX_PAGE_SIZE as u32) as usize;
         let mut items = self
-            .Dao
+            .dao
             .list(
                 &user_ids,
                 &excluded_user_ids,
@@ -227,7 +227,7 @@ mod tests {
             .upsert_profile(profile("creator-b", "ACTION_READER"))
             .await
             .expect_err("duplicate handle");
-        assert!(matches!(error, CreatorError::Dao(_)));
+        assert!(matches!(error, CreatorError::Repository(_)));
     }
 
     #[tokio::test]

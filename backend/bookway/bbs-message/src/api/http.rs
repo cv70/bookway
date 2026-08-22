@@ -166,19 +166,19 @@ impl IntoResponse for HttpError {
             MessageError::Audit(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "message_audit_unavailable")
             }
-            MessageError::Dao(crate::datasource::DaoError::NotFound(_)) => {
+            MessageError::Repository(crate::datasource::DaoError::NotFound(_)) => {
                 (StatusCode::NOT_FOUND, "conversation_not_found")
             }
-            MessageError::Dao(crate::datasource::DaoError::NotParticipant) => {
+            MessageError::Repository(crate::datasource::DaoError::NotParticipant) => {
                 (StatusCode::FORBIDDEN, "conversation_access_denied")
             }
-            MessageError::Dao(crate::datasource::DaoError::IdempotencyConflict) => {
+            MessageError::Repository(crate::datasource::DaoError::IdempotencyConflict) => {
                 (StatusCode::CONFLICT, "idempotency_conflict")
             }
             MessageError::Upstream(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "social_graph_unavailable")
             }
-            MessageError::Dao(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
+            MessageError::Repository(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
         };
         (status, Json(ErrorResponse::new(code, self.0.to_string()))).into_response()
     }

@@ -128,13 +128,13 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
 fn status(error: DomainError) -> Status {
     match error {
         DomainError::Validation(message) => Status::invalid_argument(message),
-        DomainError::Dao(crate::datasource::DaoError::NotFound(message)) => {
+        DomainError::Repository(crate::datasource::DaoError::NotFound(message)) => {
             Status::not_found(message)
         }
-        DomainError::Dao(crate::datasource::DaoError::Conflict(message)) => {
+        DomainError::Repository(crate::datasource::DaoError::Conflict(message)) => {
             Status::already_exists(message)
         }
-        DomainError::Dao(error) => Status::internal(error.to_string()),
+        DomainError::Repository(error) => Status::internal(error.to_string()),
         DomainError::Upstream(message) => Status::internal(message),
     }
 }

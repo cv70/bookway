@@ -138,8 +138,8 @@ mod tests {
 
     #[tokio::test]
     async fn draft_product_can_be_activated_and_its_sku_updated() {
-        let Dao = MemoryCatalogDao::default();
-        let product = Dao
+        let dao = MemoryCatalogDao::default();
+        let product = dao
             .create(pb::CreateProductRequest {
                 merchant_id: "merchant-a".to_string(),
                 title: "Draft book".to_string(),
@@ -158,7 +158,7 @@ mod tests {
             .expect("draft creation should return the management view");
         let sku_id = product.skus[0].id.clone();
 
-        let updated = Dao
+        let updated = dao
             .update(pb::UpdateProductRequest {
                 merchant_id: "merchant-a".to_string(),
                 product_id: product.id.clone(),
@@ -176,19 +176,16 @@ mod tests {
         assert_eq!(updated.status, pb::MallProductStatus::Active as i32);
         assert_eq!(updated.skus[0].price_cents, 120);
         assert!(!updated.skus[0].saleable);
-        assert_eq!(
-            Dao.get(&product.id)
-                .await
-                .expect("active product should be public")
-                .id,
-            product.id
-        );
+        assert!(matches!(
+            dao.get(&product.id).await,
+            Err(DaoError::NotFound(id)) if id == product.id
+        ));
     }
 
     #[tokio::test]
     async fn merchant_catalog_is_isolated_and_management_lists_drafts() {
-        let Dao = MemoryCatalogDao::default();
-        let product = Dao
+        let dao = MemoryCatalogDao::default();
+        let product = dao
             .create(pb::CreateProductRequest {
                 merchant_id: "merchant-a".to_string(),
                 title: "Private draft".to_string(),
@@ -205,7 +202,7 @@ mod tests {
             })
             .await
             .expect("product should be created");
-        let denied = Dao
+        let denied = dao
             .update(pb::UpdateProductRequest {
                 merchant_id: "merchant-b".to_string(),
                 product_id: product.id.clone(),
@@ -214,7 +211,7 @@ mod tests {
             })
             .await;
         assert!(matches!(denied, Err(DaoError::NotFound(id)) if id == product.id));
-        let page = Dao
+        let page = dao
             .list(pb::ProductQueryRequest {
                 merchant_id: Some("merchant-a".to_string()),
                 include_inactive: true,
@@ -227,21 +224,30 @@ mod tests {
 
     #[tokio::test]
     async fn contextual_node_offer_is_idempotent_and_scoped_to_a_saleable_sku() {
-        let Dao = MemoryCatalogDao::default();
-        let product = Dao
+        let dao = MemoryCatalogDao::default();
+        let product = dao
             .create(pb::CreateProductRequest {
                 merchant_id: "merchant-a".to_string(),
                 title: "Trail kit".to_string(),
                 description: String::new(),
                 image_url: String::new(),
                 status: pb::MallProductStatus::Active as i32,
-                skus: vec![pb::CreateSkuRequest {
-                    title: "Standard".to_string(),
-                    price_cents: 1_000,
-                    currency: "CNY".to_string(),
-                    attributes: Default::default(),
-                    saleable: true,
-                }],
+                skus: vec![
+                    pb::CreateSkuRequest {
+                        title: "Standard".to_string(),
+                        price_cents: 1_000,
+                        currency: "CNY".to_string(),
+                        attributes: Default::default(),
+                        saleable: true,
+                    },
+                    pb::CreateSkuRequest {
+                        title: "Withdrawn".to_string(),
+                        price_cents: 900,
+                        currency: "CNY".to_string(),
+                        attributes: Default::default(),
+                        saleable: false,
+                    },
+                ],
             })
             .await
             .expect("product should be created");
@@ -256,11 +262,11 @@ mod tests {
             idempotency_key: "offer-key".to_string(),
             scene_equipment: "trail-running shoes".to_string(),
         };
-        let first = Dao
+        let first = dao
             .attach_node_offer(request.clone())
             .await
             .expect("offer should be attached");
-        let retry = Dao
+        let retry = dao
             .attach_node_offer(request.clone())
             .await
             .expect("retry should return the same offer");
@@ -270,10 +276,10 @@ mod tests {
         let mut conflicting = request;
         conflicting.commission_bps = 700;
         assert!(matches!(
-            Dao.attach_node_offer(conflicting).await,
+            dao.attach_node_offer(conflicting).await,
             Err(DaoError::Conflict(_))
         ));
-        let offers = Dao
+        let offers = dao
             .node_offers(pb::NodeOfferQueryRequest {
                 route_id: "route-1".to_string(),
                 action_node_id: "node-1".to_string(),
@@ -286,6 +292,16 @@ mod tests {
         assert_eq!(
             offers[0].product.as_ref().map(|product| &product.id),
             Some(&product.id)
+        );
+        assert!(
+            offers[0]
+                .product
+                .as_ref()
+                .is_some_and(|product| product.skus.iter().all(|sku| sku.saleable))
+        );
+        assert_eq!(
+            offers[0].product.as_ref().map(|product| product.skus.len()),
+            Some(1)
         );
     }
 }

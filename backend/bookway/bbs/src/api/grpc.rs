@@ -104,12 +104,12 @@ pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error>
 fn domain_error(error: crate::domain::BbsError) -> Status {
     match error {
         crate::domain::BbsError::Validation(message) => Status::invalid_argument(message),
-        crate::domain::BbsError::Dao(
-            crate::datasource::DaoError::BlockedRelationship,
-        ) => Status::failed_precondition(error.to_string()),
-        crate::domain::BbsError::Dao(
-            crate::datasource::DaoError::CachePeerRefresh,
-        ) => Status::unavailable(error.to_string()),
-        crate::domain::BbsError::Dao(_) => Status::internal(error.to_string()),
+        crate::domain::BbsError::Repository(crate::datasource::DaoError::BlockedRelationship) => {
+            Status::failed_precondition(error.to_string())
+        }
+        crate::domain::BbsError::Repository(crate::datasource::DaoError::CachePeerRefresh) => {
+            Status::unavailable(error.to_string())
+        }
+        crate::domain::BbsError::Repository(_) => Status::internal(error.to_string()),
     }
 }

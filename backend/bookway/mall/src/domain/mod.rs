@@ -1,9 +1,7 @@
 use crate::api::pb;
 use crate::{
     Config,
-    datasource::{
-        CatalogDao, MemoryCatalogDao, PostgresCatalogDao, DaoError,
-    },
+    datasource::{CatalogDao, DaoError, MemoryCatalogDao, PostgresCatalogDao},
 };
 use bookway_bbs_link_api::pb::{self as bbs_link, bbs_link_client::BbsLinkClient};
 use std::sync::Arc;
@@ -17,17 +15,17 @@ pub(crate) enum MallError {
     #[error("catalog conflict: {0}")]
     Conflict(String),
     #[error("catalog operation failed: {0}")]
-    Dao(String),
+    Repository(String),
 }
 #[derive(Clone)]
 pub struct Domain {
     config: Config,
-    Dao: Arc<dyn CatalogDao>,
+    dao: Arc<dyn CatalogDao>,
     bbs_link: BbsLinkClient<tonic::transport::Channel>,
 }
 impl Domain {
     pub async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let Dao: Arc<dyn CatalogDao> = match bookway_data::storage_mode()? {
+        let dao: Arc<dyn CatalogDao> = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => Arc::new(MemoryCatalogDao::default()),
             bookway_data::StorageMode::Postgres => Arc::new(PostgresCatalogDao::new(
                 bookway_data::postgres_pool().await?,
@@ -36,7 +34,7 @@ impl Domain {
         let bbs_link = BbsLinkClient::connect(config.bbs_link_url.clone()).await?;
         Ok(Self {
             config,
-            Dao,
+            dao,
             bbs_link,
         })
     }
@@ -48,7 +46,7 @@ impl Domain {
         request: pb::CreateProductRequest,
     ) -> Result<pb::MallProduct, MallError> {
         validate(&request)?;
-        self.Dao.create(request).await.map_err(repo_error)
+        self.dao.create(request).await.map_err(repo_error)
     }
     pub(crate) async fn update_product(
         &self,
@@ -58,13 +56,13 @@ impl Domain {
             return Err(MallError::Validation("product id is required".to_string()));
         }
         validate_update(&request)?;
-        self.Dao.update(request).await.map_err(repo_error)
+        self.dao.update(request).await.map_err(repo_error)
     }
     pub(crate) async fn products(
         &self,
         request: pb::ProductQueryRequest,
     ) -> Result<pb::ProductPage, MallError> {
-        self.Dao.list(request).await.map_err(repo_error)
+        self.dao.list(request).await.map_err(repo_error)
     }
     pub(crate) async fn product(
         &self,
@@ -73,7 +71,7 @@ impl Domain {
         if request.id.trim().is_empty() {
             return Err(MallError::Validation("product id is required".to_string()));
         }
-        self.Dao.get(&request.id).await.map_err(repo_error)
+        self.dao.get(&request.id).await.map_err(repo_error)
     }
     pub(crate) async fn skus(
         &self,
@@ -85,18 +83,15 @@ impl Domain {
             ));
         }
         Ok(pb::SkuListResponse {
-            items: self
-                .Dao
-                .skus(request.ids)
-                .await
-                .map_err(repo_error)?,
+            items: self.dao.skus(request.ids).await.map_err(repo_error)?,
         })
     }
 
     pub(crate) async fn attach_node_offer(
         &self,
-        request: pb::AttachNodeOfferRequest,
+        mut request: pb::AttachNodeOfferRequest,
     ) -> Result<pb::NodeOffer, MallError> {
+        request.scene_equipment = scene_equipment_key(&request.scene_equipment);
         if request.product_id.trim().is_empty()
             || request.merchant_id.trim().is_empty()
             || request.sku_id.trim().is_empty()
@@ -124,14 +119,14 @@ impl Domain {
         )
         .await?;
         let skus = self
-            .Dao
+            .dao
             .skus(vec![request.sku_id.clone()])
             .await
             .map_err(repo_error)?;
         if skus.len() != 1 || skus[0].product_id != request.product_id {
             return Err(MallError::NotFound(request.sku_id));
         }
-        self.Dao
+        self.dao
             .attach_node_offer(request)
             .await
             .map_err(repo_error)
@@ -149,11 +144,7 @@ impl Domain {
         self.validate_public_action_node(&request.route_id, &request.action_node_id, None, None)
             .await?;
         Ok(pb::NodeOfferList {
-            items: self
-                .Dao
-                .node_offers(request)
-                .await
-                .map_err(repo_error)?,
+            items: self.dao.node_offers(request).await.map_err(repo_error)?,
         })
     }
 
@@ -166,11 +157,7 @@ impl Domain {
                 "node offer id is required".to_string(),
             ));
         }
-        let offer = self
-            .Dao
-            .node_offer(&request.id)
-            .await
-            .map_err(repo_error)?;
+        let offer = self.dao.node_offer(&request.id).await.map_err(repo_error)?;
         // Orders resolve an offer by ID rather than through the public list.
         // Revalidate its route action context so an old offer ID cannot bypass
         // a withdrawn route, a removed action node, or changed equipment.
@@ -183,13 +170,9 @@ impl Domain {
         .await?;
         // The route association can remain addressable for historical
         // settlement, but checkout must resolve a currently saleable SKU.
-        let product = self
-            .Dao
-            .get(&offer.product_id)
-            .await
-            .map_err(repo_error)?;
+        let product = self.dao.get(&offer.product_id).await.map_err(repo_error)?;
         let skus = self
-            .Dao
+            .dao
             .skus(vec![offer.sku_id.clone()])
             .await
             .map_err(repo_error)?;
@@ -213,10 +196,7 @@ impl Domain {
         }
         // Historical attribution and affiliate settlement deliberately retain
         // the original context after a merchant withdraws an offer.
-        self.Dao
-            .node_offer(&request.id)
-            .await
-            .map_err(repo_error)
+        self.dao.node_offer(&request.id).await.map_err(repo_error)
     }
 
     async fn validate_public_action_node(
@@ -232,12 +212,12 @@ impl Domain {
                 bookway_runtime::grpc_service_request(bbs_link::IdRequest {
                     id: route_id.to_string(),
                 })
-                .map_err(|error| MallError::Dao(error.to_string()))?,
+                .map_err(|error| MallError::Repository(error.to_string()))?,
             )
             .await
             .map_err(|error| match error.code() {
                 tonic::Code::NotFound => MallError::NotFound(route_id.to_string()),
-                _ => MallError::Dao(format!("bbs-link get_public failed: {error}")),
+                _ => MallError::Repository(format!("bbs-link get_public failed: {error}")),
             })?
             .into_inner();
         validate_route_action_node(
@@ -372,7 +352,7 @@ fn repo_error(error: DaoError) -> MallError {
     match error {
         DaoError::NotFound(value) => MallError::NotFound(value),
         DaoError::Conflict(value) => MallError::Conflict(value),
-        DaoError::Failed(value) => MallError::Dao(value),
+        DaoError::Failed(value) => MallError::Repository(value),
     }
 }
 

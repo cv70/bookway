@@ -20,7 +20,7 @@ impl Domain {
         }
         post_ids.sort_unstable();
         post_ids.dedup();
-        Ok(self.Dao.context(&user_id, &post_ids).await?)
+        Ok(self.dao.context(&user_id, &post_ids).await?)
     }
 
     pub(crate) async fn set_reaction(
@@ -35,7 +35,7 @@ impl Domain {
             ));
         }
         Ok(self
-            .Dao
+            .dao
             .set_reaction(
                 &request.user_id,
                 &request.post_id,

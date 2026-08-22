@@ -134,19 +134,19 @@ impl IntoResponse for HttpError {
         let (status, code) = match &self.0 {
             ContentError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
             ContentError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
-            ContentError::Dao(crate::datasource::DaoError::NotFound(_)) => {
+            ContentError::Repository(crate::datasource::DaoError::NotFound(_)) => {
                 (StatusCode::NOT_FOUND, "content_not_found")
             }
-            ContentError::Dao(crate::datasource::DaoError::IdempotencyConflict(
-                _,
-            )) => (StatusCode::CONFLICT, "idempotency_conflict"),
-            ContentError::Dao(
+            ContentError::Repository(crate::datasource::DaoError::IdempotencyConflict(_)) => {
+                (StatusCode::CONFLICT, "idempotency_conflict")
+            }
+            ContentError::Repository(
                 crate::datasource::DaoError::Database(_)
                 | crate::datasource::DaoError::Serialization(_)
                 | crate::datasource::DaoError::InvalidTimestamp(_)
                 | crate::datasource::DaoError::InvalidContent(_),
             ) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
-            ContentError::Dao(crate::datasource::DaoError::VersionConflict) => {
+            ContentError::Repository(crate::datasource::DaoError::VersionConflict) => {
                 (StatusCode::CONFLICT, "version_conflict")
             }
             ContentError::Audit(_) => (StatusCode::BAD_GATEWAY, "audit_unavailable"),

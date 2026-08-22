@@ -12,5 +12,7 @@ a user's private action state.
 
 The service-token-protected gRPC control plane creates products as drafts and
 updates product fields, SKU price/attributes/saleability and lifecycle status.
-Only active products and saleable SKUs are returned by customer-facing reads;
-order lines retain their own immutable price snapshots.
+Only active products and saleable SKUs are returned by customer-facing reads,
+including the product projection nested in a node offer; merchant views may
+include drafts and withdrawn SKUs. Order lines retain their own immutable price
+snapshots.

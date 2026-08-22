@@ -38,14 +38,13 @@ impl Domain {
         &self,
         request: crate::api::pb::DecisionRequest,
     ) -> Result<crate::api::pb::DecisionResponse, AdMainError> {
+        let scene_equipment =
+            scene_equipment_key(request.scene_equipment.as_deref().unwrap_or_default());
         if request.user_id.trim().is_empty()
             || request.placement.trim().is_empty()
             || request.route_id.trim().is_empty()
             || request.action_node_id.trim().is_empty()
-            || request
-                .scene_equipment
-                .as_deref()
-                .is_none_or(|value| value.trim().is_empty())
+            || scene_equipment.is_empty()
         {
             return Err(AdMainError::Validation(
                 "user_id, placement, route_id, action_node_id and scene_equipment are required"
@@ -67,7 +66,7 @@ impl Domain {
                     limit: u32::try_from(limit.saturating_mul(4)).unwrap_or(u32::MAX),
                     route_id: request.route_id.clone(),
                     action_node_id: request.action_node_id.clone(),
-                    scene_equipment: request.scene_equipment.clone().unwrap_or_default(),
+                    scene_equipment: scene_equipment.clone(),
                 },
             )?)
             .await
@@ -83,7 +82,7 @@ impl Domain {
                     candidates: candidates.items,
                     route_id: request.route_id.clone(),
                     action_node_id: request.action_node_id.clone(),
-                    scene_equipment: request.scene_equipment.clone().unwrap_or_default(),
+                    scene_equipment: scene_equipment.clone(),
                 },
             )?)
             .await
@@ -124,7 +123,7 @@ impl Domain {
                         campaign_ids: items.iter().map(|item| item.campaign_id.clone()).collect(),
                         route_id: request.route_id.clone(),
                         action_node_id: request.action_node_id.clone(),
-                        scene_equipment: request.scene_equipment.clone().unwrap_or_default(),
+                        scene_equipment,
                     },
                 )?)
                 .await
@@ -156,6 +155,10 @@ impl Domain {
             .map(|response| response.into_inner())
             .map_err(|error| upstream_error("ad-center", error))
     }
+}
+
+fn scene_equipment_key(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 fn service_request<T>(service: &'static str, value: T) -> Result<tonic::Request<T>, AdMainError> {
     bookway_runtime::grpc_service_request(value)

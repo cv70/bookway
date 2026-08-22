@@ -70,6 +70,11 @@ struct NodeOfferRow {
     created_at: OffsetDateTime,
 }
 
+fn customer_product(mut product: pb::MallProduct) -> pb::MallProduct {
+    product.skus.retain(|sku| sku.saleable);
+    product
+}
+
 impl NodeOfferRow {
     fn into_proto(self) -> pb::NodeOffer {
         pb::NodeOffer {
@@ -122,6 +127,25 @@ impl PostgresCatalogDao {
         .map_err(database)?
         .ok_or_else(|| DaoError::NotFound(id.to_string()))?;
         self.load_product(product).await
+    }
+
+    async fn load_customer(&self, id: &str) -> Result<pb::MallProduct, DaoError> {
+        let product = sqlx::query_as::<_, ProductRow>(
+            "SELECT id,title,description,image_url,status,created_at,updated_at FROM mall_products WHERE id=$1 AND status='active' AND EXISTS (SELECT 1 FROM mall_skus WHERE product_id=mall_products.id AND saleable=true)",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?
+        .ok_or_else(|| DaoError::NotFound(id.to_string()))?;
+        let skus = sqlx::query_as::<_, SkuRow>(
+            "SELECT id,product_id,title,price_cents,currency,attributes,saleable FROM mall_skus WHERE product_id=$1 AND saleable=true ORDER BY id",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database)?;
+        product.into_proto(skus)
     }
 }
 
@@ -189,11 +213,16 @@ impl CatalogDao for PostgresCatalogDao {
     }
     async fn list(&self, request: pb::ProductQueryRequest) -> Result<pb::ProductPage, DaoError> {
         let limit = usize::try_from(request.limit.unwrap_or(20).clamp(1, 100)).unwrap_or(100);
-        let rows = sqlx::query_as::<_, ProductRow>("SELECT id,title,description,image_url,status,created_at,updated_at FROM mall_products WHERE id > $1 AND ($2='' OR title ILIKE '%' || $2 || '%') AND ($3='' OR merchant_id=$3) AND ($4 OR status='active') ORDER BY id LIMIT $5").bind(request.cursor.unwrap_or_default()).bind(request.query.unwrap_or_default()).bind(request.merchant_id.unwrap_or_default()).bind(request.include_inactive).bind(i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)).fetch_all(&self.pool).await.map_err(database)?;
+        let rows = sqlx::query_as::<_, ProductRow>("SELECT id,title,description,image_url,status,created_at,updated_at FROM mall_products WHERE id > $1 AND ($2='' OR title ILIKE '%' || $2 || '%') AND ($3='' OR merchant_id=$3) AND ($4 OR (status='active' AND EXISTS (SELECT 1 FROM mall_skus WHERE product_id=mall_products.id AND saleable=true))) ORDER BY id LIMIT $5").bind(request.cursor.unwrap_or_default()).bind(request.query.unwrap_or_default()).bind(request.merchant_id.unwrap_or_default()).bind(request.include_inactive).bind(i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)).fetch_all(&self.pool).await.map_err(database)?;
         let more = rows.len() > limit;
         let mut values = Vec::with_capacity(rows.len().min(limit));
         for row in rows.into_iter().take(limit) {
-            values.push(self.load_product(row).await?);
+            let product = self.load_product(row).await?;
+            values.push(if request.include_inactive {
+                product
+            } else {
+                customer_product(product)
+            });
         }
         let next_cursor = if more {
             values.last().map(|value| value.id.clone())
@@ -206,8 +235,7 @@ impl CatalogDao for PostgresCatalogDao {
         })
     }
     async fn get(&self, id: &str) -> Result<pb::MallProduct, DaoError> {
-        let row = sqlx::query_as::<_, ProductRow>("SELECT id,title,description,image_url,status,created_at,updated_at FROM mall_products WHERE id=$1 AND status='active'").bind(id).fetch_optional(&self.pool).await.map_err(database)?.ok_or_else(|| DaoError::NotFound(id.to_string()))?;
-        self.load_product(row).await
+        self.load_customer(id).await
     }
     async fn skus(&self, ids: Vec<String>) -> Result<Vec<pb::MallSku>, DaoError> {
         let mut builder = QueryBuilder::<sqlx::Postgres>::new(
@@ -291,7 +319,7 @@ impl CatalogDao for PostgresCatalogDao {
         .map_err(database)?;
         let mut offers = Vec::with_capacity(rows.len());
         for row in rows {
-            let product = self.load_internal(&row.product_id).await?;
+            let product = self.load_customer(&row.product_id).await?;
             let mut offer = row.into_proto();
             offer.product = Some(product);
             offers.push(offer);

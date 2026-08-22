@@ -506,11 +506,11 @@ fn recurring_successor(action: &pb::Action) -> Result<Option<pb::Action>, DaoErr
         .anchor_date
         .as_deref()
         .ok_or_else(|| DaoError::Schedule("recurrence anchor date is missing".to_string()))
-        .and_then(Dao_local_date)?;
+        .and_then(dao_local_date)?;
     let end_date = recurrence
         .ends_on
         .as_deref()
-        .map(Dao_local_date)
+        .map(dao_local_date)
         .transpose()?;
     let next_date = match pb::ActionRecurrenceFrequency::try_from(recurrence.frequency) {
         Ok(pb::ActionRecurrenceFrequency::Daily) => {
@@ -592,7 +592,7 @@ fn weekday_matches(expected: i32, actual: time::Weekday) -> bool {
     )
 }
 
-fn Dao_local_date(value: &str) -> Result<Date, DaoError> {
+fn dao_local_date(value: &str) -> Result<Date, DaoError> {
     let format = time::format_description::parse_borrowed::<3>("[year]-[month]-[day]")
         .map_err(|error| DaoError::Schedule(error.to_string()))?;
     Date::parse(value, &format).map_err(|error| DaoError::Schedule(error.to_string()))

@@ -267,8 +267,8 @@ mod tests {
 
     #[tokio::test]
     async fn memory_catalog_filters_published_resources_by_kind_and_topic() {
-        let Dao = MemoryResourceDao::seeded();
-        let response = Dao
+        let dao = MemoryResourceDao::seeded();
+        let response = dao
             .search(&pb::SearchRequest {
                 kind: Some(pb::ResourceKind::Book as i32),
                 topic: "阅读".to_string(),
@@ -285,8 +285,8 @@ mod tests {
 
     #[tokio::test]
     async fn memory_catalog_cursor_is_bounded_and_get_hides_unknown_resources() {
-        let Dao = MemoryResourceDao::seeded();
-        let first = Dao
+        let dao = MemoryResourceDao::seeded();
+        let first = dao
             .search(&pb::SearchRequest {
                 limit: Some(1),
                 ..Default::default()
@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(first.items.len(), 1);
         assert_eq!(first.next_cursor.as_deref(), Some("1"));
 
-        let second = Dao
+        let second = dao
             .search(&pb::SearchRequest {
                 cursor: first.next_cursor.unwrap_or_default(),
                 limit: Some(10),
@@ -305,7 +305,7 @@ mod tests {
             .await
             .expect("second page should succeed");
         assert_eq!(second.items.len(), 2);
-        assert!(Dao.get("missing-resource").await.is_err());
+        assert!(dao.get("missing-resource").await.is_err());
     }
 }
 

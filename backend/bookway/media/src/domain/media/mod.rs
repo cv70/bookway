@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     api::pb,
-    datasource::{NewMedia, DaoError},
+    datasource::{DaoError, NewMedia},
     domain::{Domain, MediaError},
 };
 
@@ -28,7 +28,7 @@ impl Domain {
         let id = Uuid::now_v7().to_string();
         let object_key = format!("{}/{}/{}", owner, &id[..2], id);
         let cdn_url = format!("{}/{}", self.cdn_base, object_key);
-        self.Dao
+        self.dao
             .create(NewMedia {
                 id: id.clone(),
                 owner_id: owner.to_string(),
@@ -56,7 +56,7 @@ impl Domain {
         if !self.proxy_upload {
             return Err(MediaError::Forbidden);
         }
-        let media = self.Dao.pending(id, owner).await?;
+        let media = self.dao.pending(id, owner).await?;
         if body.len() as u64 != media.size_bytes {
             return Err(MediaError::Validation("上传大小与声明不一致".to_string()));
         }
@@ -66,7 +66,7 @@ impl Domain {
         // Byte presence and declared metadata are checked synchronously. The
         // asset cannot be attached to content until the durable processor has
         // finished its additional integrity/audit pass.
-        Ok(self.Dao.mark_processing(id).await?)
+        Ok(self.dao.mark_processing(id).await?)
     }
     pub(crate) async fn complete_upload(
         &self,
@@ -74,14 +74,14 @@ impl Domain {
     ) -> Result<pb::MediaResource, MediaError> {
         let owner = &request.user_id;
         let id = &request.id;
-        let media = match self.Dao.pending(id, owner).await {
+        let media = match self.dao.pending(id, owner).await {
             Ok(media) => media,
             Err(DaoError::NotFound) => {
                 // Completion can be retried after a timeout. Once ownership
                 // has been established by `get`, returning the existing
                 // terminal/intermediate state is safer than creating a
                 // second processing job or falsely reporting a missing file.
-                return Ok(self.Dao.owned(id, owner).await?);
+                return Ok(self.dao.owned(id, owner).await?);
             }
             Err(error) => return Err(error.into()),
         };
@@ -101,13 +101,13 @@ impl Domain {
                 metadata.mime_type.as_deref().unwrap_or("unknown")
             )));
         }
-        Ok(self.Dao.mark_processing(id).await?)
+        Ok(self.dao.mark_processing(id).await?)
     }
     pub(crate) async fn get(
         &self,
         request: pb::ResourceRequest,
     ) -> Result<pb::MediaResource, MediaError> {
-        Ok(self.Dao.get(&request.id, &request.user_id).await?)
+        Ok(self.dao.get(&request.id, &request.user_id).await?)
     }
 
     pub(crate) async fn owned_ready_batch(
@@ -137,7 +137,7 @@ impl Domain {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(pb::OwnedReadyMediaResponse {
             items: self
-                .Dao
+                .dao
                 .owned_ready_batch(request.user_id.trim(), &ids)
                 .await?,
         })

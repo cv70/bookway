@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     conf::Config,
-    datasource::{FeedbackDao, DaoError},
+    datasource::{DaoError, FeedbackDao},
 };
 
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -21,13 +21,13 @@ pub(crate) enum FeedbackError {
     #[error("{0}")]
     Validation(String),
     #[error(transparent)]
-    Dao(#[from] DaoError),
+    Repository(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub struct Domain {
     config: Config,
-    Dao: Arc<FeedbackDao>,
+    dao: Arc<FeedbackDao>,
 }
 
 impl Domain {
@@ -38,7 +38,7 @@ impl Domain {
         };
         Ok(Self {
             config,
-            Dao: Arc::new(FeedbackDao::new(pool)),
+            dao: Arc::new(FeedbackDao::new(pool)),
         })
     }
 
@@ -67,10 +67,7 @@ impl Domain {
             created_at: timestamp.clone(),
             updated_at: timestamp,
         };
-        let stored = self
-            .Dao
-            .create(feedback.clone(), idempotency_key)
-            .await?;
+        let stored = self.dao.create(feedback.clone(), idempotency_key).await?;
         if stored.user_id != feedback.user_id
             || stored.category != feedback.category
             || stored.content != feedback.content
@@ -90,7 +87,7 @@ impl Domain {
         request: pb::ListOwnFeedbackRequest,
     ) -> Result<pb::FeedbackList, FeedbackError> {
         validate_user_id(&request.user_id)?;
-        self.Dao
+        self.dao
             .list(
                 Some(request.user_id.trim()),
                 parse_status(request.status)?,
@@ -105,7 +102,7 @@ impl Domain {
         &self,
         request: pb::ListFeedbackRequest,
     ) -> Result<pb::FeedbackList, FeedbackError> {
-        self.Dao
+        self.dao
             .list(
                 None,
                 parse_status(request.status)?,
@@ -132,7 +129,7 @@ impl Domain {
                 "resolution exceeds {MAX_RESOLUTION_LENGTH} characters"
             )));
         }
-        self.Dao
+        self.dao
             .review(
                 request.feedback_id.trim(),
                 required_status(request.status)?,
@@ -249,7 +246,7 @@ mod tests {
                     .parse::<SocketAddr>()
                     .expect("valid socket address"),
             },
-            Dao: Arc::new(FeedbackDao::new(None)),
+            dao: Arc::new(FeedbackDao::new(None)),
         }
     }
 

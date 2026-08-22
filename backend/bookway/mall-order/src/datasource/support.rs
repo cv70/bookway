@@ -216,20 +216,20 @@ mod tests {
 
     #[tokio::test]
     async fn idempotency_key_rejects_a_different_order_payload() {
-        let Dao = MemoryOrderDao::default();
-        Dao.create(NewOrder {
+        let dao = MemoryOrderDao::default();
+        dao.create(NewOrder {
             order: draft("order-1"),
             idempotency_key: "key-1".to_string(),
             request_fingerprint: "sku-1:1".to_string(),
         })
         .await
         .expect("initial order should be created");
-        let retry = Dao
+        let retry = dao
             .find_idempotent("user-1", "key-1", "sku-1:1")
             .await
             .expect("matching payload should replay the order");
         assert_eq!(retry.expect("order should exist").id, "order-1");
-        let error = Dao
+        let error = dao
             .find_idempotent("user-1", "key-1", "sku-2:1")
             .await
             .expect_err("different payload must not reuse the order");
@@ -238,25 +238,25 @@ mod tests {
 
     #[tokio::test]
     async fn payment_reference_cannot_be_claimed_by_two_orders() {
-        let Dao = MemoryOrderDao::default();
-        Dao.create(NewOrder {
+        let dao = MemoryOrderDao::default();
+        dao.create(NewOrder {
             order: draft("order-1"),
             idempotency_key: "key-1".to_string(),
             request_fingerprint: "sku-1:1".to_string(),
         })
         .await
         .expect("first order should be created");
-        Dao.create(NewOrder {
+        dao.create(NewOrder {
             order: draft("order-2"),
             idempotency_key: "key-2".to_string(),
             request_fingerprint: "sku-2:1".to_string(),
         })
         .await
         .expect("second order should be created");
-        Dao.claim_payment_reference("order-1", "payment-1")
+        dao.claim_payment_reference("order-1", "payment-1")
             .await
             .expect("first claim should succeed");
-        let error = Dao
+        let error = dao
             .claim_payment_reference("order-2", "payment-1")
             .await
             .expect_err("payment reference reuse must fail");
@@ -265,17 +265,17 @@ mod tests {
 
     #[tokio::test]
     async fn payment_reference_cannot_be_claimed_after_the_order_expires() {
-        let Dao = MemoryOrderDao::default();
+        let dao = MemoryOrderDao::default();
         let mut order = draft("order-1");
         order.expires_at = "2000-01-01T00:00:00Z".to_string();
-        Dao.create(NewOrder {
+        dao.create(NewOrder {
             order,
             idempotency_key: "key-1".to_string(),
             request_fingerprint: "sku-1:1".to_string(),
         })
         .await
         .expect("order should be created");
-        let error = Dao
+        let error = dao
             .claim_payment_reference("order-1", "payment-1")
             .await
             .expect_err("expired orders cannot start payment");

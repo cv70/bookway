@@ -157,20 +157,20 @@ mod tests {
 
     #[tokio::test]
     async fn owned_ready_batch_never_leaks_another_users_asset() {
-        let Dao = MemoryMediaDao::default();
-        Dao.create(media("0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b", "author-a"))
+        let dao = MemoryMediaDao::default();
+        dao.create(media("0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b", "author-a"))
             .await
             .expect("create asset");
-        Dao.mark_processing("0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b")
+        dao.mark_processing("0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b")
             .await
             .expect("local processing completes");
-        let repeated_completion = Dao
+        let repeated_completion = dao
             .mark_processing("0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b")
             .await
             .expect("repeated completion is safe in local storage");
         assert_eq!(repeated_completion.status, "ready");
 
-        let owned = Dao
+        let owned = dao
             .owned_ready_batch(
                 "author-a",
                 &["0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b".to_string()],
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(owned[0].status, "ready");
 
         assert!(matches!(
-            Dao.owned_ready_batch(
+            dao.owned_ready_batch(
                 "author-b",
                 &["0184c5bb-76e7-7c77-8d0d-7a03e1d2a13b".to_string()],
             )

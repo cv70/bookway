@@ -60,10 +60,8 @@ fn internal_error(error: crate::domain::InteractionStatusError) -> Status {
         crate::domain::InteractionStatusError::Validation(message) => {
             Status::invalid_argument(message)
         }
-        crate::domain::InteractionStatusError::Dao(error) => match error {
-            crate::datasource::DaoError::CachePeerRefresh => {
-                Status::unavailable(error.to_string())
-            }
+        crate::domain::InteractionStatusError::Repository(error) => match error {
+            crate::datasource::DaoError::CachePeerRefresh => Status::unavailable(error.to_string()),
             _ => Status::internal(error.to_string()),
         },
     }

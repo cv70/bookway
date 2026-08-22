@@ -176,32 +176,32 @@ fn internal_error(error: crate::domain::CommentError) -> Status {
     let message = error.to_string();
     match error {
         crate::domain::CommentError::Validation(_) => Status::invalid_argument(message),
-        crate::domain::CommentError::Dao(
+        crate::domain::CommentError::Repository(
             crate::datasource::DaoError::ReplyDepthExceeded,
         ) => Status::invalid_argument(message),
-        crate::domain::CommentError::Dao(
+        crate::domain::CommentError::Repository(
             crate::datasource::DaoError::ParentNotFound(_)
             | crate::datasource::DaoError::NotFound(_)
             | crate::datasource::DaoError::ReportNotFound(_)
             | crate::datasource::DaoError::AppealNotFound(_),
         ) => Status::not_found(message),
-        crate::domain::CommentError::Dao(
+        crate::domain::CommentError::Repository(
             crate::datasource::DaoError::IdempotencyConflict
             | crate::datasource::DaoError::ReportIdempotencyConflict
             | crate::datasource::DaoError::AppealIdempotencyConflict,
         ) => Status::already_exists(message),
-        crate::domain::CommentError::Dao(
+        crate::domain::CommentError::Repository(
             crate::datasource::DaoError::ModerationConflict
             | crate::datasource::DaoError::ReportConflict
             | crate::datasource::DaoError::AppealConflict,
         ) => Status::aborted(message),
-        crate::domain::CommentError::Dao(crate::datasource::DaoError::SelfReport) => {
+        crate::domain::CommentError::Repository(crate::datasource::DaoError::SelfReport) => {
             Status::permission_denied(message)
         }
-        crate::domain::CommentError::Dao(
+        crate::domain::CommentError::Repository(
             crate::datasource::DaoError::NotReportable(_)
             | crate::datasource::DaoError::ActionConflict,
         ) => Status::failed_precondition(message),
-        crate::domain::CommentError::Dao(_) => Status::internal(message),
+        crate::domain::CommentError::Repository(_) => Status::internal(message),
     }
 }

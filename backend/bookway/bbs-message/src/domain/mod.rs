@@ -8,9 +8,7 @@ use thiserror::Error;
 
 use crate::{
     conf::Config,
-    datasource::{
-        MemoryMessageDao, MessageDao, PostgresMessageDao, DaoError,
-    },
+    datasource::{DaoError, MemoryMessageDao, MessageDao, PostgresMessageDao},
 };
 
 #[derive(Debug, Error)]
@@ -32,13 +30,13 @@ pub(crate) enum MessageError {
     #[error("upstream social dependency failed: {0}")]
     Upstream(String),
     #[error(transparent)]
-    Dao(#[from] DaoError),
+    Repository(#[from] DaoError),
 }
 
 #[derive(Clone)]
 pub(crate) struct Domain {
     pub(crate) config: Config,
-    pub(crate) Dao: Arc<dyn MessageDao>,
+    pub(crate) dao: Arc<dyn MessageDao>,
     pub(crate) bbs: BbsClient<tonic::transport::Channel>,
     pub(crate) content_audit: Option<ContentAuditClient<tonic::transport::Channel>>,
 }
@@ -46,7 +44,7 @@ pub(crate) struct Domain {
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let storage_mode = bookway_data::storage_mode()?;
-        let Dao: Arc<dyn MessageDao> = match storage_mode {
+        let dao: Arc<dyn MessageDao> = match storage_mode {
             bookway_data::StorageMode::Memory => Arc::new(MemoryMessageDao::default()),
             bookway_data::StorageMode::Postgres => Arc::new(PostgresMessageDao::new(
                 bookway_data::postgres_pool().await?,
@@ -67,7 +65,7 @@ impl Domain {
             bbs: BbsClient::connect(config.bbs_grpc_url.clone()).await?,
             content_audit,
             config,
-            Dao,
+            dao,
         })
     }
 

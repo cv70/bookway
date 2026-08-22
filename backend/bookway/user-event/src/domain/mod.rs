@@ -12,8 +12,7 @@ use tonic::transport::Channel;
 use uuid::Uuid;
 
 use super::datasource::{
-    AcceptedEvent, MemoryEventDao, PostgresEventDao, DaoError,
-    SharedEventDao,
+    AcceptedEvent, DaoError, MemoryEventDao, PostgresEventDao, SharedEventDao,
 };
 use crate::{api::pb, conf::Config};
 
@@ -32,7 +31,7 @@ pub(crate) enum IngestError {
     #[error("trusted user identity is required")]
     MissingUser,
     #[error(transparent)]
-    Dao(#[from] DaoError),
+    Repository(#[from] DaoError),
 }
 
 #[async_trait]
@@ -66,7 +65,7 @@ impl FeatureCacheInvalidator for RedisFeatureCacheInvalidator {
 
 #[derive(Clone)]
 pub(crate) struct UserEventService {
-    Dao: SharedEventDao,
+    dao: SharedEventDao,
     feature_cache: Option<SharedFeatureCacheInvalidator>,
     recommend_main: Option<RecommendMainClient<Channel>>,
     search_main: Option<SearchMainClient<Channel>>,
@@ -84,11 +83,11 @@ impl Domain {
         recommend_main: RecommendMainClient<Channel>,
         search_main: SearchMainClient<Channel>,
     ) -> Result<Self, bookway_data::DataError> {
-        let Dao: SharedEventDao = match bookway_data::storage_mode()? {
+        let dao: SharedEventDao = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => Arc::new(MemoryEventDao::default()),
-            bookway_data::StorageMode::Postgres => Arc::new(PostgresEventDao::new(
-                bookway_data::postgres_pool().await?,
-            )),
+            bookway_data::StorageMode::Postgres => {
+                Arc::new(PostgresEventDao::new(bookway_data::postgres_pool().await?))
+            }
         };
         let feature_cache = match bookway_data::redis_connection().await {
             Ok(Some(redis)) => {
@@ -104,7 +103,7 @@ impl Domain {
         Ok(Self {
             config,
             events: UserEventService::with_clients(
-                Dao,
+                dao,
                 feature_cache,
                 Some(recommend_main),
                 Some(search_main),
@@ -116,29 +115,29 @@ impl Domain {
 impl UserEventService {
     #[cfg(test)]
     pub(crate) fn with_feature_cache(
-        Dao: SharedEventDao,
+        dao: SharedEventDao,
         feature_cache: Option<SharedFeatureCacheInvalidator>,
     ) -> Self {
-        Self::with_feature_cache_and_recommend_main(Dao, feature_cache, None)
+        Self::with_feature_cache_and_recommend_main(dao, feature_cache, None)
     }
 
     #[cfg(test)]
     pub(crate) fn with_feature_cache_and_recommend_main(
-        Dao: SharedEventDao,
+        dao: SharedEventDao,
         feature_cache: Option<SharedFeatureCacheInvalidator>,
         recommend_main: Option<RecommendMainClient<Channel>>,
     ) -> Self {
-        Self::with_clients(Dao, feature_cache, recommend_main, None)
+        Self::with_clients(dao, feature_cache, recommend_main, None)
     }
 
     pub(crate) fn with_clients(
-        Dao: SharedEventDao,
+        dao: SharedEventDao,
         feature_cache: Option<SharedFeatureCacheInvalidator>,
         recommend_main: Option<RecommendMainClient<Channel>>,
         search_main: Option<SearchMainClient<Channel>>,
     ) -> Self {
         Self {
-            Dao,
+            dao,
             feature_cache,
             recommend_main,
             search_main,
@@ -176,7 +175,7 @@ impl UserEventService {
         self.validate_attribution(&user_id, &mut accepted_events, &mut rejected)
             .await;
 
-        let stored = self.Dao.store(accepted_events).await?;
+        let stored = self.dao.store(accepted_events).await?;
         if stored.accepted > 0 {
             self.invalidate_user_features(&user_id).await;
         }
@@ -605,10 +604,8 @@ mod tests {
             invalidated_user_ids: Mutex::new(Vec::new()),
             fails: true,
         });
-        let service = UserEventService::with_feature_cache(
-            Arc::new(MemoryEventDao::default()),
-            Some(cache),
-        );
+        let service =
+            UserEventService::with_feature_cache(Arc::new(MemoryEventDao::default()), Some(cache));
 
         let response = service
             .ingest(request(vec![event(

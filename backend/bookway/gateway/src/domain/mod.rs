@@ -1644,7 +1644,7 @@ impl Domain {
         request: growth_pb::CreateNotificationRequest,
     ) {
         match &self.community_notifications {
-            CommunityNotificationSink::Postgres(Dao) => {
+            CommunityNotificationSink::Postgres(dao) => {
                 let job = match community_notification_job(recipient_user_id, request) {
                     Ok(job) => job,
                     Err(error) => {
@@ -1652,7 +1652,7 @@ impl Domain {
                         return;
                     }
                 };
-                if let Err(error) = Dao.enqueue(job).await {
+                if let Err(error) = dao.enqueue(job).await {
                     // The interaction is already owned and committed by another
                     // service, so do not turn a successful user action into an
                     // ambiguous failure. Operations must alert on this signal.

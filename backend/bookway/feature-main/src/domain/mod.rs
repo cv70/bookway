@@ -12,7 +12,7 @@ use crate::datasource::CandidateFeatures;
 #[derive(Clone)]
 pub struct Domain {
     pub(crate) config: Config,
-    Dao: Arc<FeatureDao>,
+    dao: Arc<FeatureDao>,
     cache: Arc<FeatureCache>,
     model_version: String,
 }
@@ -32,7 +32,7 @@ impl Domain {
         let model_version = config.model_version.clone();
         Ok(Self {
             config,
-            Dao: Arc::new(FeatureDao::new(pool, model_version.clone())),
+            dao: Arc::new(FeatureDao::new(pool, model_version.clone())),
             cache: Arc::new(FeatureCache::new(redis)),
             model_version,
         })
@@ -60,7 +60,7 @@ impl Domain {
                         miss_guard.release().await;
                         return HashMap::new();
                     }
-                    let features = self.Dao.load(&request.user_id).await;
+                    let features = self.dao.load(&request.user_id).await;
                     self.cache.store(&request.user_id, &features).await;
                     miss_guard.release().await;
                     features
@@ -68,7 +68,7 @@ impl Domain {
             }
         };
         let candidate_features = self
-            .Dao
+            .dao
             .load_candidates(&request.user_id, &request.content_ids);
         let (persisted, candidate_features) = tokio::join!(user_features, candidate_features);
         values.extend(persisted);

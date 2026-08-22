@@ -110,58 +110,56 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let (status, code) = match &self.0 {
             CommentError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
-            CommentError::Dao(crate::datasource::DaoError::ReplyDepthExceeded) => {
+            CommentError::Repository(crate::datasource::DaoError::ReplyDepthExceeded) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "reply_depth_exceeded")
             }
-            CommentError::Dao(crate::datasource::DaoError::ParentNotFound(_)) => {
+            CommentError::Repository(crate::datasource::DaoError::ParentNotFound(_)) => {
                 (StatusCode::NOT_FOUND, "parent_comment_not_found")
             }
-            CommentError::Dao(crate::datasource::DaoError::NotFound(_)) => {
+            CommentError::Repository(crate::datasource::DaoError::NotFound(_)) => {
                 (StatusCode::NOT_FOUND, "comment_not_found")
             }
-            CommentError::Dao(crate::datasource::DaoError::IdempotencyConflict) => {
+            CommentError::Repository(crate::datasource::DaoError::IdempotencyConflict) => {
                 (StatusCode::CONFLICT, "idempotency_conflict")
             }
-            CommentError::Dao(crate::datasource::DaoError::ModerationConflict) => {
+            CommentError::Repository(crate::datasource::DaoError::ModerationConflict) => {
                 (StatusCode::CONFLICT, "moderation_conflict")
             }
-            CommentError::Dao(crate::datasource::DaoError::NotReportable(_)) => {
+            CommentError::Repository(crate::datasource::DaoError::NotReportable(_)) => {
                 (StatusCode::CONFLICT, "comment_not_reportable")
             }
-            CommentError::Dao(crate::datasource::DaoError::SelfReport) => {
+            CommentError::Repository(crate::datasource::DaoError::SelfReport) => {
                 (StatusCode::FORBIDDEN, "self_report")
             }
-            CommentError::Dao(
-                crate::datasource::DaoError::ReportIdempotencyConflict,
-            ) => (StatusCode::CONFLICT, "report_idempotency_conflict"),
-            CommentError::Dao(crate::datasource::DaoError::ReportNotFound(_)) => {
+            CommentError::Repository(crate::datasource::DaoError::ReportIdempotencyConflict) => {
+                (StatusCode::CONFLICT, "report_idempotency_conflict")
+            }
+            CommentError::Repository(crate::datasource::DaoError::ReportNotFound(_)) => {
                 (StatusCode::NOT_FOUND, "comment_report_not_found")
             }
-            CommentError::Dao(crate::datasource::DaoError::ReportConflict) => {
+            CommentError::Repository(crate::datasource::DaoError::ReportConflict) => {
                 (StatusCode::CONFLICT, "comment_report_conflict")
             }
-            CommentError::Dao(
-                crate::datasource::DaoError::AppealIdempotencyConflict,
-            ) => (StatusCode::CONFLICT, "appeal_idempotency_conflict"),
-            CommentError::Dao(crate::datasource::DaoError::AppealNotFound(_)) => {
+            CommentError::Repository(crate::datasource::DaoError::AppealIdempotencyConflict) => {
+                (StatusCode::CONFLICT, "appeal_idempotency_conflict")
+            }
+            CommentError::Repository(crate::datasource::DaoError::AppealNotFound(_)) => {
                 (StatusCode::NOT_FOUND, "comment_appeal_not_found")
             }
-            CommentError::Dao(crate::datasource::DaoError::AppealConflict) => {
+            CommentError::Repository(crate::datasource::DaoError::AppealConflict) => {
                 (StatusCode::CONFLICT, "comment_appeal_conflict")
             }
-            CommentError::Dao(crate::datasource::DaoError::ActionConflict) => {
+            CommentError::Repository(crate::datasource::DaoError::ActionConflict) => {
                 (StatusCode::CONFLICT, "comment_action_conflict")
             }
-            CommentError::Dao(crate::datasource::DaoError::Database(_)) => {
+            CommentError::Repository(crate::datasource::DaoError::Database(_)) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
             }
-            CommentError::Dao(
-                crate::datasource::DaoError::InvalidModerationState(_),
-            ) => (
+            CommentError::Repository(crate::datasource::DaoError::InvalidModerationState(_)) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "invalid_moderation_state",
             ),
-            CommentError::Dao(crate::datasource::DaoError::InvalidReplyHierarchy) => {
+            CommentError::Repository(crate::datasource::DaoError::InvalidReplyHierarchy) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "invalid_reply_hierarchy")
             }
         };

@@ -6,15 +6,14 @@ use bookway_knowledge_catalog_api::pb;
 use crate::{
     conf::Config,
     datasource::{
-        MemoryResourceDao, NewNodeResourceAttachment, PostgresResourceDao,
-        DaoError, ResourceDao,
+        DaoError, MemoryResourceDao, NewNodeResourceAttachment, PostgresResourceDao, ResourceDao,
     },
 };
 
 #[derive(Clone)]
 pub(crate) struct Domain {
     config: Config,
-    Dao: Arc<dyn ResourceDao>,
+    dao: Arc<dyn ResourceDao>,
     bbs_link: Option<BbsLinkClient<tonic::transport::Channel>>,
 }
 
@@ -31,14 +30,14 @@ pub(crate) enum DomainError {
     #[error("invalid request: {0}")]
     Validation(String),
     #[error("{0}")]
-    Dao(#[from] DaoError),
+    Repository(#[from] DaoError),
     #[error("BBS Link request failed: {0}")]
     Upstream(String),
 }
 
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, DomainInitError> {
-        let Dao: Arc<dyn ResourceDao> = match bookway_data::storage_mode()? {
+        let dao: Arc<dyn ResourceDao> = match bookway_data::storage_mode()? {
             bookway_data::StorageMode::Memory => Arc::new(MemoryResourceDao::seeded()),
             bookway_data::StorageMode::Postgres => Arc::new(PostgresResourceDao::new(
                 bookway_data::postgres_pool().await?,
@@ -47,7 +46,7 @@ impl Domain {
         let bbs_link = BbsLinkClient::connect(config.bbs_link_url.clone()).await?;
         Ok(Self {
             config,
-            Dao,
+            dao,
             bbs_link: Some(bbs_link),
         })
     }
@@ -62,7 +61,7 @@ impl Domain {
         request.topic = request.topic.trim().chars().take(80).collect();
         request.cursor = request.cursor.trim().to_string();
         request.limit = Some(request.limit.unwrap_or(20).clamp(1, 50));
-        Ok(self.Dao.search(&request).await?)
+        Ok(self.dao.search(&request).await?)
     }
     pub(crate) async fn get(&self, request: pb::GetRequest) -> Result<pb::Resource, DomainError> {
         let id = request.resource_id.trim();
@@ -71,7 +70,7 @@ impl Domain {
                 "resource_id is required".to_string(),
             ));
         }
-        Ok(self.Dao.get(id).await?)
+        Ok(self.dao.get(id).await?)
     }
 
     pub(crate) async fn list_node_resources(
@@ -83,7 +82,7 @@ impl Domain {
         self.validate_public_action_node(&route_id, &action_node_id, None)
             .await?;
         Ok(self
-            .Dao
+            .dao
             .list_node_resources(&route_id, &action_node_id, request.include_archived)
             .await?)
     }
@@ -112,7 +111,7 @@ impl Domain {
             String::new()
         };
         Ok(self
-            .Dao
+            .dao
             .attach_node_resource(NewNodeResourceAttachment {
                 route_id,
                 action_node_id,
@@ -142,7 +141,7 @@ impl Domain {
             .await?;
         Ok(pb::DetachNodeResourceResponse {
             detached: self
-                .Dao
+                .dao
                 .detach_node_resource(&route_id, &action_node_id, &attachment_id)
                 .await?,
         })
@@ -159,7 +158,7 @@ impl Domain {
             .await?;
         let limit = usize::try_from(request.limit.unwrap_or(6).clamp(1, 12)).unwrap_or(6);
         let attachments = self
-            .Dao
+            .dao
             .list_node_resources(&route_id, &action_node_id, false)
             .await?
             .items;
@@ -175,7 +174,7 @@ impl Domain {
             }
             validate_embedding_vector(&request.embedding_model, &request.query_embedding)?;
             let hits = self
-                .Dao
+                .dao
                 .search_rag_embeddings(
                     &route_id,
                     &action_node_id,
@@ -239,7 +238,7 @@ impl Domain {
         self.validate_public_action_node(&route_id, &action_node_id, Some(&operator_id))
             .await?;
         let attachment = self
-            .Dao
+            .dao
             .list_node_resources(&route_id, &action_node_id, false)
             .await?
             .items
@@ -254,7 +253,7 @@ impl Domain {
                     .to_string(),
             ));
         }
-        self.Dao
+        self.dao
             .upsert_rag_embedding(&attachment, &embedding_model, request.embedding)
             .await?;
         Ok(pb::UpsertRagEmbeddingResponse {
@@ -280,7 +279,7 @@ impl Domain {
             .await?;
         let limit = usize::try_from(request.limit.unwrap_or(8).clamp(1, 50)).unwrap_or(8);
         let active_attachment_ids = self
-            .Dao
+            .dao
             .list_node_resources(&route_id, &action_node_id, false)
             .await?
             .items
@@ -289,7 +288,7 @@ impl Domain {
             .map(|attachment| attachment.id)
             .collect::<std::collections::HashSet<_>>();
         let hits = self
-            .Dao
+            .dao
             .search_rag_embeddings(
                 &route_id,
                 &action_node_id,
@@ -543,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn embedding_contract_rejects_invalid_vectors_before_Dao_access() {
+    fn embedding_contract_rejects_invalid_vectors_before_dao_access() {
         assert!(validate_embedding_vector("model-v1", &[1.0; 7]).is_err());
         assert!(validate_embedding_vector("model-v1", &[0.0; 8]).is_err());
         assert!(validate_embedding_vector("model-v1", &[f32::NAN; 8]).is_err());
@@ -614,7 +613,7 @@ mod tests {
                 listen_addr: "127.0.0.1:0".parse::<SocketAddr>().expect("socket address"),
                 bbs_link_url: "http://127.0.0.1:18004".to_string(),
             },
-            Dao: Arc::new(MemoryResourceDao::seeded()),
+            dao: Arc::new(MemoryResourceDao::seeded()),
             bbs_link: None,
         };
         let request = pb::AttachNodeResourceRequest {
@@ -688,7 +687,7 @@ mod tests {
             .await;
         assert!(matches!(
             conflict,
-            Err(DomainError::Dao(
+            Err(DomainError::Repository(
                 crate::datasource::DaoError::Conflict(_)
             ))
         ));

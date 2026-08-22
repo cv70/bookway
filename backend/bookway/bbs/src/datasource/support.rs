@@ -118,9 +118,8 @@ enum RefreshLeaseDecision {
 }
 
 /// Redis is an acceleration and coordination layer only. The wrapped
-/// Dao remains the source of truth for every relationship mutation and
+/// dao remains the source of truth for every relationship mutation and
 /// for cache misses when Redis is unavailable.
-
 fn relationship_identity(user_id: &str) -> String {
     Sha256::digest(user_id.as_bytes())
         .iter()
@@ -208,9 +207,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relationship_cache_falls_back_to_the_Dao_without_redis() {
-        let Dao = Arc::new(CachedBbsDao::new(Arc::new(MemoryBbsDao::seeded()), None));
-        let context = Dao.context("demo-user").await.expect("context");
+    async fn relationship_cache_falls_back_to_the_dao_without_redis() {
+        let dao = Arc::new(CachedBbsDao::new(Arc::new(MemoryBbsDao::seeded()), None));
+        let context = dao.context("demo-user").await.expect("context");
         assert_eq!(context.followed_author_ids, vec!["author-changfeng"]);
     }
 }

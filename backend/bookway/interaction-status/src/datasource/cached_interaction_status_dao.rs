@@ -106,7 +106,7 @@ impl CachedInteractionStatusDao {
                     return RefreshLeaseDecision::Peer;
                 }
                 Err(error) => {
-                    tracing::debug!(%error, key, "interaction context refresh lease unavailable; using Dao");
+                    tracing::debug!(%error, key, "interaction context refresh lease unavailable; using dao");
                     return RefreshLeaseDecision::Owned(None);
                 }
             }

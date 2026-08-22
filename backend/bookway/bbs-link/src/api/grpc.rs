@@ -164,17 +164,17 @@ fn internal_error(error: crate::domain::ContentError) -> Status {
         crate::domain::ContentError::Forbidden => {
             Status::permission_denied("content belongs to another author")
         }
-        crate::domain::ContentError::Dao(crate::datasource::DaoError::NotFound(
-            message,
-        )) => Status::not_found(message),
-        crate::domain::ContentError::Dao(
+        crate::domain::ContentError::Repository(crate::datasource::DaoError::NotFound(message)) => {
+            Status::not_found(message)
+        }
+        crate::domain::ContentError::Repository(
             crate::datasource::DaoError::IdempotencyConflict(message),
         ) => Status::already_exists(message),
-        crate::domain::ContentError::Dao(
-            crate::datasource::DaoError::VersionConflict,
-        ) => Status::aborted("content version conflict"),
+        crate::domain::ContentError::Repository(crate::datasource::DaoError::VersionConflict) => {
+            Status::aborted("content version conflict")
+        }
         crate::domain::ContentError::Audit(message) => Status::unavailable(message),
         crate::domain::ContentError::Media(message) => Status::unavailable(message),
-        crate::domain::ContentError::Dao(error) => Status::internal(error.to_string()),
+        crate::domain::ContentError::Repository(error) => Status::internal(error.to_string()),
     }
 }
