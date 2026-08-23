@@ -93,7 +93,10 @@ async fn load_user_features(
                 event.negative_feedback_reason,
                 content.domain,
                 CASE event.event_type
-                    WHEN 'complete' THEN 5.0
+                    WHEN 'complete' THEN CASE
+                        WHEN event.source IN ('gateway-route-completion', 'gateway-knowledge-completion') THEN 5.0
+                        ELSE 0.0
+                    END
                     WHEN 'join_route' THEN 5.0
                     WHEN 'save_knowledge' THEN 4.0
                     WHEN 'bookmark' THEN 3.0

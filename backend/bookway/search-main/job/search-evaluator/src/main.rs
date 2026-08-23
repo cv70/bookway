@@ -201,17 +201,19 @@ async fn load_evaluation_items(
             COALESCE(BOOL_OR(event.event_type = 'impression'), false) AS rendered,
             COALESCE(BOOL_OR(event.event_type = 'click'), false) AS clicked,
             COALESCE(BOOL_OR(event.event_type = 'view'), false) AS viewed,
-            COALESCE(BOOL_OR(event.event_type IN ('like', 'bookmark', 'save_knowledge', 'share', 'join_route', 'complete')), false) AS high_intent,
+            COALESCE(BOOL_OR(event.event_type IN ('like', 'bookmark', 'save_knowledge', 'share', 'join_route')
+                OR (event.event_type = 'complete' AND event.source IN ('gateway-route-completion', 'gateway-knowledge-completion'))), false) AS high_intent,
             COALESCE(BOOL_OR(event.event_type IN ('hide', 'report')), false) AS negative,
-            COALESCE(MAX(CASE event.event_type
-                WHEN 'complete' THEN 5.0
-                WHEN 'join_route' THEN 5.0
-                WHEN 'save_knowledge' THEN 4.0
-                WHEN 'bookmark' THEN 3.0
-                WHEN 'share' THEN 2.5
-                WHEN 'like' THEN 2.0
-                WHEN 'click' THEN 1.0
-                WHEN 'view' THEN 0.4
+            COALESCE(MAX(CASE
+                WHEN event.event_type = 'complete'
+                    AND event.source IN ('gateway-route-completion', 'gateway-knowledge-completion') THEN 5.0
+                WHEN event.event_type = 'join_route' THEN 5.0
+                WHEN event.event_type = 'save_knowledge' THEN 4.0
+                WHEN event.event_type = 'bookmark' THEN 3.0
+                WHEN event.event_type = 'share' THEN 2.5
+                WHEN event.event_type = 'like' THEN 2.0
+                WHEN event.event_type = 'click' THEN 1.0
+                WHEN event.event_type = 'view' THEN 0.4
                 ELSE 0.0
             END), 0.0)::double precision AS reward,
             COALESCE(MAX(CASE

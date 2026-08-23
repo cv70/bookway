@@ -25,7 +25,8 @@ impl FeatureDao {
         let feedback = sqlx::query_as::<_, (i64, f64, i64, i64)>(
             r#"
             SELECT
-                COUNT(*) FILTER (WHERE event_type IN ('like', 'bookmark', 'save_knowledge', 'share', 'complete')),
+                COUNT(*) FILTER (WHERE event_type IN ('like', 'bookmark', 'save_knowledge', 'share')
+                    OR (event_type = 'complete' AND source IN ('gateway-route-completion', 'gateway-knowledge-completion'))),
                 COALESCE(SUM(CASE
                     WHEN event_type = 'hide' AND negative_feedback_reason = 'already_seen' THEN 0.25
                     WHEN event_type IN ('hide', 'report') THEN 1.0
@@ -115,16 +116,17 @@ impl FeatureDao {
             SELECT
                 content.domain,
                 SUM(
-                    CASE event.event_type
-                        WHEN 'join_route' THEN 5.0
-                        WHEN 'complete' THEN 5.0
-                        WHEN 'save_knowledge' THEN 4.0
-                        WHEN 'bookmark' THEN 3.0
-                        WHEN 'share' THEN 2.5
-                        WHEN 'like' THEN 2.0
-                        WHEN 'click' THEN 0.6
-                        WHEN 'view' THEN 0.4
-                        WHEN 'hide' THEN CASE
+                    CASE
+                        WHEN event.event_type = 'join_route' THEN 5.0
+                        WHEN event.event_type = 'complete'
+                            AND event.source IN ('gateway-route-completion', 'gateway-knowledge-completion') THEN 5.0
+                        WHEN event.event_type = 'save_knowledge' THEN 4.0
+                        WHEN event.event_type = 'bookmark' THEN 3.0
+                        WHEN event.event_type = 'share' THEN 2.5
+                        WHEN event.event_type = 'like' THEN 2.0
+                        WHEN event.event_type = 'click' THEN 0.6
+                        WHEN event.event_type = 'view' THEN 0.4
+                        WHEN event.event_type = 'hide' THEN CASE
                             WHEN event.negative_feedback_reason IN ('already_seen', 'low_quality') THEN 0.0
                             ELSE -5.0
                         END
@@ -181,6 +183,9 @@ impl FeatureDao {
 
         // Normalize high-intent history within each user's strongest domain
         // and author so global popularity does not erase personal preference.
+        // Completion counts below deliberately accept only Gateway's
+        // server-derived sources; client feedback is useful for UX but cannot
+        // manufacture a WEGU conversion.
         let rows = sqlx::query_as::<_, (String, f64, f64, f64, f64, f64, f64, f64, f64, f64)>(
             r#"
             WITH history AS (
@@ -189,7 +194,10 @@ impl FeatureDao {
                     content.author_id,
                     CASE event.event_type
                         WHEN 'join_route' THEN 5.0
-                        WHEN 'complete' THEN 5.0
+                        WHEN 'complete' THEN CASE
+                            WHEN event.source IN ('gateway-route-completion', 'gateway-knowledge-completion') THEN 5.0
+                            ELSE 0.0
+                        END
                         WHEN 'save_knowledge' THEN 4.0
                         WHEN 'bookmark' THEN 3.0
                         WHEN 'share' THEN 2.5
@@ -205,7 +213,10 @@ impl FeatureDao {
                     END AS domain_weight,
                     CASE event.event_type
                         WHEN 'join_route' THEN 5.0
-                        WHEN 'complete' THEN 5.0
+                        WHEN 'complete' THEN CASE
+                            WHEN event.source IN ('gateway-route-completion', 'gateway-knowledge-completion') THEN 5.0
+                            ELSE 0.0
+                        END
                         WHEN 'save_knowledge' THEN 4.0
                         WHEN 'bookmark' THEN 3.0
                         WHEN 'share' THEN 2.5
@@ -262,7 +273,7 @@ impl FeatureDao {
                     )::double precision AS clicks
                     ,COUNT(*) FILTER (WHERE event_type IN ('bookmark', 'save_knowledge'))::double precision AS saves
                     ,COUNT(*) FILTER (WHERE event_type = 'save_knowledge')::double precision AS knowledge_starts
-                    ,COUNT(*) FILTER (WHERE event_type = 'complete')::double precision AS completions
+                    ,COUNT(*) FILTER (WHERE event_type = 'complete' AND source IN ('gateway-route-completion', 'gateway-knowledge-completion'))::double precision AS completions
                     ,COUNT(*) FILTER (WHERE event_type = 'join_route')::double precision AS joins
                     ,COUNT(*) FILTER (WHERE event_type = 'purchase')::double precision AS purchases
                 FROM user_events
@@ -287,6 +298,7 @@ impl FeatureDao {
                     )::double precision AS clicks,
                     COUNT(*) FILTER (
                         WHERE event_type = 'complete'
+                          AND event.source IN ('gateway-route-completion', 'gateway-knowledge-completion')
                           AND occurred_at > now() - interval '90 days'
                     )::double precision AS completions,
                     COUNT(*) FILTER (

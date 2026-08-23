@@ -580,7 +580,43 @@ impl Domain {
         &self,
         request: bbs_link_pb::CreateRequest,
     ) -> Result<bbs_link_pb::Content, UpstreamError> {
+        // A milestone is a public check-in against a route. BBS Link owns the
+        // immutable route/stage snapshot, while BBS owns the user's active
+        // participation fact; verify both at the Gateway boundary before the
+        // content write so clients cannot manufacture WEGU evidence.
+        if request.content_type == bbs_link_pb::ContentType::Milestone as i32 {
+            let route_id = request
+                .milestone
+                .as_ref()
+                .map(|milestone| milestone.route_id.trim())
+                .filter(|route_id| !route_id.is_empty())
+                .ok_or_else(|| route_precondition("打卡复盘必须关联路线"))?;
+            self.require_active_route_participation(&request.user_id, route_id)
+                .await?;
+        }
         grpc_call!(self, bbs_link, "bbs-link", create, request)
+    }
+
+    async fn require_active_route_participation(
+        &self,
+        user_id: &str,
+        route_id: &str,
+    ) -> Result<(), UpstreamError> {
+        let response = grpc_call!(
+            self,
+            bbs,
+            "bbs",
+            route_context,
+            bbs_pb::RouteContextRequest {
+                user_id: user_id.to_string(),
+                route_ids: vec![route_id.to_string()],
+            }
+        )?;
+        if response.joined_route_ids.iter().any(|id| id == route_id) {
+            Ok(())
+        } else {
+            Err(route_precondition("只有已加入路线的用户可以提交打卡复盘"))
+        }
     }
 
     pub(crate) async fn fork_route(

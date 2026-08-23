@@ -179,6 +179,7 @@ Gateway 只请求 `search-main`，由它规范化参数和编排底层 `bbs-sear
 - `comment`：空评论/超长评论/跨帖父评论校验，支持回复、写入幂等和 `(created_at, id)` 稳定游标分页；新评论先待审，只有 `content-audit` 通过后才会进入公开列表，审核故障 fail-closed。举报仅针对当前可见的公开评论，作者可对受限评论申诉；`restrict_comment` 与 `restore_comment` 在审核事务内直接改变评论状态。
 - `interaction-status`：点赞、收藏与 `hide` 负反馈的幂等集合、计数和批量互动上下文；隐藏内容供推荐在线硬过滤。
 - Gateway：互动写入前调用内容服务校验内容存在且公开；审核员 JWT 角色受限地开放举报队列和处置入口。
+- 路线打卡复盘：`milestone` 写入前由 Gateway 以 BBS 的活动参与事实做 fail-closed 校验，再由 BBS Link 固化公开路线/阶段快照，防止客户端伪造 WEGU 完成证据。
 - `content-audit`：接收按用户和幂等键去重的内容举报与作者申诉；内部人工队列支持稳定游标、认领、结案说明、不可覆盖的终态决定，以及持久化的 `restrict_content` / `restore_content` 动作；终态决定与对应的下架、恢复或通知任务同事务提交。
 - `growth`：持有私人资源知识库、阅读进度、书签、路线关联、检索条件、只读陪伴简报和提醒偏好/设备注册；一条资源可原子转换为带首项行动的私人 Journey，资源关联本身是转换幂等边界；创建使用用户级 `Idempotency-Key`，所有关联路线均校验归属。
 - `user-event`：最多 100 条批量事件、UUID 与时间校验、`event_id` 幂等；带推荐或搜索请求的事件按来源分别经 Recommend Main / Search Main 批量核验，无法核验的临时降级为无归因反馈；事件和 Outbox 同事务写入，`bookway-outbox-relay` 负责 Kafka 重试、指数退避与死信。
