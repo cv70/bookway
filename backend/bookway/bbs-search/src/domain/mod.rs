@@ -149,11 +149,33 @@ impl SearchService {
         }
         let excluded_author_ids = normalize_excluded_author_ids(&request.excluded_author_ids);
         let excluded_authors = excluded_author_ids.iter().cloned().collect::<HashSet<_>>();
+        if request
+            .route_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+            || request
+                .action_node_id
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || request.route_id.is_some() != request.action_node_id.is_some()
+            || request
+                .scene_equipment
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || (request.scene_equipment.is_some()
+                && (request.route_id.is_none() || request.action_node_id.is_none()))
+        {
+            return Err(SearchError::Validation(
+                "route_id and action_node_id must be provided together".to_string(),
+            ));
+        }
+        let route_context = route_context(&request);
         let fingerprint = query_fingerprint(
             &query_text,
             search_type,
             request.user_id.as_deref(),
             &excluded_author_ids,
+            route_context.as_ref(),
         );
         let session_id = parse_cursor(
             request.cursor.as_deref(),
@@ -161,6 +183,7 @@ impl SearchService {
             search_type,
             request.user_id.as_deref(),
             &excluded_author_ids,
+            route_context.as_ref(),
         )?;
         let limit = request
             .limit
@@ -196,26 +219,28 @@ impl SearchService {
             if session.source_exhausted || source_pages >= MAX_SOURCE_PAGES_PER_RESPONSE {
                 break;
             }
+            let source_query = bbs_link_pb::ListRequest {
+                cursor: session.source_cursor.clone(),
+                limit: Some(SOURCE_PAGE_SIZE as u32),
+                status: Some(bbs_link_pb::ContentStatus::Published as i32),
+                strategy: Some("fresh".to_string()),
+                ids: route_context
+                    .as_ref()
+                    .map(|context| context.route_id.clone()),
+                author_id: None,
+                content_type: match search_type {
+                    pb::SearchType::Journeys => Some(bbs_link_pb::ContentType::Route as i32),
+                    _ => None,
+                },
+                domain: None,
+                author_ids: Vec::new(),
+            };
             let source_result = self
                 .search_contents(
-                    bbs_link_pb::ListRequest {
-                        cursor: session.source_cursor.clone(),
-                        limit: Some(SOURCE_PAGE_SIZE as u32),
-                        status: Some(bbs_link_pb::ContentStatus::Published as i32),
-                        strategy: Some("fresh".to_string()),
-                        ids: None,
-                        author_id: None,
-                        content_type: match search_type {
-                            pb::SearchType::Journeys => {
-                                Some(bbs_link_pb::ContentType::Route as i32)
-                            }
-                            _ => None,
-                        },
-                        domain: None,
-                        author_ids: Vec::new(),
-                    },
+                    source_query,
                     &query_text,
                     &excluded_author_ids,
+                    route_context.as_ref(),
                     content_client.as_ref(),
                 )
                 .await
@@ -233,6 +258,7 @@ impl SearchService {
                 search_type,
                 &excluded_authors,
                 source_result.source_ranked,
+                route_context.as_ref(),
             );
             if !source_result.source_ranked {
                 sort_results(&mut candidates);
@@ -267,6 +293,7 @@ impl SearchService {
                 search_type,
                 request.user_id.as_deref(),
                 &excluded_author_ids,
+                route_context.as_ref(),
                 &id,
             ))
         } else {
@@ -331,6 +358,7 @@ impl SearchService {
                 source_query,
                 &query,
                 &excluded_author_ids,
+                None,
                 content_client.as_ref(),
             ),
         );
@@ -377,6 +405,7 @@ impl SearchService {
         mut query: bbs_link_pb::ListRequest,
         text: &str,
         excluded_author_ids: &[String],
+        route_context: Option<&RouteSearchContext>,
         content_client: Option<&BbsLinkClient<tonic::transport::Channel>>,
     ) -> Result<SearchSourceResult, SearchSourceError> {
         let is_fallback_cursor = query
@@ -396,7 +425,7 @@ impl SearchService {
             .await
         {
             Ok(result) => {
-                self.revalidate_indexed_contents(result, content_client)
+                self.revalidate_indexed_contents(result, route_context, content_client)
                     .await
             }
             Err(SearchSourceError::Fallback) => {
@@ -409,6 +438,7 @@ impl SearchService {
     async fn revalidate_indexed_contents(
         &self,
         result: SearchSourceResult,
+        route_context: Option<&RouteSearchContext>,
         content_client: Option<&BbsLinkClient<tonic::transport::Channel>>,
     ) -> Result<SearchSourceResult, SearchSourceError> {
         if !result.source_ranked || result.page.items.is_empty() {
@@ -431,7 +461,8 @@ impl SearchService {
             .await
             .map_err(|error| SearchSourceError::Request(error.to_string()))?
             .into_inner();
-        let (page, stale_index_hits) = reconcile_indexed_page(result.page, summaries)?;
+        let (page, stale_index_hits) =
+            reconcile_indexed_page(result.page, summaries, route_context)?;
         Ok(SearchSourceResult {
             page,
             // A stale index can no longer leak content, but it may underfill
@@ -495,6 +526,7 @@ fn indexed_content_ids(items: &[bbs_link_pb::Content]) -> Result<Vec<String>, Se
 fn reconcile_indexed_page(
     indexed: bbs_link_pb::ContentPage,
     summaries: bbs_link_pb::PublicContentSummaries,
+    route_context: Option<&RouteSearchContext>,
 ) -> Result<(bbs_link_pb::ContentPage, bool), SearchSourceError> {
     let requested = indexed_content_ids(&indexed.items)?
         .into_iter()
@@ -522,6 +554,11 @@ fn reconcile_indexed_page(
         .into_iter()
         .filter_map(|content| {
             let summary = authoritative.remove(&content.id)?;
+            if route_context
+                .is_some_and(|context| !route_matches_context_summary(&summary, context))
+            {
+                return None;
+            }
             // The index supplies only candidate IDs and rank. Rebuild every
             // displayed field from the current BBS Link public projection.
             Some(bbs_link_pb::Content {
@@ -552,9 +589,16 @@ fn make_cursor(
     search_type: pb::SearchType,
     viewer_id: Option<&str>,
     excluded_author_ids: &[String],
+    route_context: Option<&RouteSearchContext>,
     session_id: &str,
 ) -> String {
-    let fingerprint = query_fingerprint(query, search_type, viewer_id, excluded_author_ids);
+    let fingerprint = query_fingerprint(
+        query,
+        search_type,
+        viewer_id,
+        excluded_author_ids,
+        route_context,
+    );
     format!("v3-{fingerprint:016x}-{session_id}")
 }
 
@@ -564,6 +608,7 @@ fn parse_cursor(
     search_type: pb::SearchType,
     viewer_id: Option<&str>,
     excluded_author_ids: &[String],
+    route_context: Option<&RouteSearchContext>,
 ) -> Result<Option<String>, SearchError> {
     let Some(cursor) = cursor else {
         return Ok(None);
@@ -581,7 +626,13 @@ fn parse_cursor(
     };
     let expected = format!(
         "{:016x}",
-        query_fingerprint(query, search_type, viewer_id, excluded_author_ids)
+        query_fingerprint(
+            query,
+            search_type,
+            viewer_id,
+            excluded_author_ids,
+            route_context
+        )
     );
     if fingerprint != expected {
         return Err(SearchError::Validation(
@@ -606,14 +657,49 @@ fn query_fingerprint(
     search_type: pb::SearchType,
     viewer_id: Option<&str>,
     excluded_author_ids: &[String],
+    route_context: Option<&RouteSearchContext>,
 ) -> u64 {
+    let context = route_context
+        .map(|value| {
+            format!(
+                "{}\0{}\0{}",
+                value.route_id, value.action_node_id, value.scene_equipment
+            )
+        })
+        .unwrap_or_default();
     stable_hash(&format!(
-        "{}\0{}\0{}\0{}",
+        "{}\0{}\0{}\0{}\0{}",
         search_type_name(search_type),
         query.to_lowercase(),
         viewer_id.unwrap_or_default(),
         excluded_author_ids.join("\0"),
+        context,
     ))
+}
+
+#[derive(Clone, Debug)]
+struct RouteSearchContext {
+    route_id: String,
+    action_node_id: String,
+    scene_equipment: String,
+}
+
+fn route_context(request: &pb::SearchRequest) -> Option<RouteSearchContext> {
+    let route_id = request.route_id.as_deref()?.trim();
+    let action_node_id = request.action_node_id.as_deref()?.trim();
+    let scene_equipment = request
+        .scene_equipment
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
+    if route_id.is_empty() || action_node_id.is_empty() {
+        return None;
+    }
+    Some(RouteSearchContext {
+        route_id: route_id.to_string(),
+        action_node_id: action_node_id.to_string(),
+        scene_equipment: scene_equipment.to_lowercase(),
+    })
 }
 
 fn normalize_excluded_author_ids(author_ids: &[String]) -> Vec<String> {
@@ -733,10 +819,14 @@ fn search_results(
     search_type: pb::SearchType,
     excluded_authors: &HashSet<String>,
     source_ranked: bool,
+    route_context: Option<&RouteSearchContext>,
 ) -> Vec<pb::SearchResult> {
     let visible_contents = contents
         .iter()
         .filter(|content| !excluded_authors.contains(&content.author_id))
+        .filter(|content| {
+            route_context.is_none_or(|context| route_matches_context(content, context))
+        })
         .collect::<Vec<_>>();
     match search_type {
         pb::SearchType::Posts => {
@@ -772,7 +862,9 @@ fn result_identity(item: &pb::SearchResult) -> String {
         Ok(pb::SearchResultType::Journey) => "journey",
         Ok(pb::SearchResultType::User) => "user",
         Ok(pb::SearchResultType::Topic) => "topic",
-        Ok(pb::SearchResultType::Resource) | Err(_) => "resource",
+        Ok(pb::SearchResultType::Resource) => "resource",
+        Ok(pb::SearchResultType::Ad) => "ad",
+        Err(_) => "resource",
     };
     format!("{result_type}:{}", item.id)
 }
@@ -846,6 +938,7 @@ fn content_results(
                         .unwrap_or_default(),
                 )),
                 resource: None,
+                ad: None,
             })
         })
         .collect()
@@ -869,6 +962,47 @@ fn route_action_search_context(content: &bbs_link_pb::Content) -> String {
         .filter(|value| !value.trim().is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn route_matches_context(content: &bbs_link_pb::Content, context: &RouteSearchContext) -> bool {
+    content.id == context.route_id
+        && route_template_matches_action(
+            content.route_template.as_ref(),
+            &context.action_node_id,
+            &context.scene_equipment,
+        )
+}
+
+fn route_matches_context_summary(
+    summary: &bbs_link_pb::PublicContentSummary,
+    context: &RouteSearchContext,
+) -> bool {
+    summary.id == context.route_id
+        && summary.content_type == bbs_link_pb::ContentType::Route as i32
+        && summary.route_actions.iter().any(|action| {
+            action.id == context.action_node_id
+                && (context.scene_equipment.is_empty()
+                    || action.scene_equipment.iter().any(|equipment| {
+                        equipment.trim().to_lowercase() == context.scene_equipment
+                    }))
+        })
+}
+
+fn route_template_matches_action(
+    template: Option<&bbs_link_pb::RouteTemplate>,
+    action_node_id: &str,
+    scene_equipment: &str,
+) -> bool {
+    template.is_some_and(|template| {
+        template.actions.iter().any(|action| {
+            action.id == action_node_id
+                && (scene_equipment.is_empty()
+                    || action
+                        .scene_equipment
+                        .iter()
+                        .any(|equipment| equipment.trim().to_lowercase() == scene_equipment))
+        })
+    })
 }
 
 fn user_results(contents: &[&bbs_link_pb::Content], query: &str) -> Vec<pb::SearchResult> {
@@ -901,6 +1035,7 @@ fn user_results(contents: &[&bbs_link_pb::Content], query: &str) -> Vec<pb::Sear
                 highlights,
                 post: None,
                 resource: None,
+                ad: None,
             })
         })
         .collect()
@@ -940,6 +1075,7 @@ fn topic_results(contents: &[&bbs_link_pb::Content], query: &str) -> Vec<pb::Sea
                 highlights,
                 post: None,
                 resource: None,
+                ad: None,
             })
         })
         .collect()
@@ -1119,6 +1255,7 @@ mod tests {
                     ),
                 ],
             },
+            None,
         )
         .expect("valid authoritative summaries");
 
@@ -1177,7 +1314,8 @@ mod tests {
                 indexed.clone(),
                 bbs_link_pb::PublicContentSummaries {
                     items: vec![mismatched]
-                }
+                },
+                None,
             )
             .is_err()
         );
@@ -1196,7 +1334,8 @@ mod tests {
                 indexed.clone(),
                 bbs_link_pb::PublicContentSummaries {
                     items: vec![duplicate.clone(), duplicate]
-                }
+                },
+                None,
             )
             .is_err()
         );
@@ -1214,7 +1353,8 @@ mod tests {
                         bbs_link_pb::ContentType::Article,
                         0.5,
                     )]
-                }
+                },
+                None,
             )
             .is_err()
         );
@@ -1723,6 +1863,31 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn structured_route_context_excludes_text_only_route_matches() {
+        let mut route = content("route-1", "领路人", "壶铃训练路线", "训练");
+        route.content_type = bbs_link_pb::ContentType::Route as i32;
+        route.route_template = Some(bbs_link_pb::RouteTemplate {
+            actions: vec![bbs_link_pb::RouteTemplateAction {
+                id: "action-kettlebell".to_string(),
+                title: "壶铃硬拉".to_string(),
+                scene_equipment: vec!["壶铃".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let mut request = request("壶铃", pb::SearchType::Journeys, None, None);
+        request.route_id = Some("route-1".to_string());
+        request.action_node_id = Some("action-kettlebell".to_string());
+        request.scene_equipment = Some("瑜伽垫".to_string());
+        let service = SearchService::new(Arc::new(StaticSearchSource {
+            items: vec![route],
+            degraded: false,
+        }));
+        let response = service.search(request).await.expect("context search");
+        assert!(response.items.is_empty());
+    }
+
     fn request(
         query: &str,
         search_type: pb::SearchType,
@@ -1737,6 +1902,10 @@ mod tests {
             user_id: None,
             excluded_author_ids: Vec::new(),
             session_id: None,
+            route_id: None,
+            action_node_id: None,
+            scene_equipment: None,
+            ad_placement: None,
         }
     }
 

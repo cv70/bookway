@@ -130,7 +130,7 @@ impl FeatureDao {
                             WHEN event.negative_feedback_reason IN ('already_seen', 'low_quality') THEN 0.0
                             ELSE -5.0
                         END
-                        WHEN 'report' THEN -8.0
+                        WHEN event.event_type = 'report' THEN -8.0
                         ELSE 0.0
                     END
                 )::double precision

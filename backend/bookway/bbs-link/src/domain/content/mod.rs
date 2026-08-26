@@ -97,7 +97,7 @@ impl Domain {
 
     pub(crate) async fn create(
         &self,
-        request: pb::CreateRequest,
+        mut request: pb::CreateRequest,
     ) -> Result<pb::Content, ContentError> {
         if request.user_id.trim().is_empty() {
             return Err(ContentError::Validation("作者不能为空".to_string()));
@@ -115,6 +115,7 @@ impl Domain {
                 "标签和主题最多各 12 个".to_string(),
             ));
         }
+        request.idempotency_key = normalize_create_idempotency_key(request.idempotency_key)?;
         validate_enum::<pb::GrowthDomain>(request.domain, "growth domain")?;
         validate_enum::<pb::ContentType>(request.content_type, "content type")?;
         let route_template =
@@ -204,11 +205,23 @@ impl Domain {
 
     pub(crate) async fn fork_route(
         &self,
-        request: pb::ForkRouteRequest,
+        mut request: pb::ForkRouteRequest,
     ) -> Result<pb::Content, ContentError> {
-        let user_id = request.user_id.trim();
-        let source_route_id = request.source_route_id.trim();
-        let idempotency_key = request.idempotency_key.trim();
+        request.user_id = request.user_id.trim().to_string();
+        request.source_route_id = request.source_route_id.trim().to_string();
+        request.idempotency_key = request.idempotency_key.trim().to_string();
+        if let Some(title) = request.title.as_mut() {
+            *title = title.trim().to_string();
+            if title.is_empty() {
+                request.title = None;
+            }
+        }
+        if let Some(summary) = request.summary.as_mut() {
+            *summary = summary.trim().to_string();
+        }
+        let user_id = request.user_id.as_str();
+        let source_route_id = request.source_route_id.as_str();
+        let idempotency_key = request.idempotency_key.as_str();
         if user_id.is_empty() || source_route_id.is_empty() || idempotency_key.is_empty() {
             return Err(ContentError::Validation(
                 "用户、来源路线和幂等键不能为空".to_string(),
@@ -756,6 +769,19 @@ fn normalize_publish_idempotency_key(
     if value.is_empty() || value.chars().count() > 200 {
         return Err(ContentError::Validation(
             "发布幂等键不能为空且不能超过 200 个字符".to_string(),
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn normalize_create_idempotency_key(value: Option<String>) -> Result<Option<String>, ContentError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_string();
+    if value.is_empty() || value.chars().count() > 200 {
+        return Err(ContentError::Validation(
+            "创建幂等键不能为空且不能超过 200 个字符".to_string(),
         ));
     }
     Ok(Some(value))

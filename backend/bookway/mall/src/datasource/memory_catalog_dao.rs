@@ -178,6 +178,7 @@ impl CatalogDao for MemoryCatalogDao {
             .values()
             .filter(|offer| offer.route_id == request.route_id)
             .filter(|offer| offer.action_node_id == request.action_node_id)
+            .filter(|offer| offer.scene_equipment == request.scene_equipment)
             .filter_map(|offer| {
                 let product = products.get(&offer.product_id)?;
                 let saleable = product.status == pb::MallProductStatus::Active as i32

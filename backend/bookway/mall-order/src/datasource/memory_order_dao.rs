@@ -93,9 +93,12 @@ impl OrderDao for MemoryOrderDao {
             .await
             .values()
             .filter(|order| {
-                order.order.status == pb::MallOrderStatus::PendingPayment as i32
-                    && OffsetDateTime::parse(&order.order.expires_at, &Rfc3339)
-                        .is_ok_and(|value| value <= now)
+                matches!(
+                    order.order.status,
+                    value if value == pb::MallOrderStatus::PendingPayment as i32
+                        || value == pb::MallOrderStatus::PaymentProcessing as i32
+                ) && OffsetDateTime::parse(&order.order.expires_at, &Rfc3339)
+                    .is_ok_and(|value| value <= now)
             })
             .map(|order| order.order.clone())
             .collect::<Vec<_>>();
@@ -103,7 +106,7 @@ impl OrderDao for MemoryOrderDao {
         values.truncate(limit);
         Ok(values)
     }
-    async fn claim_payment_reference(
+    async fn begin_payment(
         &self,
         id: &str,
         payment_reference: &str,
@@ -118,6 +121,21 @@ impl OrderDao for MemoryOrderDao {
             }
             return Err(DaoError::Conflict(
                 "payment reference belongs to a different order".to_string(),
+            ));
+        }
+        if order.order.status == pb::MallOrderStatus::PaymentProcessing as i32 {
+            if order.order.payment_reference.as_deref() == Some(payment_reference) {
+                if OffsetDateTime::parse(&order.order.expires_at, &Rfc3339)
+                    .is_ok_and(|expires_at| expires_at <= OffsetDateTime::now_utc())
+                {
+                    return Err(DaoError::State(
+                        "order payment window has expired".to_string(),
+                    ));
+                }
+                return Ok(order.order.clone());
+            }
+            return Err(DaoError::Conflict(
+                "order is already processing a different payment".to_string(),
             ));
         }
         if order.order.status != pb::MallOrderStatus::PendingPayment as i32 {
@@ -150,6 +168,7 @@ impl OrderDao for MemoryOrderDao {
         }
         references.insert(payment_reference.to_string(), id.to_string());
         order.order.payment_reference = Some(payment_reference.to_string());
+        order.order.status = pb::MallOrderStatus::PaymentProcessing as i32;
         order.order.updated_at = timestamp(OffsetDateTime::now_utc());
         Ok(order.order.clone())
     }
@@ -174,9 +193,16 @@ impl OrderDao for MemoryOrderDao {
             }
             return Ok(order.order.clone());
         }
-        if order.order.status != pb::MallOrderStatus::PendingPayment as i32 {
+        let allowed_source = (status == pb::MallOrderStatus::Paid as i32
+            && order.order.status == pb::MallOrderStatus::PaymentProcessing as i32)
+            || (status == pb::MallOrderStatus::Cancelled as i32
+                && order.order.status == pb::MallOrderStatus::PendingPayment as i32)
+            || (status == pb::MallOrderStatus::Expired as i32
+                && (order.order.status == pb::MallOrderStatus::PendingPayment as i32
+                    || order.order.status == pb::MallOrderStatus::PaymentProcessing as i32));
+        if !allowed_source {
             return Err(DaoError::Failed(format!(
-                "order {id} is not pending payment"
+                "order {id} is not in a transitionable payment state"
             )));
         }
         if status == pb::MallOrderStatus::Paid as i32 {
@@ -259,9 +285,6 @@ impl OrderDao for MemoryOrderDao {
         Ok(order.order.clone())
     }
     async fn ensure_settlement(&self, order: &pb::Order) -> Result<(), DaoError> {
-        if order.merchant_id.is_empty() || order.affiliate_creator_id.is_empty() {
-            return Ok(());
-        }
         let mut settlements = self.settlements.write().await;
         settlements
             .entry(order.id.clone())

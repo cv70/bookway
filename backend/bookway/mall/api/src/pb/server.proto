@@ -121,6 +121,9 @@ message NodeOfferQueryRequest {
   string route_id = 1;
   string action_node_id = 2;
   optional uint32 limit = 3;
+  // A node can declare several equipment contexts. Public offer reads must
+  // select one declared context rather than returning a cross-context catalog.
+  string scene_equipment = 4;
 }
 
 message NodeOfferList { repeated NodeOffer items = 1; }

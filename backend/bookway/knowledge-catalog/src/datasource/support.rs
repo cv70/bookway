@@ -22,6 +22,7 @@ pub(crate) enum DaoError {
 pub(crate) struct NewNodeResourceAttachment {
     pub(crate) route_id: String,
     pub(crate) action_node_id: String,
+    pub(crate) scene_equipment: String,
     pub(crate) resource_id: String,
     pub(crate) kind: pb::AttachmentKind,
     pub(crate) title_override: String,
@@ -48,6 +49,7 @@ pub(crate) trait ResourceDao: Send + Sync {
         &self,
         route_id: &str,
         action_node_id: &str,
+        scene_equipment: Option<&str>,
         include_archived: bool,
     ) -> Result<pb::ListNodeResourcesResponse, DaoError>;
     async fn attach_node_resource(
@@ -92,6 +94,7 @@ fn attachment_matches_request(
 ) -> bool {
     attachment.route_id == request.route_id
         && attachment.action_node_id == request.action_node_id
+        && attachment.scene_equipment == request.scene_equipment
         && attachment.resource_id == request.resource_id
         && attachment.kind == request.kind as i32
         && attachment.title_override == request.title_override

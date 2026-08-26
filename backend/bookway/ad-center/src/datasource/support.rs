@@ -408,7 +408,7 @@ mod tests {
                     user_id: "user-1".to_string(),
                     event_id: "event-retry".to_string(),
                     request_id: "request-1".to_string(),
-                    campaign_id: campaign.id,
+                    campaign_id: campaign.id.clone(),
                     event_type: pb::EventType::Impression as i32,
                 },
             )
@@ -416,6 +416,91 @@ mod tests {
             .expect("duplicate receipt should be recognized");
         assert!(duplicate.accepted);
         assert!(duplicate.duplicate);
+
+        let second_campaign = dao
+            .create(campaign_request())
+            .await
+            .expect("second campaign should be created");
+        dao.update(
+            &second_campaign.id,
+            pb::UpdateCampaignRequest {
+                advertiser_id: second_campaign.advertiser_id.clone(),
+                status: Some(pb::CampaignStatus::Active as i32),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("second campaign should be activated");
+        let changed_campaign_set = dao
+            .register_decisions(registration(
+                "user-1",
+                "request-1",
+                vec![campaign.id.clone(), second_campaign.id],
+            ))
+            .await;
+        assert!(matches!(
+            changed_campaign_set,
+            Err(DaoError::Failed(message))
+                if message == "request id already belongs to a different decision context or campaign set"
+        ));
+
+        dao.update(
+            &campaign.id,
+            pb::UpdateCampaignRequest {
+                advertiser_id: campaign.advertiser_id.clone(),
+                status: Some(pb::CampaignStatus::Paused as i32),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("campaign should be pausable");
+        let retry_after_pause = dao
+            .record_event(
+                "user-1",
+                pb::RecordEventRequest {
+                    user_id: "user-1".to_string(),
+                    event_id: "event-accepted".to_string(),
+                    request_id: "request-1".to_string(),
+                    campaign_id: campaign.id.clone(),
+                    event_type: pb::EventType::Impression as i32,
+                },
+            )
+            .await
+            .expect("idempotent retry should remain readable after a pause");
+        assert!(retry_after_pause.accepted);
+        assert!(retry_after_pause.duplicate);
+    }
+
+    #[tokio::test]
+    async fn an_expired_request_id_cannot_be_rebound_to_a_new_decision() {
+        let dao = MemoryCampaignDao::default();
+        let campaign = dao
+            .create(campaign_request())
+            .await
+            .expect("campaign should be created");
+        dao.update(
+            &campaign.id,
+            pb::UpdateCampaignRequest {
+                advertiser_id: campaign.advertiser_id.clone(),
+                status: Some(pb::CampaignStatus::Active as i32),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("campaign should be activated");
+        let request_id = "expired-request";
+        dao.register_decisions(registration(
+            "user-1",
+            request_id,
+            vec![campaign.id.clone()],
+        ))
+        .await
+        .expect("decision should be registered");
+        dao.expire_decision_for_test(request_id, &campaign.id).await;
+        let result = dao
+            .register_decisions(registration("user-1", request_id, vec![campaign.id]))
+            .await;
+        assert!(matches!(result, Err(DaoError::Failed(message)) if message.contains("expired")));
     }
 
     #[tokio::test]

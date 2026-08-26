@@ -225,6 +225,42 @@ impl CampaignDao for PostgresCampaignDao {
     ) -> Result<(), DaoError> {
         let campaign_ids = unique_campaign_ids(&registration.campaign_ids)?;
         let mut tx = self.pool.begin().await.map_err(database)?;
+        // A first request has no decision rows to lock. Serialize by the
+        // opaque request id before observing or inserting rows so concurrent
+        // retries cannot commit different campaign sets for one request.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(registration.request_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database)?;
+        let (existing_total, existing_matching, existing_unexpired): (i64, i64, bool) =
+            sqlx::query_as(
+                "SELECT count(*), count(*) FILTER (WHERE campaign_id = ANY($2) AND user_id = $3 AND placement = $4 AND route_id = $5 AND action_node_id = $6 AND scene_equipment = $7), COALESCE(bool_and(expires_at > now()), false) FROM ad_delivery_decisions WHERE request_id = $1",
+            )
+            .bind(registration.request_id)
+            .bind(&campaign_ids)
+            .bind(registration.user_id)
+            .bind(registration.placement)
+            .bind(registration.route_id)
+            .bind(registration.action_node_id)
+            .bind(registration.scene_equipment)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database)?;
+        let expected_decisions = i64::try_from(campaign_ids.len()).unwrap_or(i64::MAX);
+        if existing_total > 0 {
+            if existing_total == expected_decisions
+                && existing_matching == expected_decisions
+                && existing_unexpired
+            {
+                tx.commit().await.map_err(database)?;
+                return Ok(());
+            }
+            return Err(DaoError::Failed(
+                "request id already belongs to a different decision context or campaign set"
+                    .to_string(),
+            ));
+        }
         let matching_campaigns: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM ad_campaigns WHERE id = ANY($1) AND status = 'active' AND placement = $2 AND route_id = $3 AND action_node_id = $4 AND scene_equipment = $5 AND (starts_at IS NULL OR starts_at <= now()) AND (ends_at IS NULL OR ends_at > now())",
         )
@@ -241,7 +277,7 @@ impl CampaignDao for PostgresCampaignDao {
                 "campaign does not match the action-node decision context".to_string(),
             ));
         }
-        for campaign_id in campaign_ids {
+        for campaign_id in &campaign_ids {
             sqlx::query("INSERT INTO ad_delivery_decisions (request_id,campaign_id,user_id,placement,route_id,action_node_id,scene_equipment,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,now()+interval '1 hour') ON CONFLICT (request_id,campaign_id) DO NOTHING")
                 .bind(registration.request_id)
                 .bind(campaign_id)
@@ -258,7 +294,7 @@ impl CampaignDao for PostgresCampaignDao {
             "SELECT count(*) FROM ad_delivery_decisions WHERE request_id = $1 AND campaign_id = ANY($2) AND user_id = $3 AND placement = $4 AND route_id = $5 AND action_node_id = $6 AND scene_equipment = $7 AND expires_at > now()",
         )
         .bind(registration.request_id)
-        .bind(&registration.campaign_ids)
+        .bind(&campaign_ids)
         .bind(registration.user_id)
         .bind(registration.placement)
         .bind(registration.route_id)
@@ -267,10 +303,16 @@ impl CampaignDao for PostgresCampaignDao {
         .fetch_one(&mut *tx)
         .await
         .map_err(database)?;
-        if matching_decisions != i64::try_from(registration.campaign_ids.len()).unwrap_or(i64::MAX)
-        {
+        let total_decisions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ad_delivery_decisions WHERE request_id = $1")
+                .bind(registration.request_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database)?;
+        if matching_decisions != expected_decisions || total_decisions != expected_decisions {
             return Err(DaoError::Failed(
-                "request id already belongs to a different decision context".to_string(),
+                "request id already belongs to a different decision context or campaign set"
+                    .to_string(),
             ));
         }
         tx.commit().await.map_err(database)?;
@@ -283,6 +325,15 @@ impl CampaignDao for PostgresCampaignDao {
         request: pb::RecordEventRequest,
     ) -> Result<pb::EventReceipt, DaoError> {
         let mut tx = self.pool.begin().await.map_err(database)?;
+        // The event ID is the transport-level idempotency key. Lock it before
+        // the first read so reuse across different campaigns cannot race the
+        // primary-key insert while each transaction holds a different row
+        // lock.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&request.event_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database)?;
         let existing_event = sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT user_id, request_id, campaign_id, event_type FROM ad_delivery_events WHERE id=$1",
         )
@@ -313,18 +364,26 @@ impl CampaignDao for PostgresCampaignDao {
                 duplicate: true,
             });
         }
-        let tracked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ad_delivery_decisions WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND expires_at > now())")
-            .bind(&request.request_id)
-            .bind(&request.campaign_id)
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(database)?;
         let duplicate_decision_event: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ad_delivery_events WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND event_type=$4)")
             .bind(&request.request_id)
             .bind(&request.campaign_id)
             .bind(user_id)
             .bind(event_name(request.event_type))
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database)?;
+        if duplicate_decision_event {
+            tx.commit().await.map_err(database)?;
+            return Ok(pb::EventReceipt {
+                event_id: request.event_id,
+                accepted: true,
+                duplicate: true,
+            });
+        }
+        let tracked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ad_delivery_decisions WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND expires_at > now())")
+            .bind(&request.request_id)
+            .bind(&request.campaign_id)
+            .bind(user_id)
             .fetch_one(&mut *tx)
             .await
             .map_err(database)?;
@@ -336,6 +395,73 @@ impl CampaignDao for PostgresCampaignDao {
                 duplicate: false,
             });
         }
+        let row =
+            sqlx::query_as::<_, CampaignRow>(&campaign_select("WHERE c.id=$1 FOR UPDATE OF c"))
+                .bind(&request.campaign_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database)?
+                .ok_or_else(|| DaoError::NotFound(request.campaign_id.clone()))?;
+        // Another request with the same event ID may have committed while we
+        // waited for the campaign row lock. Recheck after the lock so a retry
+        // is idempotent instead of surfacing a unique-key violation.
+        if let Some((existing_user_id, existing_request_id, existing_campaign_id, existing_event_type)) =
+            sqlx::query_as::<_, (String, String, String, String)>(
+                "SELECT user_id, request_id, campaign_id, event_type FROM ad_delivery_events WHERE id=$1",
+            )
+            .bind(&request.event_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database)?
+        {
+            if existing_user_id != user_id
+                || existing_request_id != request.request_id
+                || existing_campaign_id != request.campaign_id
+                || existing_event_type != event_name(request.event_type)
+            {
+                return Err(DaoError::Failed(
+                    "event id was already used for a different delivery event".to_string(),
+                ));
+            }
+            tx.commit().await.map_err(database)?;
+            return Ok(pb::EventReceipt {
+                event_id: request.event_id,
+                accepted: true,
+                duplicate: true,
+            });
+        }
+        let now = OffsetDateTime::now_utc();
+        let tracked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM ad_delivery_decisions WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND expires_at > $4)",
+        )
+        .bind(&request.request_id)
+        .bind(&request.campaign_id)
+        .bind(user_id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database)?;
+        if !tracked {
+            tx.commit().await.map_err(database)?;
+            return Ok(pb::EventReceipt {
+                event_id: request.event_id,
+                accepted: false,
+                duplicate: false,
+            });
+        }
+        // A different event ID for the same decision event may have committed
+        // while this transaction waited for the campaign row lock. Recheck
+        // the business-level unique key before attempting the insert.
+        let duplicate_decision_event: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM ad_delivery_events WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND event_type=$4)",
+        )
+        .bind(&request.request_id)
+        .bind(&request.campaign_id)
+        .bind(user_id)
+        .bind(event_name(request.event_type))
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database)?;
         if duplicate_decision_event {
             tx.commit().await.map_err(database)?;
             return Ok(pb::EventReceipt {
@@ -344,15 +470,11 @@ impl CampaignDao for PostgresCampaignDao {
                 duplicate: true,
             });
         }
-        let row =
-            sqlx::query_as::<_, CampaignRow>(&campaign_select("WHERE c.id=$1 FOR UPDATE OF c"))
-                .bind(&request.campaign_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(database)?
-                .ok_or_else(|| DaoError::NotFound(request.campaign_id.clone()))?;
         let mut campaign = row.into_proto()?;
-        if campaign.status != pb::CampaignStatus::Active as i32 {
+        if campaign.status != pb::CampaignStatus::Active as i32
+            || campaign_starts(&campaign).is_some_and(|start| start > now)
+            || campaign_ends(&campaign).is_some_and(|end| end <= now)
+        {
             tx.commit().await.map_err(database)?;
             return Ok(pb::EventReceipt {
                 event_id: request.event_id,

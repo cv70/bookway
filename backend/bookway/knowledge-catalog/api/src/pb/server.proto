@@ -74,12 +74,14 @@ message RouteNodeResourceAttachment {
   string created_at = 13;
   string updated_at = 14;
   optional Resource resource = 15;
+  string scene_equipment = 16;
 }
 
 message ListNodeResourcesRequest {
   string route_id = 1;
   string action_node_id = 2;
   bool include_archived = 3;
+  optional string scene_equipment = 4;
 }
 
 message ListNodeResourcesResponse {
@@ -98,6 +100,7 @@ message AttachNodeResourceRequest {
   string retrieval_scope = 9;
   string idempotency_key = 10;
   string created_by = 11;
+  string scene_equipment = 12;
 }
 
 message DetachNodeResourceRequest {
@@ -120,6 +123,7 @@ message RetrieveRagContextRequest {
   // the catalog keeps the deterministic lexical fallback below.
   string embedding_model = 5;
   repeated float query_embedding = 6;
+  optional string scene_equipment = 7;
 }
 
 message RagContext {
@@ -155,6 +159,7 @@ message SearchRagEmbeddingsRequest {
   string embedding_model = 3;
   repeated float query_embedding = 4;
   optional uint32 limit = 5;
+  optional string scene_equipment = 6;
 }
 message RagVectorHit {
   string attachment_id = 1;

@@ -8,6 +8,20 @@ pub(crate) struct MemoryCampaignDao {
     decisions: RwLock<HashMap<(String, String), MemoryDecision>>,
 }
 
+impl MemoryCampaignDao {
+    #[cfg(test)]
+    pub(crate) async fn expire_decision_for_test(&self, request_id: &str, campaign_id: &str) {
+        if let Some(decision) = self
+            .decisions
+            .write()
+            .await
+            .get_mut(&(request_id.to_string(), campaign_id.to_string()))
+        {
+            decision.expires_at = OffsetDateTime::now_utc() - time::Duration::minutes(1);
+        }
+    }
+}
+
 #[async_trait]
 impl CampaignDao for MemoryCampaignDao {
     async fn create(&self, request: pb::CreateCampaignRequest) -> Result<pb::AdCampaign, DaoError> {
@@ -157,7 +171,28 @@ impl CampaignDao for MemoryCampaignDao {
         drop(campaigns);
         let expires_at = OffsetDateTime::now_utc() + time::Duration::hours(1);
         let mut decisions = self.decisions.write().await;
-        decisions.retain(|_, decision| decision.expires_at > OffsetDateTime::now_utc());
+        let existing_campaign_ids = decisions
+            .keys()
+            .filter(|(request_id, _)| request_id == registration.request_id)
+            .map(|(_, campaign_id)| campaign_id.clone())
+            .collect::<BTreeSet<_>>();
+        let requested_campaign_ids = campaign_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if !existing_campaign_ids.is_empty() && existing_campaign_ids != requested_campaign_ids {
+            return Err(DaoError::Failed(
+                "request id already belongs to a different decision context or campaign set"
+                    .to_string(),
+            ));
+        }
+        if !existing_campaign_ids.is_empty()
+            && decisions
+                .iter()
+                .filter(|((request_id, _), _)| request_id == registration.request_id)
+                .any(|(_, decision)| decision.expires_at <= OffsetDateTime::now_utc())
+        {
+            return Err(DaoError::Failed(
+                "request id decision lease has expired and cannot be reused".to_string(),
+            ));
+        }
         for campaign_id in campaign_ids {
             let key = (registration.request_id.to_string(), campaign_id);
             if let Some(existing) = decisions.get(&key) {
@@ -190,6 +225,40 @@ impl CampaignDao for MemoryCampaignDao {
     ) -> Result<pb::EventReceipt, DaoError> {
         let now = OffsetDateTime::now_utc();
         let day = date_key(now);
+        // Idempotent retries must remain successful even after the decision
+        // lease expires or the campaign is paused. Read the event first,
+        // then release the lock before taking the campaign lock below.
+        if let Some(existing) = self.events.read().await.get(&request.event_id) {
+            if existing.user_id != user_id
+                || existing.request_id != request.request_id
+                || existing.campaign_id != request.campaign_id
+                || existing.event_type != request.event_type
+            {
+                return Err(DaoError::Failed(
+                    "event id was already used for a different delivery event".to_string(),
+                ));
+            }
+            return Ok(pb::EventReceipt {
+                event_id: request.event_id,
+                accepted: true,
+                duplicate: true,
+            });
+        }
+        // A retry with a fresh transport event ID is still a duplicate of the
+        // already accepted business event, even after the decision lease has
+        // expired or the campaign has been paused.
+        if self.events.read().await.values().any(|event| {
+            event.user_id == user_id
+                && event.request_id == request.request_id
+                && event.campaign_id == request.campaign_id
+                && event.event_type == request.event_type
+        }) {
+            return Ok(pb::EventReceipt {
+                event_id: request.event_id,
+                accepted: true,
+                duplicate: true,
+            });
+        }
         let decision = self
             .decisions
             .read()
@@ -211,7 +280,10 @@ impl CampaignDao for MemoryCampaignDao {
         let campaign = campaigns
             .get_mut(&request.campaign_id)
             .ok_or_else(|| DaoError::NotFound(request.campaign_id.clone()))?;
-        if campaign.status != pb::CampaignStatus::Active as i32 {
+        if campaign.status != pb::CampaignStatus::Active as i32
+            || campaign_starts(campaign).is_some_and(|start| start > now)
+            || campaign_ends(campaign).is_some_and(|end| end <= now)
+        {
             return Ok(pb::EventReceipt {
                 event_id: request.event_id,
                 accepted: false,

@@ -6,5 +6,8 @@ healthcheck: grpc
 dependencies:
   - bookway-bbs-search
   - bookway-bbs-link
+  - bookway-knowledge-catalog
+  - bookway-feature-main
+  - bookway-ad-main
 contracts:
   - src/api/pb/server.proto

@@ -16,6 +16,17 @@ pub struct SearchRequest {
     pub excluded_author_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "7")]
     pub session_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Optional structured route context. Route results must match the public
+    /// route/action/equipment facts, not merely text fields.
+    #[prost(string, optional, tag = "8")]
+    pub route_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "9")]
+    pub action_node_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "10")]
+    pub scene_equipment: ::core::option::Option<::prost::alloc::string::String>,
+    /// Contextual ad placement. When absent Search Main uses "search".
+    #[prost(string, optional, tag = "11")]
+    pub ad_placement: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -121,6 +132,36 @@ pub struct SearchResult {
     pub post: ::core::option::Option<PostSummary>,
     #[prost(message, optional, tag = "12")]
     pub resource: ::core::option::Option<ResourceSummary>,
+    #[prost(message, optional, tag = "13")]
+    pub ad: ::core::option::Option<SearchAd>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchAd {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub campaign_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub placement: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub title: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub body: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub image_url: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub landing_url: ::prost::alloc::string::String,
+    #[prost(double, tag = "8")]
+    pub ecpm: f64,
+    #[prost(string, tag = "9")]
+    pub model_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "11")]
+    pub action_node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "12")]
+    pub scene_equipment: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -208,6 +249,7 @@ pub enum SearchResultType {
     User = 2,
     Topic = 3,
     Resource = 4,
+    Ad = 5,
 }
 impl SearchResultType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -221,6 +263,7 @@ impl SearchResultType {
             Self::User => "SEARCH_RESULT_TYPE_USER",
             Self::Topic => "SEARCH_RESULT_TYPE_TOPIC",
             Self::Resource => "SEARCH_RESULT_TYPE_RESOURCE",
+            Self::Ad => "SEARCH_RESULT_TYPE_AD",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -231,6 +274,7 @@ impl SearchResultType {
             "SEARCH_RESULT_TYPE_USER" => Some(Self::User),
             "SEARCH_RESULT_TYPE_TOPIC" => Some(Self::Topic),
             "SEARCH_RESULT_TYPE_RESOURCE" => Some(Self::Resource),
+            "SEARCH_RESULT_TYPE_AD" => Some(Self::Ad),
             _ => None,
         }
     }

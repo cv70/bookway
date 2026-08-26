@@ -225,8 +225,9 @@ impl Domain {
 
     pub(crate) async fn record_event(
         &self,
-        request: pb::RecordEventRequest,
+        mut request: pb::RecordEventRequest,
     ) -> Result<pb::EventReceipt, AdCenterError> {
+        request.campaign_id = request.campaign_id.trim().to_string();
         if request.user_id.trim().is_empty()
             || request.event_id.trim().is_empty()
             || request.request_id.trim().is_empty()

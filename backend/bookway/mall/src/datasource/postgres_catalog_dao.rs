@@ -309,10 +309,11 @@ impl CatalogDao for PostgresCatalogDao {
     ) -> Result<Vec<pb::NodeOffer>, DaoError> {
         let limit = i64::from(request.limit.unwrap_or(20).clamp(1, 50));
         let rows = sqlx::query_as::<_, NodeOfferRow>(
-            "SELECT o.id,o.merchant_id,o.product_id,o.sku_id,o.route_id,o.action_node_id,o.scene_equipment,o.creator_id,o.commission_bps,o.created_at FROM mall_node_offers o INNER JOIN mall_products p ON p.id=o.product_id INNER JOIN mall_skus s ON s.id=o.sku_id AND s.product_id=o.product_id WHERE o.route_id=$1 AND o.action_node_id=$2 AND p.status='active' AND s.saleable=true ORDER BY o.id LIMIT $3",
+            "SELECT o.id,o.merchant_id,o.product_id,o.sku_id,o.route_id,o.action_node_id,o.scene_equipment,o.creator_id,o.commission_bps,o.created_at FROM mall_node_offers o INNER JOIN mall_products p ON p.id=o.product_id INNER JOIN mall_skus s ON s.id=o.sku_id AND s.product_id=o.product_id WHERE o.route_id=$1 AND o.action_node_id=$2 AND o.scene_equipment=$3 AND p.status='active' AND s.saleable=true ORDER BY o.id LIMIT $4",
         )
         .bind(request.route_id)
         .bind(request.action_node_id)
+        .bind(request.scene_equipment)
         .bind(limit)
         .fetch_all(&self.pool)
         .await

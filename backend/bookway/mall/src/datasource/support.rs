@@ -273,22 +273,32 @@ mod tests {
         assert_eq!(first.id, retry.id);
         assert_eq!(first.commission_bps, 500);
         assert_eq!(first.scene_equipment, "trail-running shoes");
-        let mut conflicting = request;
+        let mut conflicting = request.clone();
         conflicting.commission_bps = 700;
         assert!(matches!(
             dao.attach_node_offer(conflicting).await,
             Err(DaoError::Conflict(_))
         ));
+        let other_context = dao
+            .attach_node_offer(pb::AttachNodeOfferRequest {
+                idempotency_key: "offer-key-other-context".to_string(),
+                scene_equipment: "rain shell".to_string(),
+                ..request.clone()
+            })
+            .await
+            .expect("a distinct equipment context should have its own offer");
         let offers = dao
             .node_offers(pb::NodeOfferQueryRequest {
                 route_id: "route-1".to_string(),
                 action_node_id: "node-1".to_string(),
                 limit: Some(10),
+                scene_equipment: "trail-running shoes".to_string(),
             })
             .await
             .expect("node offers should be queryable");
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].id, first.id);
+        assert_ne!(offers[0].id, other_context.id);
         assert_eq!(
             offers[0].product.as_ref().map(|product| &product.id),
             Some(&product.id)

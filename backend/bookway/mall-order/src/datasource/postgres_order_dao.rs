@@ -195,7 +195,7 @@ impl OrderDao for PostgresOrderDao {
     }
     async fn expired_pending(&self, limit: usize) -> Result<Vec<pb::Order>, DaoError> {
         let ids = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM mall_orders WHERE status='pending_payment' AND expires_at <= now() ORDER BY expires_at,id LIMIT $1",
+            "SELECT id FROM mall_orders WHERE status IN ('pending_payment','payment_processing') AND expires_at <= now() ORDER BY expires_at,id LIMIT $1",
         )
         .bind(i64::try_from(limit.clamp(1, 1_000)).unwrap_or(1_000))
         .fetch_all(&self.pool)
@@ -207,13 +207,13 @@ impl OrderDao for PostgresOrderDao {
         }
         Ok(orders)
     }
-    async fn claim_payment_reference(
+    async fn begin_payment(
         &self,
         id: &str,
         payment_reference: &str,
     ) -> Result<pb::Order, DaoError> {
         let changed = sqlx::query(
-            "UPDATE mall_orders SET payment_reference=$2,updated_at=now() WHERE id=$1 AND status='pending_payment' AND expires_at > now() AND (payment_reference IS NULL OR payment_reference=$2)",
+            "UPDATE mall_orders SET status='payment_processing',payment_reference=$2,updated_at=now() WHERE id=$1 AND status='pending_payment' AND expires_at > now() AND (payment_reference IS NULL OR payment_reference=$2)",
         )
         .bind(id)
         .bind(payment_reference)
@@ -230,6 +230,18 @@ impl OrderDao for PostgresOrderDao {
         {
             return Ok(order);
         }
+        if order.status == pb::MallOrderStatus::PaymentProcessing as i32
+            && order.payment_reference.as_deref() == Some(payment_reference)
+        {
+            if OffsetDateTime::parse(&order.expires_at, &Rfc3339)
+                .is_ok_and(|expires_at| expires_at <= OffsetDateTime::now_utc())
+            {
+                return Err(DaoError::State(
+                    "order payment window has expired".to_string(),
+                ));
+            }
+            return Ok(order);
+        }
         if order.status == pb::MallOrderStatus::PendingPayment as i32 {
             if OffsetDateTime::parse(&order.expires_at, &Rfc3339)
                 .is_ok_and(|expires_at| expires_at <= OffsetDateTime::now_utc())
@@ -243,7 +255,7 @@ impl OrderDao for PostgresOrderDao {
             ));
         }
         Err(DaoError::Failed(format!(
-            "order {id} is not pending payment"
+            "order {id} is not in a transitionable payment state"
         )))
     }
     async fn transition(
@@ -252,14 +264,32 @@ impl OrderDao for PostgresOrderDao {
         status: i32,
         payment_reference: Option<String>,
     ) -> Result<pb::Order, DaoError> {
-        let changed = sqlx::query("UPDATE mall_orders SET status=$2,payment_reference=COALESCE($3,payment_reference),updated_at=now() WHERE id=$1 AND status='pending_payment'").bind(id).bind(status_name(status)?).bind(payment_reference).execute(&self.pool).await.map_err(payment_reference_error)?.rows_affected();
+        let source_clause = match status {
+            value if value == pb::MallOrderStatus::Paid as i32 => "status='payment_processing'",
+            value if value == pb::MallOrderStatus::Cancelled as i32 => "status='pending_payment'",
+            value if value == pb::MallOrderStatus::Expired as i32 => {
+                "status IN ('pending_payment','payment_processing')"
+            }
+            _ => "FALSE",
+        };
+        let statement = format!(
+            "UPDATE mall_orders SET status=$2,payment_reference=COALESCE($3,payment_reference),updated_at=now() WHERE id=$1 AND {source_clause}"
+        );
+        let changed = sqlx::query(&statement)
+            .bind(id)
+            .bind(status_name(status)?)
+            .bind(payment_reference)
+            .execute(&self.pool)
+            .await
+            .map_err(payment_reference_error)?
+            .rows_affected();
         if changed == 0 {
             let order = self.load(None, id).await?;
             if order.status == status {
                 return Ok(order);
             }
             return Err(DaoError::Failed(format!(
-                "order {id} is not pending payment"
+                "order {id} is not in a transitionable payment state"
             )));
         }
         self.load(None, id).await
@@ -330,9 +360,6 @@ impl OrderDao for PostgresOrderDao {
         self.load(None, order_id).await
     }
     async fn ensure_settlement(&self, order: &pb::Order) -> Result<(), DaoError> {
-        if order.merchant_id.is_empty() || order.affiliate_creator_id.is_empty() {
-            return Ok(());
-        }
         sqlx::query(
             "INSERT INTO mall_affiliate_settlements (id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at) VALUES ($1,$2,$3,$4,$5,'eligible',now()) ON CONFLICT (order_id) DO NOTHING",
         )

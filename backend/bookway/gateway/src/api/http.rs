@@ -1092,6 +1092,7 @@ async fn route_node_offers(
         route_id,
         action_node_id,
         limit: query.limit,
+        scene_equipment: query.scene_equipment,
     };
     Ok(Json(ApiResponse::new(
         state.domain.mall_node_offers(request).await?,
@@ -1250,12 +1251,21 @@ async fn list_route_node_resources(
     Path((route_id, action_node_id)): Path<(String, String)>,
     Query(query): Query<rest::RouteNodeResourceQuery>,
 ) -> Result<Json<ApiResponse<rest::RouteNodeResourcePage>>, HttpError> {
+    // This is a public customer-facing route. Archived attachments are an
+    // author/admin maintenance view and must not be exposed through the
+    // Gateway without a separate authenticated management endpoint.
+    if query.include_archived {
+        return Err(HttpError::Forbidden(
+            "archived route resources are not publicly readable".to_string(),
+        ));
+    }
     let response = state
         .domain
         .list_route_node_resources(catalog_pb::ListNodeResourcesRequest {
             route_id,
             action_node_id,
-            include_archived: query.include_archived,
+            include_archived: false,
+            scene_equipment: query.scene_equipment,
         })
         .await?;
     Ok(Json(ApiResponse::new(

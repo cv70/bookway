@@ -9,6 +9,7 @@ pub(crate) struct Config {
     pub(crate) bbs_link_url: String,
     pub(crate) knowledge_catalog_url: String,
     pub(crate) feature_main_url: String,
+    pub(crate) ad_main_url: String,
 }
 
 impl Config {
@@ -23,6 +24,8 @@ impl Config {
                 .unwrap_or_else(|_| "http://127.0.0.1:8105".to_string()),
             feature_main_url: env::var("FEATURE_MAIN_GRPC_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8093".to_string()),
+            ad_main_url: env::var("AD_MAIN_GRPC_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8100".to_string()),
         })
     }
 }

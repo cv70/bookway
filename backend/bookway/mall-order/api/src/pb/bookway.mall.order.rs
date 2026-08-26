@@ -212,6 +212,7 @@ pub enum MallOrderStatus {
     Paid = 1,
     Cancelled = 2,
     Expired = 3,
+    PaymentProcessing = 4,
 }
 impl MallOrderStatus {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -224,6 +225,7 @@ impl MallOrderStatus {
             Self::Paid => "MALL_ORDER_STATUS_PAID",
             Self::Cancelled => "MALL_ORDER_STATUS_CANCELLED",
             Self::Expired => "MALL_ORDER_STATUS_EXPIRED",
+            Self::PaymentProcessing => "MALL_ORDER_STATUS_PAYMENT_PROCESSING",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -233,6 +235,7 @@ impl MallOrderStatus {
             "MALL_ORDER_STATUS_PAID" => Some(Self::Paid),
             "MALL_ORDER_STATUS_CANCELLED" => Some(Self::Cancelled),
             "MALL_ORDER_STATUS_EXPIRED" => Some(Self::Expired),
+            "MALL_ORDER_STATUS_PAYMENT_PROCESSING" => Some(Self::PaymentProcessing),
             _ => None,
         }
     }

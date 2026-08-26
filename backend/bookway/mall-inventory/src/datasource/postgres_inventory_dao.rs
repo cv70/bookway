@@ -114,6 +114,15 @@ impl InventoryDao for PostgresInventoryDao {
     }
     async fn reserve(&self, request: pb::ReserveRequest) -> Result<pb::Reservation, DaoError> {
         let mut tx = self.pool.begin().await.map_err(database)?;
+        // A first request has no reservation row to lock. Serialize by the
+        // caller-supplied reservation ID before checking or mutating stock so
+        // concurrent retries cannot double-hold inventory or race the unique
+        // reservation insert.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&request.reservation_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database)?;
         expire_postgres(&mut tx, EXPIRY_SWEEP_LIMIT).await?;
         let existing = sqlx::query_scalar::<_, String>(
             "SELECT status FROM mall_inventory_reservations WHERE id=$1 FOR UPDATE",
@@ -204,7 +213,7 @@ impl InventoryDao for PostgresInventoryDao {
                 items: Vec::new(),
             });
         };
-        if status == "released" || status == "expired" {
+        if status == "released" || status == "expired" || status == "committed" {
             tx.commit().await.map_err(database)?;
             return self.reservation(id).await;
         }

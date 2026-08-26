@@ -125,7 +125,10 @@ impl InventoryDao for MemoryInventoryDao {
                 items: Vec::new(),
             });
         };
-        if reservation.status == "released" || reservation.status == "expired" {
+        if reservation.status == "released"
+            || reservation.status == "expired"
+            || reservation.status == "committed"
+        {
             return reservation_proto(id, &reservation);
         }
         if reservation.status != "reserved" {

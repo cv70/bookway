@@ -1576,6 +1576,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
+ "bookway-ad-main-api",
  "bookway-api",
  "bookway-bbs-link-api",
  "bookway-bbs-search-api",

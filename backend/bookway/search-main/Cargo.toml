@@ -12,6 +12,7 @@ axum.workspace = true
 bookway-api.workspace = true
 bookway-bbs-link-api.workspace = true
 bookway-bbs-search-api.workspace = true
+bookway-ad-main-api.workspace = true
 bookway-data.workspace = true
 bookway-feature-main-api.workspace = true
 bookway-knowledge-catalog-api.workspace = true

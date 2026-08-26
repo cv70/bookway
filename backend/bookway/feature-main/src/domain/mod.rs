@@ -1,10 +1,15 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::conf::Config;
 use crate::{
     api::pb,
     datasource::{FeatureCache, FeatureDao},
 };
+
+const MAX_CANDIDATE_IDS: usize = 500;
 
 #[cfg(test)]
 use crate::datasource::CandidateFeatures;
@@ -39,6 +44,7 @@ impl Domain {
     }
 
     pub(crate) async fn features(&self, request: pb::FeaturesRequest) -> pb::FeaturesResponse {
+        let content_ids = normalize_content_ids(&request.content_ids);
         let mut values = HashMap::from([
             ("user_interest_strength".to_string(), 0.5),
             ("recent_positive_rate".to_string(), 0.2),
@@ -67,15 +73,10 @@ impl Domain {
                 }
             }
         };
-        let candidate_features = self
-            .dao
-            .load_candidates(&request.user_id, &request.content_ids);
+        let candidate_features = self.dao.load_candidates(&request.user_id, &content_ids);
         let (persisted, candidate_features) = tokio::join!(user_features, candidate_features);
         values.extend(persisted);
-        values.insert(
-            "candidate_count".to_string(),
-            request.content_ids.len() as f64,
-        );
+        values.insert("candidate_count".to_string(), content_ids.len() as f64);
         pb::FeaturesResponse {
             user_id: request.user_id,
             model_version: self.model_version.clone(),
@@ -104,6 +105,18 @@ impl Domain {
                 .collect(),
         }
     }
+}
+
+fn normalize_content_ids(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(*value))
+        .take(MAX_CANDIDATE_IDS)
+        .map(str::to_string)
+        .collect()
 }
 
 fn value(values: &HashMap<String, f64>, name: &str) -> f64 {
@@ -173,5 +186,29 @@ mod tests {
     fn feature_defaults_are_zero() {
         let values = HashMap::new();
         assert_eq!(value(&values, "recent_positive_rate"), 0.0);
+    }
+
+    #[test]
+    fn candidate_ids_are_normalized_and_bounded_before_feature_lookup() {
+        let mut ids = vec![
+            " content-1 ".to_string(),
+            "content-1".to_string(),
+            "".to_string(),
+        ];
+        ids.extend((0..(MAX_CANDIDATE_IDS + 20)).map(|index| format!("content-{index}")));
+
+        let normalized = normalize_content_ids(&ids);
+
+        assert_eq!(normalized.len(), MAX_CANDIDATE_IDS);
+        assert_eq!(normalized.first().map(String::as_str), Some("content-1"));
+        assert!(
+            normalized
+                .iter()
+                .all(|id| !id.is_empty() && id.trim() == id)
+        );
+        assert_eq!(
+            normalized.iter().collect::<HashSet<_>>().len(),
+            normalized.len()
+        );
     }
 }

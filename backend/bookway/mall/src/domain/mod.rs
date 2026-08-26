@@ -134,18 +134,40 @@ impl Domain {
 
     pub(crate) async fn node_offers(
         &self,
-        request: pb::NodeOfferQueryRequest,
+        mut request: pb::NodeOfferQueryRequest,
     ) -> Result<pb::NodeOfferList, MallError> {
-        if request.route_id.trim().is_empty() || request.action_node_id.trim().is_empty() {
+        request.scene_equipment = scene_equipment_key(&request.scene_equipment);
+        if request.route_id.trim().is_empty()
+            || request.action_node_id.trim().is_empty()
+            || request.scene_equipment.is_empty()
+        {
             return Err(MallError::Validation(
-                "route and action node are required".to_string(),
+                "route, action node and scene equipment are required".to_string(),
             ));
         }
-        self.validate_public_action_node(&request.route_id, &request.action_node_id, None, None)
-            .await?;
-        Ok(pb::NodeOfferList {
-            items: self.dao.node_offers(request).await.map_err(repo_error)?,
-        })
+        let route = self.load_public_route(&request.route_id).await?;
+        validate_route_action_node(
+            &route,
+            &request.action_node_id,
+            None,
+            Some(&request.scene_equipment),
+        )?;
+        let requested_scene_equipment = request.scene_equipment.clone();
+        let action_offers = self.dao.node_offers(request).await.map_err(repo_error)?;
+        let items = action_offers
+            .into_iter()
+            .filter(|offer| {
+                validate_route_action_node(
+                    &route,
+                    &offer.action_node_id,
+                    None,
+                    Some(&offer.scene_equipment),
+                )
+                .is_ok()
+                    && scene_equipment_key(&offer.scene_equipment) == requested_scene_equipment
+            })
+            .collect();
+        Ok(pb::NodeOfferList { items })
     }
 
     pub(crate) async fn checkout_node_offer(
@@ -206,8 +228,18 @@ impl Domain {
         expected_creator_id: Option<&str>,
         expected_scene_equipment: Option<&str>,
     ) -> Result<(), MallError> {
+        let route = self.load_public_route(route_id).await?;
+        validate_route_action_node(
+            &route,
+            action_node_id,
+            expected_creator_id,
+            expected_scene_equipment,
+        )
+    }
+
+    async fn load_public_route(&self, route_id: &str) -> Result<bbs_link::Content, MallError> {
         let mut client = self.bbs_link.clone();
-        let route = client
+        client
             .get_public(
                 bookway_runtime::grpc_service_request(bbs_link::IdRequest {
                     id: route_id.to_string(),
@@ -218,14 +250,8 @@ impl Domain {
             .map_err(|error| match error.code() {
                 tonic::Code::NotFound => MallError::NotFound(route_id.to_string()),
                 _ => MallError::Repository(format!("bbs-link get_public failed: {error}")),
-            })?
-            .into_inner();
-        validate_route_action_node(
-            &route,
-            action_node_id,
-            expected_creator_id,
-            expected_scene_equipment,
-        )
+            })
+            .map(|response| response.into_inner())
     }
 }
 

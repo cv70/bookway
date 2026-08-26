@@ -838,6 +838,10 @@ pub(crate) struct SearchQuery {
     pub(crate) cursor: Option<String>,
     pub(crate) limit: Option<u32>,
     pub(crate) session_id: Option<String>,
+    pub(crate) route_id: Option<String>,
+    pub(crate) action_node_id: Option<String>,
+    pub(crate) scene_equipment: Option<String>,
+    pub(crate) ad_placement: Option<String>,
 }
 
 impl SearchQuery {
@@ -850,6 +854,10 @@ impl SearchQuery {
             user_id: Some(user_id),
             excluded_author_ids: Vec::new(),
             session_id: self.session_id,
+            route_id: self.route_id,
+            action_node_id: self.action_node_id,
+            scene_equipment: self.scene_equipment,
+            ad_placement: self.ad_placement,
         }
     }
 }
@@ -862,6 +870,7 @@ enum SearchResultType {
     User,
     Topic,
     Resource,
+    Ad,
 }
 
 impl SearchResultType {
@@ -872,6 +881,7 @@ impl SearchResultType {
             Some(search_pb::SearchResultType::User) => Ok(Self::User),
             Some(search_pb::SearchResultType::Topic) => Ok(Self::Topic),
             Some(search_pb::SearchResultType::Resource) => Ok(Self::Resource),
+            Some(search_pb::SearchResultType::Ad) => Ok(Self::Ad),
             None => Err(format!("bbs-search returned unknown result type {value}")),
         }
     }
@@ -891,6 +901,23 @@ pub(crate) struct SearchResult {
     highlights: Vec<String>,
     post: Option<PostSummary>,
     resource: Option<SearchResourceSummary>,
+    ad: Option<SearchAd>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct SearchAd {
+    request_id: String,
+    campaign_id: String,
+    placement: String,
+    title: String,
+    body: String,
+    image_url: String,
+    landing_url: String,
+    ecpm: f64,
+    model_version: String,
+    route_id: String,
+    action_node_id: String,
+    scene_equipment: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -1031,12 +1058,14 @@ impl TryFrom<catalog_pb::SearchResponse> for PublicResourcePage {
 #[derive(Clone, Debug, Deserialize, Default)]
 pub(crate) struct RouteNodeResourceQuery {
     pub(crate) include_archived: bool,
+    pub(crate) scene_equipment: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct AttachRouteNodeResourceRequest {
     pub(crate) resource_id: String,
     pub(crate) kind: String,
+    pub(crate) scene_equipment: String,
     #[serde(default)]
     pub(crate) title_override: String,
     #[serde(default)]
@@ -1080,6 +1109,7 @@ impl AttachRouteNodeResourceRequest {
             action_node_id,
             resource_id: self.resource_id,
             kind: kind as i32,
+            scene_equipment: self.scene_equipment,
             title_override: self.title_override,
             note: self.note,
             sort_rank: self.sort_rank,
@@ -1098,6 +1128,7 @@ pub(crate) struct RouteNodeResourceAttachment {
     action_node_id: String,
     resource_id: String,
     kind: String,
+    scene_equipment: String,
     title_override: String,
     note: String,
     sort_rank: i32,
@@ -1135,6 +1166,7 @@ impl TryFrom<catalog_pb::RouteNodeResourceAttachment> for RouteNodeResourceAttac
             action_node_id: value.action_node_id,
             resource_id: value.resource_id,
             kind: kind.to_string(),
+            scene_equipment: value.scene_equipment,
             title_override: value.title_override,
             note: value.note,
             sort_rank: value.sort_rank,
@@ -1186,6 +1218,7 @@ impl From<catalog_pb::DetachNodeResourceResponse> for DetachRouteNodeResourceRes
 pub(crate) struct RouteNodeRagContextRequest {
     pub(crate) question: String,
     pub(crate) limit: Option<u32>,
+    pub(crate) scene_equipment: Option<String>,
 }
 
 impl RouteNodeRagContextRequest {
@@ -1201,6 +1234,7 @@ impl RouteNodeRagContextRequest {
             limit: self.limit,
             embedding_model: String::new(),
             query_embedding: Vec::new(),
+            scene_equipment: self.scene_equipment,
         }
     }
 }
@@ -1257,9 +1291,27 @@ impl TryFrom<search_pb::SearchResponse> for SearchResponse {
                 .items
                 .into_iter()
                 .map(|item| {
+                    let result_type = SearchResultType::from_pb(item.result_type)?;
+                    let ad = item.ad.map(|ad| SearchAd {
+                        request_id: ad.request_id,
+                        campaign_id: ad.campaign_id,
+                        placement: ad.placement,
+                        title: ad.title,
+                        body: ad.body,
+                        image_url: ad.image_url,
+                        landing_url: ad.landing_url,
+                        ecpm: ad.ecpm,
+                        model_version: ad.model_version,
+                        route_id: ad.route_id,
+                        action_node_id: ad.action_node_id,
+                        scene_equipment: ad.scene_equipment,
+                    });
+                    if (result_type == SearchResultType::Ad) != ad.is_some() {
+                        return Err("search ad result has an invalid ad payload".to_string());
+                    }
                     Ok(SearchResult {
                         id: item.id,
-                        result_type: SearchResultType::from_pb(item.result_type)?,
+                        result_type,
                         title: item.title,
                         snippet: item.snippet,
                         cover_url: item.cover_url,
@@ -1270,6 +1322,7 @@ impl TryFrom<search_pb::SearchResponse> for SearchResponse {
                         highlights: item.highlights,
                         post: item.post.map(PostSummary::from_search).transpose()?,
                         resource: item.resource.map(Into::into),
+                        ad,
                     })
                 })
                 .collect::<Result<_, String>>()?,
@@ -5798,7 +5851,8 @@ mod tests {
     fn rag_context_request_forces_server_side_lexical_boundary() {
         let request: RouteNodeRagContextRequest = serde_json::from_value(serde_json::json!({
             "question": "如何开始这一步？",
-            "limit": 4
+            "limit": 4,
+            "scene_equipment": "阅读清单"
         }))
         .expect("RAG question JSON should deserialize");
         let request = request.into_pb("route-1".to_string(), "node-1".to_string());
@@ -5806,6 +5860,7 @@ mod tests {
         assert_eq!(request.action_node_id, "node-1");
         assert_eq!(request.question, "如何开始这一步？");
         assert_eq!(request.limit, Some(4));
+        assert_eq!(request.scene_equipment.as_deref(), Some("阅读清单"));
         assert!(request.embedding_model.is_empty());
         assert!(request.query_embedding.is_empty());
     }
@@ -5817,7 +5872,8 @@ mod tests {
             "kind": "ai_action_guide",
             "note": "先完成官方示例，再记录复盘",
             "rag_enabled": true,
-            "retrieval_scope": "当前行动节点"
+            "retrieval_scope": "当前行动节点",
+            "scene_equipment": "开发环境"
         }))
         .expect("attachment JSON should deserialize");
         let request = request
@@ -5838,13 +5894,15 @@ mod tests {
             catalog_pb::AttachmentKind::AiActionGuide as i32
         );
         assert!(request.rag_enabled);
+        assert_eq!(request.scene_equipment, "开发环境");
     }
 
     #[test]
     fn route_node_resource_attach_accepts_a_typed_resource_package() {
         let request: AttachRouteNodeResourceRequest = serde_json::from_value(serde_json::json!({
             "resource_id": "resource-ocw-learning",
-            "kind": "resource_package"
+            "kind": "resource_package",
+            "scene_equipment": "学习计划"
         }))
         .expect("resource package JSON should deserialize");
         let request = request
@@ -5866,6 +5924,7 @@ mod tests {
         let invalid_kind = AttachRouteNodeResourceRequest {
             resource_id: "resource-1".to_string(),
             kind: "unknown".to_string(),
+            scene_equipment: "装备".to_string(),
             title_override: String::new(),
             note: String::new(),
             sort_rank: 0,
@@ -5886,6 +5945,7 @@ mod tests {
         let missing_key = AttachRouteNodeResourceRequest {
             resource_id: "resource-1".to_string(),
             kind: "document".to_string(),
+            scene_equipment: "装备".to_string(),
             title_override: String::new(),
             note: String::new(),
             sort_rank: 0,
@@ -5913,6 +5973,7 @@ mod tests {
                 action_node_id: "node-1".to_string(),
                 resource_id: "resource-1".to_string(),
                 kind: catalog_pb::AttachmentKind::Pdf as i32,
+                scene_equipment: "行动装备".to_string(),
                 title_override: "行动手册".to_string(),
                 note: "完成后复盘".to_string(),
                 sort_rank: 2,
@@ -5941,6 +6002,7 @@ mod tests {
             .expect("attachment response should convert");
         let json = serde_json::to_value(attachment).expect("attachment JSON");
         assert_eq!(json["kind"], "pdf");
+        assert_eq!(json["scene_equipment"], "行动装备");
         assert_eq!(json["resource"]["license"], "CC BY 4.0");
     }
 

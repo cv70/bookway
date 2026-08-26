@@ -2,10 +2,10 @@
 -- ownership and commission values are immutable snapshots on the order so a
 -- later catalog edit cannot redirect a payout.
 ALTER TABLE mall_orders
-    ADD COLUMN IF NOT EXISTS merchant_id TEXT NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS fulfillment_status TEXT NOT NULL DEFAULT 'pending'
+    ADD COLUMN IF NOT EXISTS merchant_id TEXT NOT NULL,
+    ADD COLUMN IF NOT EXISTS fulfillment_status TEXT NOT NULL
         CHECK (fulfillment_status IN ('pending', 'processing', 'shipped', 'delivered', 'cancelled')),
-    ADD COLUMN IF NOT EXISTS tracking_number TEXT NOT NULL DEFAULT '';
+    ADD COLUMN IF NOT EXISTS tracking_number TEXT NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_mall_orders_merchant
     ON mall_orders (merchant_id, id DESC);

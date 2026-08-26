@@ -32,11 +32,8 @@ pub(crate) trait OrderDao: Send + Sync {
     async fn get(&self, user_id: &str, id: &str) -> Result<pb::Order, DaoError>;
     async fn list(&self, user_id: &str) -> Result<Vec<pb::Order>, DaoError>;
     async fn expired_pending(&self, limit: usize) -> Result<Vec<pb::Order>, DaoError>;
-    async fn claim_payment_reference(
-        &self,
-        id: &str,
-        payment_reference: &str,
-    ) -> Result<pb::Order, DaoError>;
+    async fn begin_payment(&self, id: &str, payment_reference: &str)
+    -> Result<pb::Order, DaoError>;
     async fn transition(
         &self,
         id: &str,
@@ -82,6 +79,7 @@ fn status_name(value: i32) -> Result<&'static str, DaoError> {
         Some(pb::MallOrderStatus::Paid) => Ok("paid"),
         Some(pb::MallOrderStatus::Cancelled) => Ok("cancelled"),
         Some(pb::MallOrderStatus::Expired) => Ok("expired"),
+        Some(pb::MallOrderStatus::PaymentProcessing) => Ok("payment_processing"),
         None => Err(DaoError::Failed("invalid order status".to_string())),
     }
 }
@@ -91,6 +89,7 @@ fn parse_status(value: &str) -> Result<i32, DaoError> {
         "paid" => Ok(pb::MallOrderStatus::Paid as i32),
         "cancelled" => Ok(pb::MallOrderStatus::Cancelled as i32),
         "expired" => Ok(pb::MallOrderStatus::Expired as i32),
+        "payment_processing" => Ok(pb::MallOrderStatus::PaymentProcessing as i32),
         _ => Err(DaoError::Failed(format!("unknown order status {value}"))),
     }
 }
@@ -253,11 +252,18 @@ mod tests {
         })
         .await
         .expect("second order should be created");
-        dao.claim_payment_reference("order-1", "payment-1")
+        dao.begin_payment("order-1", "payment-1")
             .await
             .expect("first claim should succeed");
+        assert_eq!(
+            dao.get("user-1", "order-1")
+                .await
+                .expect("order should be readable")
+                .status,
+            pb::MallOrderStatus::PaymentProcessing as i32
+        );
         let error = dao
-            .claim_payment_reference("order-2", "payment-1")
+            .begin_payment("order-2", "payment-1")
             .await
             .expect_err("payment reference reuse must fail");
         assert!(matches!(error, DaoError::Conflict(_)));
@@ -276,10 +282,82 @@ mod tests {
         .await
         .expect("order should be created");
         let error = dao
-            .claim_payment_reference("order-1", "payment-1")
+            .begin_payment("order-1", "payment-1")
             .await
             .expect_err("expired orders cannot start payment");
         assert!(matches!(error, DaoError::State(_)));
+    }
+
+    #[tokio::test]
+    async fn payment_processing_is_retryable_and_cannot_be_cancelled() {
+        let dao = MemoryOrderDao::default();
+        dao.create(NewOrder {
+            order: draft("order-1"),
+            idempotency_key: "key-1".to_string(),
+            request_fingerprint: "sku-1:1".to_string(),
+        })
+        .await
+        .expect("order should be created");
+
+        dao.begin_payment("order-1", "payment-1")
+            .await
+            .expect("payment should enter processing");
+        let retry = dao
+            .begin_payment("order-1", "payment-1")
+            .await
+            .expect("same payment retry should be idempotent");
+        assert_eq!(retry.status, pb::MallOrderStatus::PaymentProcessing as i32);
+        let cancel = dao
+            .transition("order-1", pb::MallOrderStatus::Cancelled as i32, None)
+            .await;
+        assert!(matches!(cancel, Err(DaoError::Failed(_))));
+    }
+
+    #[tokio::test]
+    async fn payment_processing_can_expire() {
+        let dao = MemoryOrderDao::default();
+        dao.create(NewOrder {
+            order: draft("order-1"),
+            idempotency_key: "key-1".to_string(),
+            request_fingerprint: "sku-1:1".to_string(),
+        })
+        .await
+        .expect("order should be created");
+        dao.begin_payment("order-1", "payment-1")
+            .await
+            .expect("payment should enter processing");
+        let expired = dao
+            .transition("order-1", pb::MallOrderStatus::Expired as i32, None)
+            .await
+            .expect("processing order should be expirable");
+        assert_eq!(expired.status, pb::MallOrderStatus::Expired as i32);
+    }
+
+    #[tokio::test]
+    async fn committed_payment_processing_can_finish_after_its_order_ttl() {
+        let dao = MemoryOrderDao::default();
+        let mut order = draft("order-1");
+        order.status = pb::MallOrderStatus::PaymentProcessing as i32;
+        order.payment_reference = Some("payment-1".to_string());
+        order.expires_at = "2000-01-01T00:00:00Z".to_string();
+        dao.create(NewOrder {
+            order,
+            idempotency_key: "key-1".to_string(),
+            request_fingerprint: "sku-1:1".to_string(),
+        })
+        .await
+        .expect("crash-recovery order should be persisted");
+
+        // Inventory has already committed before the process crashed. The
+        // order state machine must permit the durable completion transition,
+        // even though the original payment window has elapsed.
+        let paid = dao
+            .transition("order-1", pb::MallOrderStatus::Paid as i32, None)
+            .await
+            .expect("committed payment recovery should finish the order");
+
+        assert_eq!(paid.status, pb::MallOrderStatus::Paid as i32);
+        assert_eq!(paid.payment_reference.as_deref(), Some("payment-1"));
     }
 }
 

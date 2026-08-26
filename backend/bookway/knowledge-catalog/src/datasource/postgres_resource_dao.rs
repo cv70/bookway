@@ -23,6 +23,7 @@ struct AttachmentRow {
     id: String,
     route_id: String,
     action_node_id: String,
+    scene_equipment: String,
     resource_id: String,
     kind: String,
     title_override: String,
@@ -68,6 +69,7 @@ fn row_to_attachment(
         id: row.id,
         route_id: row.route_id,
         action_node_id: row.action_node_id,
+        scene_equipment: row.scene_equipment,
         resource_id: row.resource_id,
         kind: parse_attachment_kind(&row.kind)?,
         title_override: row.title_override,
@@ -89,6 +91,7 @@ fn attachment_row_matches_request(
 ) -> bool {
     row.route_id == request.route_id
         && row.action_node_id == request.action_node_id
+        && row.scene_equipment == request.scene_equipment
         && row.resource_id == request.resource_id
         && row.kind == attachment_kind_name(request.kind)
         && row.title_override == request.title_override
@@ -163,11 +166,13 @@ impl ResourceDao for PostgresResourceDao {
         &self,
         route_id: &str,
         action_node_id: &str,
+        scene_equipment: Option<&str>,
         include_archived: bool,
     ) -> Result<pb::ListNodeResourcesResponse, DaoError> {
-        let rows = sqlx::query_as::<_, AttachmentRow>("SELECT id,route_id,action_node_id,resource_id,kind,title_override,note,sort_rank,rag_enabled,embedding_collection,retrieval_scope,created_by,created_at,updated_at FROM route_node_resource_attachments WHERE route_id=$1 AND action_node_id=$2 AND ($3 OR archived_at IS NULL) ORDER BY sort_rank ASC, created_at ASC, id ASC")
+        let rows = sqlx::query_as::<_, AttachmentRow>("SELECT id,route_id,action_node_id,scene_equipment,resource_id,kind,title_override,note,sort_rank,rag_enabled,embedding_collection,retrieval_scope,created_by,created_at,updated_at FROM route_node_resource_attachments WHERE route_id=$1 AND action_node_id=$2 AND ($3::TEXT IS NULL OR scene_equipment=$3) AND ($4 OR archived_at IS NULL) ORDER BY sort_rank ASC, created_at ASC, id ASC")
             .bind(route_id)
             .bind(action_node_id)
+            .bind(scene_equipment)
             .bind(include_archived)
             .fetch_all(&self.pool)
             .await
@@ -185,9 +190,19 @@ impl ResourceDao for PostgresResourceDao {
         request: NewNodeResourceAttachment,
     ) -> Result<pb::RouteNodeResourceAttachment, DaoError> {
         let resource = self.get(&request.resource_id).await?;
-        if let Some(row) = sqlx::query_as::<_, AttachmentRow>("SELECT id,route_id,action_node_id,resource_id,kind,title_override,note,sort_rank,rag_enabled,embedding_collection,retrieval_scope,created_by,created_at,updated_at FROM route_node_resource_attachments WHERE idempotency_key=$1")
+        let mut transaction = self.pool.begin().await.map_err(DaoError::Database)?;
+        // A first request has no idempotency row to lock. Serialize by the
+        // operation key before observing or inserting it, otherwise concurrent
+        // retries can race the unique idempotency constraint.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))")
+            .bind("route-node-resource")
             .bind(&request.idempotency_key)
-            .fetch_optional(&self.pool)
+            .execute(&mut *transaction)
+            .await
+            .map_err(DaoError::Database)?;
+        if let Some(row) = sqlx::query_as::<_, AttachmentRow>("SELECT id,route_id,action_node_id,scene_equipment,resource_id,kind,title_override,note,sort_rank,rag_enabled,embedding_collection,retrieval_scope,created_by,created_at,updated_at FROM route_node_resource_attachments WHERE idempotency_key=$1 FOR UPDATE")
+            .bind(&request.idempotency_key)
+            .fetch_optional(&mut *transaction)
             .await
             .map_err(DaoError::Database)?
         {
@@ -197,15 +212,18 @@ impl ResourceDao for PostgresResourceDao {
                         .to_string(),
                 ));
             }
-            return row_to_attachment(row, Some(resource));
+            let existing = row_to_attachment(row, Some(resource))?;
+            transaction.commit().await.map_err(DaoError::Database)?;
+            return Ok(existing);
         }
 
         let id = Uuid::new_v4().to_string();
         let kind = attachment_kind_name(request.kind);
-        let row = sqlx::query_as::<_, AttachmentRow>("INSERT INTO route_node_resource_attachments (id,route_id,action_node_id,resource_id,kind,title_override,note,sort_rank,rag_enabled,embedding_collection,retrieval_scope,created_by,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (route_id, action_node_id, resource_id) WHERE archived_at IS NULL DO UPDATE SET kind=EXCLUDED.kind,title_override=EXCLUDED.title_override,note=EXCLUDED.note,sort_rank=EXCLUDED.sort_rank,rag_enabled=EXCLUDED.rag_enabled,embedding_collection=EXCLUDED.embedding_collection,retrieval_scope=EXCLUDED.retrieval_scope,created_by=EXCLUDED.created_by,updated_at=now() RETURNING id,route_id,action_node_id,resource_id,kind,title_override,note,sort_rank,rag_enabled,embedding_collection,retrieval_scope,created_by,created_at,updated_at")
+        let row = sqlx::query_as::<_, AttachmentRow>("INSERT INTO route_node_resource_attachments (id,route_id,action_node_id,scene_equipment,resource_id,kind,title_override,note,sort_rank,rag_enabled,embedding_collection,retrieval_scope,created_by,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (route_id, action_node_id, resource_id, scene_equipment) WHERE archived_at IS NULL DO UPDATE SET kind=EXCLUDED.kind,title_override=EXCLUDED.title_override,note=EXCLUDED.note,sort_rank=EXCLUDED.sort_rank,rag_enabled=EXCLUDED.rag_enabled,embedding_collection=EXCLUDED.embedding_collection,retrieval_scope=EXCLUDED.retrieval_scope,created_by=EXCLUDED.created_by,updated_at=now() RETURNING id,route_id,action_node_id,scene_equipment,resource_id,kind,title_override,note,sort_rank,rag_enabled,embedding_collection,retrieval_scope,created_by,created_at,updated_at")
             .bind(id)
             .bind(&request.route_id)
             .bind(&request.action_node_id)
+            .bind(&request.scene_equipment)
             .bind(&request.resource_id)
             .bind(kind)
             .bind(&request.title_override)
@@ -216,10 +234,12 @@ impl ResourceDao for PostgresResourceDao {
             .bind(&request.retrieval_scope)
             .bind(&request.created_by)
             .bind(&request.idempotency_key)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *transaction)
             .await
             .map_err(DaoError::Database)?;
-        row_to_attachment(row, Some(resource))
+        let attachment = row_to_attachment(row, Some(resource))?;
+        transaction.commit().await.map_err(DaoError::Database)?;
+        Ok(attachment)
     }
 
     async fn detach_node_resource(

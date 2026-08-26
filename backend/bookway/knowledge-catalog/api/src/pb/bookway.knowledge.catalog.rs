@@ -90,6 +90,8 @@ pub struct RouteNodeResourceAttachment {
     pub updated_at: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "15")]
     pub resource: ::core::option::Option<Resource>,
+    #[prost(string, tag = "16")]
+    pub scene_equipment: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -100,6 +102,8 @@ pub struct ListNodeResourcesRequest {
     pub action_node_id: ::prost::alloc::string::String,
     #[prost(bool, tag = "3")]
     pub include_archived: bool,
+    #[prost(string, optional, tag = "4")]
+    pub scene_equipment: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -132,6 +136,8 @@ pub struct AttachNodeResourceRequest {
     pub idempotency_key: ::prost::alloc::string::String,
     #[prost(string, tag = "11")]
     pub created_by: ::prost::alloc::string::String,
+    #[prost(string, tag = "12")]
+    pub scene_equipment: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -168,6 +174,8 @@ pub struct RetrieveRagContextRequest {
     pub embedding_model: ::prost::alloc::string::String,
     #[prost(float, repeated, tag = "6")]
     pub query_embedding: ::prost::alloc::vec::Vec<f32>,
+    #[prost(string, optional, tag = "7")]
+    pub scene_equipment: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -229,6 +237,8 @@ pub struct SearchRagEmbeddingsRequest {
     pub query_embedding: ::prost::alloc::vec::Vec<f32>,
     #[prost(uint32, optional, tag = "5")]
     pub limit: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub scene_equipment: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

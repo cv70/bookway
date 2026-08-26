@@ -131,6 +131,7 @@ impl ResourceDao for MemoryResourceDao {
         &self,
         route_id: &str,
         action_node_id: &str,
+        scene_equipment: Option<&str>,
         include_archived: bool,
     ) -> Result<pb::ListNodeResourcesResponse, DaoError> {
         let resources = self.resources.read().await;
@@ -146,6 +147,7 @@ impl ResourceDao for MemoryResourceDao {
             .filter(|attachment| {
                 attachment.route_id == route_id
                     && attachment.action_node_id == action_node_id
+                    && scene_equipment.is_none_or(|expected| attachment.scene_equipment == expected)
                     && (include_archived || !attachment.updated_at.starts_with("archived:"))
             })
             .cloned()
@@ -168,13 +170,11 @@ impl ResourceDao for MemoryResourceDao {
         request: NewNodeResourceAttachment,
     ) -> Result<pb::RouteNodeResourceAttachment, DaoError> {
         let resource = self.get(&request.resource_id).await?;
-        if let Some(existing_id) = self
-            .attachment_idempotency
-            .read()
-            .await
-            .get(&request.idempotency_key)
-            .cloned()
-        {
+        // Keep the idempotency mapping and attachment mutation in one lock
+        // scope so concurrent requests using the same key cannot overwrite
+        // each other's target.
+        let mut idempotency = self.attachment_idempotency.write().await;
+        if let Some(existing_id) = idempotency.get(&request.idempotency_key).cloned() {
             let attachments = self.attachments.read().await;
             let existing = attachments
                 .iter()
@@ -198,9 +198,11 @@ impl ResourceDao for MemoryResourceDao {
             item.route_id == request.route_id
                 && item.action_node_id == request.action_node_id
                 && item.resource_id == request.resource_id
+                && item.scene_equipment == request.scene_equipment
                 && !item.updated_at.starts_with("archived:")
         }) {
             existing.kind = request.kind as i32;
+            existing.scene_equipment = request.scene_equipment;
             existing.title_override = request.title_override;
             existing.note = request.note;
             existing.sort_rank = request.sort_rank;
@@ -210,10 +212,7 @@ impl ResourceDao for MemoryResourceDao {
             existing.created_by = request.created_by;
             existing.updated_at = "2026-08-18T00:00:00Z".to_string();
             existing.resource = Some(resource);
-            self.attachment_idempotency
-                .write()
-                .await
-                .insert(request.idempotency_key, existing.id.clone());
+            idempotency.insert(request.idempotency_key, existing.id.clone());
             return Ok(existing.clone());
         }
 
@@ -234,6 +233,7 @@ impl ResourceDao for MemoryResourceDao {
             id: id.clone(),
             route_id: request.route_id,
             action_node_id: request.action_node_id,
+            scene_equipment: request.scene_equipment,
             resource_id: request.resource_id,
             kind: request.kind as i32,
             title_override: request.title_override,
@@ -248,10 +248,7 @@ impl ResourceDao for MemoryResourceDao {
             resource: Some(resource),
         };
         attachments.push(attachment.clone());
-        self.attachment_idempotency
-            .write()
-            .await
-            .insert(request.idempotency_key, id);
+        idempotency.insert(request.idempotency_key, id);
         Ok(attachment)
     }
 

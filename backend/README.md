@@ -330,7 +330,7 @@ cargo run -p bookway-gateway
 | direct-message-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`GROWTH_GRPC_URL`、`DIRECT_MESSAGE_NOTIFICATION_*` |
 | appeal-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`GROWTH_GRPC_URL`、`APPEAL_NOTIFICATION_*` |
 | content-report-restriction-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`REPORT_RESTRICTION_*` |
-| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`（可降级） |
+| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`AD_MAIN_GRPC_URL`（特征与广告均可降级） |
 | media | `MEDIA_ADDR` | `S3_ENDPOINT`、`S3_BUCKET`、`CDN_BASE_URL` |
 | content-audit | `CONTENT_AUDIT_ADDR` | 审核规则与 PostgreSQL |
 | feedback | `FEEDBACK_ADDR` | PostgreSQL；`user_feedback` 状态队列 |

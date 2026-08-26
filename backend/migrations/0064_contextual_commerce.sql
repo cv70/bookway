@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS mall_node_offers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mall_node_offers_lookup
-    ON mall_node_offers (route_id, action_node_id, id);
+    ON mall_node_offers (route_id, action_node_id, scene_equipment, id);
 
 CREATE INDEX IF NOT EXISTS idx_mall_node_offers_creator
     ON mall_node_offers (creator_id, created_at DESC);

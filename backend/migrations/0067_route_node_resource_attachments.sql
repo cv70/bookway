@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS route_node_resource_attachments (
     id TEXT PRIMARY KEY,
     route_id TEXT NOT NULL,
     action_node_id TEXT NOT NULL,
+    scene_equipment TEXT NOT NULL CHECK (scene_equipment <> ''),
     resource_id TEXT NOT NULL REFERENCES public_resources(id),
     kind TEXT NOT NULL CHECK (
         kind IN (
@@ -35,11 +36,11 @@ CREATE TABLE IF NOT EXISTS route_node_resource_attachments (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_route_node_resource_active_unique
-    ON route_node_resource_attachments (route_id, action_node_id, resource_id)
+    ON route_node_resource_attachments (route_id, action_node_id, resource_id, scene_equipment)
     WHERE archived_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_route_node_resource_active_order
-    ON route_node_resource_attachments (route_id, action_node_id, sort_rank, created_at, id)
+    ON route_node_resource_attachments (route_id, action_node_id, scene_equipment, sort_rank, created_at, id)
     WHERE archived_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_route_node_resource_rag_collection

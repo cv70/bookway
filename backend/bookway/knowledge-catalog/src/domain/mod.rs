@@ -79,11 +79,26 @@ impl Domain {
     ) -> Result<pb::ListNodeResourcesResponse, DomainError> {
         let route_id = bounded_required("route_id", &request.route_id, 160)?;
         let action_node_id = bounded_required("action_node_id", &request.action_node_id, 160)?;
-        self.validate_public_action_node(&route_id, &action_node_id, None)
-            .await?;
+        let scene_equipment = request
+            .scene_equipment
+            .as_deref()
+            .map(|value| bounded_required("scene_equipment", value, 160))
+            .transpose()?;
+        self.validate_public_action_node(
+            &route_id,
+            &action_node_id,
+            None,
+            scene_equipment.as_deref(),
+        )
+        .await?;
         Ok(self
             .dao
-            .list_node_resources(&route_id, &action_node_id, request.include_archived)
+            .list_node_resources(
+                &route_id,
+                &action_node_id,
+                scene_equipment.as_deref(),
+                request.include_archived,
+            )
             .await?)
     }
 
@@ -93,11 +108,17 @@ impl Domain {
     ) -> Result<pb::RouteNodeResourceAttachment, DomainError> {
         let route_id = bounded_required("route_id", &request.route_id, 160)?;
         let action_node_id = bounded_required("action_node_id", &request.action_node_id, 160)?;
+        let scene_equipment = bounded_required("scene_equipment", &request.scene_equipment, 160)?;
         let resource_id = bounded_required("resource_id", &request.resource_id, 160)?;
         let idempotency_key = bounded_required("idempotency_key", &request.idempotency_key, 220)?;
         let created_by = bounded_required("created_by", &request.created_by, 160)?;
-        self.validate_public_action_node(&route_id, &action_node_id, Some(&created_by))
-            .await?;
+        self.validate_public_action_node(
+            &route_id,
+            &action_node_id,
+            Some(&created_by),
+            Some(&scene_equipment),
+        )
+        .await?;
         let kind = pb::AttachmentKind::try_from(request.kind)
             .ok()
             .filter(|kind| *kind != pb::AttachmentKind::Unspecified)
@@ -115,6 +136,7 @@ impl Domain {
             .attach_node_resource(NewNodeResourceAttachment {
                 route_id,
                 action_node_id,
+                scene_equipment,
                 resource_id,
                 kind,
                 title_override,
@@ -137,7 +159,7 @@ impl Domain {
         let action_node_id = bounded_required("action_node_id", &request.action_node_id, 160)?;
         let attachment_id = bounded_required("attachment_id", &request.attachment_id, 160)?;
         let operator_id = bounded_required("operator_id", &request.operator_id, 160)?;
-        self.validate_public_action_node(&route_id, &action_node_id, Some(&operator_id))
+        self.validate_public_action_node(&route_id, &action_node_id, Some(&operator_id), None)
             .await?;
         Ok(pb::DetachNodeResourceResponse {
             detached: self
@@ -154,12 +176,27 @@ impl Domain {
         let route_id = bounded_required("route_id", &request.route_id, 160)?;
         let action_node_id = bounded_required("action_node_id", &request.action_node_id, 160)?;
         let question = bounded_required("question", &request.question, 600)?;
-        self.validate_public_action_node(&route_id, &action_node_id, None)
-            .await?;
+        let scene_equipment = request
+            .scene_equipment
+            .as_deref()
+            .map(|value| bounded_required("scene_equipment", value, 160))
+            .transpose()?;
+        self.validate_public_action_node(
+            &route_id,
+            &action_node_id,
+            None,
+            scene_equipment.as_deref(),
+        )
+        .await?;
         let limit = usize::try_from(request.limit.unwrap_or(6).clamp(1, 12)).unwrap_or(6);
         let attachments = self
             .dao
-            .list_node_resources(&route_id, &action_node_id, false)
+            .list_node_resources(
+                &route_id,
+                &action_node_id,
+                scene_equipment.as_deref(),
+                false,
+            )
             .await?
             .items;
         let expected_collection = embedding_collection(&route_id, &action_node_id);
@@ -235,11 +272,11 @@ impl Domain {
         let operator_id = bounded_required("operator_id", &request.operator_id, 160)?;
         let embedding_model = bounded_required("embedding_model", &request.embedding_model, 80)?;
         validate_embedding_vector(&embedding_model, &request.embedding)?;
-        self.validate_public_action_node(&route_id, &action_node_id, Some(&operator_id))
+        self.validate_public_action_node(&route_id, &action_node_id, Some(&operator_id), None)
             .await?;
         let attachment = self
             .dao
-            .list_node_resources(&route_id, &action_node_id, false)
+            .list_node_resources(&route_id, &action_node_id, None, false)
             .await?
             .items
             .into_iter()
@@ -275,12 +312,27 @@ impl Domain {
             ));
         }
         validate_embedding_vector(&embedding_model, &request.query_embedding)?;
-        self.validate_public_action_node(&route_id, &action_node_id, None)
-            .await?;
+        let scene_equipment = request
+            .scene_equipment
+            .as_deref()
+            .map(|value| bounded_required("scene_equipment", value, 160))
+            .transpose()?;
+        self.validate_public_action_node(
+            &route_id,
+            &action_node_id,
+            None,
+            scene_equipment.as_deref(),
+        )
+        .await?;
         let limit = usize::try_from(request.limit.unwrap_or(8).clamp(1, 50)).unwrap_or(8);
         let active_attachment_ids = self
             .dao
-            .list_node_resources(&route_id, &action_node_id, false)
+            .list_node_resources(
+                &route_id,
+                &action_node_id,
+                scene_equipment.as_deref(),
+                false,
+            )
             .await?
             .items
             .into_iter()
@@ -315,6 +367,7 @@ impl Domain {
         route_id: &str,
         action_node_id: &str,
         expected_owner_id: Option<&str>,
+        expected_scene_equipment: Option<&str>,
     ) -> Result<(), DomainError> {
         let Some(client) = &self.bbs_link else {
             return Ok(());
@@ -335,7 +388,12 @@ impl Domain {
                 _ => DomainError::Upstream(error.to_string()),
             })?
             .into_inner();
-        validate_route_action_node(&route, action_node_id, expected_owner_id)
+        validate_route_action_node(
+            &route,
+            action_node_id,
+            expected_owner_id,
+            expected_scene_equipment,
+        )
     }
 }
 
@@ -343,6 +401,7 @@ fn validate_route_action_node(
     route: &bbs_link::Content,
     action_node_id: &str,
     expected_owner_id: Option<&str>,
+    expected_scene_equipment: Option<&str>,
 ) -> Result<(), DomainError> {
     if route.content_type != bbs_link::ContentType::Route as i32
         || !route.route_template.as_ref().is_some_and(|template| {
@@ -359,6 +418,27 @@ fn validate_route_action_node(
     if expected_owner_id.is_some_and(|owner_id| route.author_id != owner_id) {
         return Err(DomainError::Validation(
             "only the route author may attach or detach node resources".to_string(),
+        ));
+    }
+    if expected_scene_equipment.is_some_and(|scene_equipment| {
+        !route
+            .route_template
+            .as_ref()
+            .and_then(|template| {
+                template
+                    .actions
+                    .iter()
+                    .find(|action| action.id == action_node_id)
+            })
+            .is_some_and(|action| {
+                action
+                    .scene_equipment
+                    .iter()
+                    .any(|value| value.trim().eq_ignore_ascii_case(scene_equipment))
+            })
+    }) {
+        return Err(DomainError::Validation(
+            "resource scene equipment is not declared by the action node".to_string(),
         ));
     }
     Ok(())
@@ -565,6 +645,7 @@ mod tests {
             route_template: Some(bbs_link::RouteTemplate {
                 actions: vec![bbs_link::RouteTemplateAction {
                     id: "action-1".to_string(),
+                    scene_equipment: vec!["阅读清单".to_string()],
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -572,17 +653,22 @@ mod tests {
             ..Default::default()
         };
 
-        validate_route_action_node(&route, "action-1", Some("route-author"))
+        validate_route_action_node(&route, "action-1", Some("route-author"), None)
             .expect("route author may mutate an attached resource");
         assert!(matches!(
-            validate_route_action_node(&route, "action-1", Some("another-user")),
+            validate_route_action_node(&route, "action-1", Some("another-user"), None),
             Err(DomainError::Validation(message))
                 if message == "only the route author may attach or detach node resources"
         ));
         assert!(matches!(
-            validate_route_action_node(&route, "missing-action", Some("route-author")),
+            validate_route_action_node(&route, "missing-action", Some("route-author"), None),
             Err(DomainError::Validation(message))
                 if message == "resource attachment must target an action node on a public route"
+        ));
+        assert!(matches!(
+            validate_route_action_node(&route, "action-1", None, Some("开发环境")),
+            Err(DomainError::Validation(message))
+                if message == "resource scene equipment is not declared by the action node"
         ));
     }
 
@@ -619,6 +705,7 @@ mod tests {
         let request = pb::AttachNodeResourceRequest {
             route_id: "route/one".to_string(),
             action_node_id: "node/one".to_string(),
+            scene_equipment: "开发环境".to_string(),
             resource_id: "resource-mdn-web".to_string(),
             kind: pb::AttachmentKind::RagCorpus as i32,
             sort_rank: 10_001,
@@ -660,6 +747,7 @@ mod tests {
                 embedding_model: "text-embedding-test".to_string(),
                 query_embedding: embedding.clone(),
                 limit: Some(3),
+                scene_equipment: None,
             })
             .await
             .expect("vector search should stay inside the action node");
@@ -676,6 +764,7 @@ mod tests {
         let conflicting_request = pb::AttachNodeResourceRequest {
             route_id: "route/other".to_string(),
             action_node_id: "node/other".to_string(),
+            scene_equipment: "开发环境".to_string(),
             resource_id: "resource-mdn-web".to_string(),
             kind: pb::AttachmentKind::RagCorpus as i32,
             idempotency_key: "attach-1".to_string(),
@@ -696,6 +785,7 @@ mod tests {
                 route_id: "route/one".to_string(),
                 action_node_id: "node/one".to_string(),
                 include_archived: false,
+                scene_equipment: None,
             })
             .await
             .expect("attachment should be listed");
@@ -714,6 +804,7 @@ mod tests {
                 limit: Some(3),
                 embedding_model: String::new(),
                 query_embedding: Vec::new(),
+                scene_equipment: None,
             })
             .await
             .expect("RAG context should be available for enabled attachments");
@@ -731,6 +822,7 @@ mod tests {
                 embedding_model: "text-embedding-test".to_string(),
                 query_embedding: embedding,
                 limit: Some(3),
+                scene_equipment: None,
             })
             .await
             .expect("vector retrieval should return public attachment context");
@@ -759,6 +851,7 @@ mod tests {
                 route_id: "route/one".to_string(),
                 action_node_id: "node/one".to_string(),
                 include_archived: false,
+                scene_equipment: None,
             })
             .await
             .expect("active attachments should be listed");
@@ -770,6 +863,7 @@ mod tests {
                 embedding_model: "text-embedding-test".to_string(),
                 query_embedding: vec![1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125],
                 limit: Some(3),
+                scene_equipment: None,
             })
             .await
             .expect("archived attachments must not be searchable");

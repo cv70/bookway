@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bookway_ad_main_api::pb::{self as ad_pb, ad_main_client::AdMainClient};
 use bookway_bbs_link_api::pb::{self as bbs_link_pb, bbs_link_client::BbsLinkClient};
 use bookway_bbs_search_api::pb::{self, bbs_search_client::BbsSearchClient};
 use bookway_feature_main_api::pb::{self as feature_pb, feature_main_client::FeatureMainClient};
@@ -40,6 +41,8 @@ const BBS_LINK_TIMEOUT: Duration = Duration::from_millis(1_500);
 const KNOWLEDGE_CATALOG_TIMEOUT: Duration = Duration::from_millis(1_500);
 const FEATURE_RERANK_TIMEOUT: Duration = Duration::from_millis(35);
 const MAX_FEATURE_RERANK_CANDIDATES: usize = 200;
+const AD_DECISION_TIMEOUT: Duration = Duration::from_millis(25);
+const DEFAULT_AD_PLACEMENT: &str = "search";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SearchIntent {
@@ -198,6 +201,7 @@ pub(crate) struct Domain {
     content_client: Option<BbsLinkClient<tonic::transport::Channel>>,
     resource_client: Option<KnowledgeCatalogClient<tonic::transport::Channel>>,
     feature_client: Option<FeatureMainClient<tonic::transport::Channel>>,
+    ad_main: Option<AdMainClient<tonic::transport::Channel>>,
     sessions: Arc<dyn SearchSessionStore>,
     exposures: SharedSearchExposureStore,
     query_rewrites: Arc<QueryRewriteCache>,
@@ -210,6 +214,7 @@ impl Domain {
         content_client: BbsLinkClient<tonic::transport::Channel>,
         resource_client: KnowledgeCatalogClient<tonic::transport::Channel>,
         feature_client: Option<FeatureMainClient<tonic::transport::Channel>>,
+        ad_main: Option<AdMainClient<tonic::transport::Channel>>,
     ) -> Result<Self, bookway_data::DataError> {
         let storage = bookway_data::storage_mode()?;
         let pool = match storage {
@@ -234,6 +239,7 @@ impl Domain {
             content_client: Some(content_client),
             resource_client: Some(resource_client),
             feature_client,
+            ad_main,
             sessions,
             exposures,
             query_rewrites: Arc::new(QueryRewriteCache::new(query_rewrites)),
@@ -253,6 +259,7 @@ impl Domain {
                 bbs_link_url: String::new(),
                 knowledge_catalog_url: String::new(),
                 feature_main_url: String::new(),
+                ad_main_url: String::new(),
             },
             search_client,
             // Unit tests supply already-authoritative candidates directly. Production
@@ -260,6 +267,7 @@ impl Domain {
             content_client: None,
             resource_client: None,
             feature_client: None,
+            ad_main: None,
             sessions,
             exposures,
             query_rewrites: Arc::new(QueryRewriteCache::new(Arc::new(MemoryQueryRewriteDao))),
@@ -274,24 +282,48 @@ impl Domain {
             .map_err(|_| SearchMainError::InvalidCursor("搜索类型无效".to_string()))?;
         let started = Instant::now();
         let rewrite_resolution = self.query_rewrites.active().await;
-        let plan = make_search_plan(
-            &request.q,
-            search_type,
-            &rewrite_resolution.dictionary,
-            self.resource_client.is_some(),
-        )?;
-        request.q = plan.original_query.clone();
+        let normalized_query = normalize_query(&request.q)?;
+        request.q = normalized_query;
         let limit = request
             .limit
             .unwrap_or(DEFAULT_PAGE_SIZE as u32)
             .clamp(1, MAX_PAGE_SIZE as u32) as usize;
         request.limit = Some(limit as u32);
         request.excluded_author_ids = normalize_excluded_author_ids(&request.excluded_author_ids);
+        if request
+            .route_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+            || request
+                .action_node_id
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || request.route_id.is_some() != request.action_node_id.is_some()
+            || request
+                .scene_equipment
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || (request.scene_equipment.is_some()
+                && (request.route_id.is_none() || request.action_node_id.is_none()))
+        {
+            return Err(SearchMainError::InvalidCursor(
+                "route_id and action_node_id must be provided together".to_string(),
+            ));
+        }
+        let route_context = route_context(&request);
+        let plan = make_search_plan(
+            &request.q,
+            search_type,
+            &rewrite_resolution.dictionary,
+            self.resource_client.is_some() && route_context.is_none(),
+        )?;
+        request.q = plan.original_query.clone();
         let fingerprint = query_fingerprint(
             &plan.original_query,
             search_type,
             request.user_id.as_deref(),
             &request.excluded_author_ids,
+            route_context.as_ref(),
         );
         let session_id = parse_cursor(request.cursor.as_deref(), fingerprint)?;
         let mut session = match session_id.as_deref() {
@@ -323,6 +355,56 @@ impl Domain {
         }
 
         session.delivered_count += page.len();
+        let mut ad_degraded = false;
+        // Search ads are a first-page contextual slot. Organic exposure is
+        // persisted above so ad delivery never becomes a fake search result
+        // in attribution or pagination state.
+        if request.cursor.is_none()
+            && page.len() >= 3
+            && limit >= 4
+            && let Some(context) = route_context.as_ref()
+            && !context.scene_equipment.is_empty()
+            && let Some(user_id) = request
+                .user_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        {
+            match self.contextual_search_ad(&request, context, user_id).await {
+                Ok(Some(ad)) => {
+                    let insertion_index = page.len().min(3);
+                    if page.len() == limit
+                        && let Some(displaced) = page.pop()
+                    {
+                        session.pending.insert(0, displaced);
+                        session.delivered_count = session.delivered_count.saturating_sub(1);
+                    }
+                    page.insert(
+                        insertion_index,
+                        pb::SearchResult {
+                            id: format!("ad:{}", ad.campaign_id),
+                            result_type: pb::SearchResultType::Ad as i32,
+                            title: ad.title.clone(),
+                            snippet: ad.body.clone(),
+                            cover_url: (!ad.image_url.is_empty()).then(|| ad.image_url.clone()),
+                            author_id: None,
+                            author_name: None,
+                            domain: None,
+                            score: ad.ecpm,
+                            highlights: Vec::new(),
+                            post: None,
+                            resource: None,
+                            ad: Some(ad),
+                        },
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    ad_degraded = true;
+                    tracing::debug!(%error, "contextual search ad degraded");
+                }
+            }
+        }
         let has_next_page = !session.pending.is_empty() || !all_recalls_exhausted(&session);
         let total_estimate = if all_recalls_exhausted(&session) {
             session.delivered_count + session.pending.len()
@@ -368,6 +450,7 @@ impl Domain {
             items: page
                 .iter()
                 .enumerate()
+                .filter(|(_, result)| result.ad.is_none())
                 .map(|(position, result)| SearchExposureItem {
                     position,
                     result_id: result.id.clone(),
@@ -390,7 +473,7 @@ impl Domain {
             source_calls,
             candidates = session.delivered_count + session.pending.len(),
             took_ms = started.elapsed().as_millis() as u64,
-            degraded = session.degraded || exposure_degraded,
+            degraded = session.degraded || exposure_degraded || ad_degraded,
             "search pipeline completed"
         );
         Ok(pb::SearchResponse {
@@ -399,9 +482,70 @@ impl Domain {
             next_cursor,
             total_estimate: u64::try_from(total_estimate).unwrap_or(u64::MAX),
             took_ms: started.elapsed().as_millis() as u64,
-            degraded: session.degraded || exposure_degraded,
+            degraded: session.degraded || exposure_degraded || ad_degraded,
             request_id,
         })
+    }
+
+    async fn contextual_search_ad(
+        &self,
+        request: &pb::SearchRequest,
+        context: &RouteSearchContext,
+        user_id: &str,
+    ) -> Result<Option<pb::SearchAd>, String> {
+        let Some(ad_main) = self.ad_main.as_ref() else {
+            return Ok(None);
+        };
+        let placement = request
+            .ad_placement
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_AD_PLACEMENT)
+            .to_string();
+        let rpc = ad_pb::DecisionRequest {
+            user_id: user_id.to_string(),
+            placement,
+            domain: None,
+            limit: Some(1),
+            route_id: context.route_id.clone(),
+            action_node_id: context.action_node_id.clone(),
+            scene_equipment: Some(context.scene_equipment.clone()),
+        };
+        let mut client = ad_main.clone();
+        let request = bookway_runtime::grpc_service_request(rpc)
+            .map_err(|error| format!("ad-main request authentication failed: {error}"))?;
+        let response = tokio::time::timeout(AD_DECISION_TIMEOUT, client.decide(request))
+            .await
+            .map_err(|_| "ad-main decision timed out".to_string())?
+            .map_err(|error| error.to_string())?
+            .into_inner();
+        Ok(response.items.into_iter().find_map(|ad| {
+            (ad.route_id == context.route_id
+                && ad.action_node_id == context.action_node_id
+                && !ad.campaign_id.trim().is_empty()
+                && !ad.request_id.trim().is_empty()
+                && ad.ecpm.is_finite()
+                && ad.ecpm >= 0.0
+                && ad
+                    .scene_equipment
+                    .trim()
+                    .eq_ignore_ascii_case(&context.scene_equipment))
+            .then(|| pb::SearchAd {
+                request_id: ad.request_id,
+                campaign_id: ad.campaign_id,
+                placement: ad.placement,
+                title: ad.title,
+                body: ad.body,
+                image_url: ad.image_url,
+                landing_url: ad.landing_url,
+                ecpm: ad.ecpm.max(ad.score),
+                model_version: ad.model_version,
+                route_id: ad.route_id,
+                action_node_id: ad.action_node_id,
+                scene_equipment: ad.scene_equipment,
+            })
+        }))
     }
 
     pub(crate) async fn validate_attributions(
@@ -782,6 +926,7 @@ fn resource_to_result(resource: catalog_pb::Resource, position: usize) -> pb::Se
             published_at: resource.published_at,
             updated_at: resource.updated_at,
         }),
+        ad: None,
     }
 }
 
@@ -867,6 +1012,7 @@ fn search_result_from_summary(
             summary.route_actions.clone(),
         )),
         resource: None,
+        ad: candidate.ad,
     }
 }
 
@@ -1235,7 +1381,9 @@ fn result_type_name(result_type: i32) -> &'static str {
         Ok(pb::SearchResultType::Journey) => "journey",
         Ok(pb::SearchResultType::User) => "user",
         Ok(pb::SearchResultType::Topic) => "topic",
-        Ok(pb::SearchResultType::Resource) | Err(_) => "resource",
+        Ok(pb::SearchResultType::Resource) => "resource",
+        Ok(pb::SearchResultType::Ad) => "ad",
+        Err(_) => "resource",
     }
 }
 
@@ -1274,14 +1422,49 @@ fn query_fingerprint(
     search_type: pb::SearchType,
     viewer_id: Option<&str>,
     excluded_author_ids: &[String],
+    route_context: Option<&RouteSearchContext>,
 ) -> u64 {
+    let context = route_context
+        .map(|value| {
+            format!(
+                "{}\0{}\0{}",
+                value.route_id, value.action_node_id, value.scene_equipment
+            )
+        })
+        .unwrap_or_default();
     stable_hash(&format!(
-        "{}\0{}\0{}\0{}",
+        "{}\0{}\0{}\0{}\0{}",
         search_type_name(search_type),
         query.to_lowercase(),
         viewer_id.unwrap_or_default(),
         excluded_author_ids.join("\0"),
+        context,
     ))
+}
+
+#[derive(Clone, Debug)]
+struct RouteSearchContext {
+    route_id: String,
+    action_node_id: String,
+    scene_equipment: String,
+}
+
+fn route_context(request: &pb::SearchRequest) -> Option<RouteSearchContext> {
+    let route_id = request.route_id.as_deref()?.trim();
+    let action_node_id = request.action_node_id.as_deref()?.trim();
+    let scene_equipment = request
+        .scene_equipment
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
+    if route_id.is_empty() || action_node_id.is_empty() {
+        return None;
+    }
+    Some(RouteSearchContext {
+        route_id: route_id.to_string(),
+        action_node_id: action_node_id.to_string(),
+        scene_equipment: scene_equipment.to_lowercase(),
+    })
 }
 
 fn normalize_excluded_author_ids(author_ids: &[String]) -> Vec<String> {
@@ -1694,6 +1877,7 @@ mod tests {
             highlights: Vec::new(),
             post: None,
             resource: None,
+            ad: None,
         }
     }
 
@@ -1865,6 +2049,7 @@ mod tests {
             highlights: vec!["用户命中".to_string()],
             post: None,
             resource: None,
+            ad: None,
         };
         let topic = pb::SearchResult {
             id: "topic:跑步".to_string(),
@@ -1879,6 +2064,7 @@ mod tests {
             highlights: vec!["话题命中".to_string()],
             post: None,
             resource: None,
+            ad: None,
         };
 
         let reconciled = reconcile_pending_results(
@@ -2188,6 +2374,29 @@ mod tests {
         assert_eq!(
             page.items[0].domain,
             Some(pb::GrowthDomain::Learning as i32)
+        );
+    }
+
+    #[tokio::test]
+    async fn contextual_search_does_not_recall_unscoped_resources() {
+        let search_source = Arc::new(RecordingSearchSource::default());
+        let resource_source = RecordingResourceSource::default();
+        let resource_requests = resource_source.requests.clone();
+        let mut service = service(search_source).await;
+        service.resource_client = Some(resource_client(resource_source).await);
+
+        let mut search_request = request("课程资源");
+        search_request.route_id = Some("route-1".to_string());
+        search_request.action_node_id = Some("action-1".to_string());
+        search_request.scene_equipment = Some("瑜伽垫".to_string());
+        service
+            .search(search_request)
+            .await
+            .expect("contextual search succeeds");
+
+        assert!(
+            resource_requests.lock().await.is_empty(),
+            "route-node searches must not mix in unscoped catalog resources"
         );
     }
 

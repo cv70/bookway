@@ -100,27 +100,41 @@ impl ContentDao for PostgresContentDao {
         request_fingerprint: String,
     ) -> Result<pb::Content, DaoError> {
         let mut tx = self.pool.begin().await.map_err(DaoError::Database)?;
-        if let Some(key) = idempotency_key.as_deref()
-            && let Some((resource_id, fingerprint)) = sqlx::query_as::<_, (String, String)>(
+        if let Some(key) = idempotency_key.as_deref() {
+            // A first request has no idempotency row to lock. Serialize by the
+            // full logical key before observing or inserting it, otherwise
+            // concurrent retries can both attempt the unique-key insert.
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2 || chr(31) || $3, 0))",
+            )
+            .bind(&content.author_id)
+            .bind("create")
+            .bind(key)
+            .execute(&mut *tx)
+            .await
+            .map_err(DaoError::Database)?;
+            if let Some((resource_id, fingerprint)) = sqlx::query_as::<_, (String, String)>(
                 "SELECT resource_id, request_hash FROM content_idempotency_keys WHERE user_id = $1 AND idempotency_key = $2 AND operation = 'create' FOR UPDATE",
             )
             .bind(&content.author_id)
             .bind(key)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(DaoError::Database)?
-        {
-            if fingerprint != request_fingerprint {
-                return Err(DaoError::IdempotencyConflict(key.to_string()));
+            .map_err(DaoError::Database)? {
+                if fingerprint != request_fingerprint {
+                    return Err(DaoError::IdempotencyConflict(key.to_string()));
+                }
+                let payload = sqlx::query_scalar::<_, serde_json::Value>(
+                    "SELECT payload FROM content_items WHERE id = $1 AND deleted_at IS NULL",
+                )
+                .bind(resource_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(DaoError::Database)?;
+                let existing = serde_json::from_value(payload).map_err(DaoError::Serialization)?;
+                tx.commit().await.map_err(DaoError::Database)?;
+                return Ok(existing);
             }
-            let payload = sqlx::query_scalar::<_, serde_json::Value>(
-                "SELECT payload FROM content_items WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(resource_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(DaoError::Database)?;
-            return serde_json::from_value(payload).map_err(DaoError::Serialization);
         }
         let post = content.post.as_ref().ok_or_else(|| {
             DaoError::InvalidContent("content is missing its post summary".to_string())

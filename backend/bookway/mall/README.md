@@ -4,11 +4,12 @@
 does not own stock reservations or order/payment state.
 
 It also owns contextual `NodeOffer` records that attach an active SKU to a
-public route action node. On every write and customer-facing read it directly
-revalidates the node through BBS Link; the route must remain public, the node
-must exist, and the offer creator must own that route. Each offer retains
-creator attribution and a bounded commission rate, but never copies content or
-a user's private action state.
+public route action node and one declared `scene_equipment`. On every write and
+customer-facing read it directly revalidates the route, node and equipment
+through BBS Link; public offer reads require an equipment context and never
+return offers from another equipment context on the same node. Each offer
+retains creator attribution and a bounded commission rate, but never copies
+content or a user's private action state.
 
 The service-token-protected gRPC control plane creates products as drafts and
 updates product fields, SKU price/attributes/saleability and lifecycle status.

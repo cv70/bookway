@@ -58,6 +58,16 @@ impl SearchSource for OpenSearchSource {
         if let Some(domain) = query.domain {
             filters.push(serde_json::json!({ "term": { "domain": domain_name(domain) } }));
         }
+        if let Some(ids) = query.ids.as_deref() {
+            let ids = ids
+                .split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>();
+            if !ids.is_empty() {
+                filters.push(serde_json::json!({ "terms": { "id.keyword": ids } }));
+            }
+        }
         let mut body = serde_json::json!({
             "size": query.limit.unwrap_or(100).clamp(1, 100),
             "track_total_hits": true,

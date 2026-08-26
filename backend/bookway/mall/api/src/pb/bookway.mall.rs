@@ -219,6 +219,10 @@ pub struct NodeOfferQueryRequest {
     pub action_node_id: ::prost::alloc::string::String,
     #[prost(uint32, optional, tag = "3")]
     pub limit: ::core::option::Option<u32>,
+    /// A node can declare several equipment contexts. Public offer reads must
+    /// select one declared context rather than returning a cross-context catalog.
+    #[prost(string, tag = "4")]
+    pub scene_equipment: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

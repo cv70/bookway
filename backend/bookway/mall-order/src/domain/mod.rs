@@ -189,6 +189,37 @@ impl Domain {
             self.record_contextual_purchase(&order).await;
             return Ok(order);
         }
+        if order.status == pb::MallOrderStatus::PaymentProcessing as i32 {
+            if order.payment_reference.as_deref() != Some(&request.payment_reference) {
+                return Err(OrderError::Conflict(
+                    "order is already processing a different payment".to_string(),
+                ));
+            }
+            // The payment-processing state is durable across a process crash.
+            // Once inventory has committed, that fact wins over the order TTL:
+            // expiry reconciliation deliberately leaves this state intact so a
+            // retry can finish the payment transition. A still-reserved
+            // reservation is subject to the normal expiry race and will either
+            // commit here or be released by the inventory service.
+            let reservation = self.confirm_reservation(&request.order_id).await?;
+            if reservation.status != "committed" {
+                return Err(OrderError::State(format!(
+                    "reservation {} did not commit during payment retry",
+                    request.order_id
+                )));
+            }
+            let paid = self
+                .dao
+                .transition(&request.order_id, pb::MallOrderStatus::Paid as i32, None)
+                .await
+                .map_err(repo_error)?;
+            self.dao
+                .ensure_settlement(&paid)
+                .await
+                .map_err(repo_error)?;
+            self.record_contextual_purchase(&paid).await;
+            return Ok(paid);
+        }
         if order.status != pb::MallOrderStatus::PendingPayment as i32 {
             return Err(OrderError::State(format!(
                 "order {} cannot be paid from its current state",
@@ -196,10 +227,16 @@ impl Domain {
             )));
         }
         self.dao
-            .claim_payment_reference(&request.order_id, &request.payment_reference)
+            .begin_payment(&request.order_id, &request.payment_reference)
             .await
             .map_err(repo_error)?;
-        self.confirm_reservation(&request.order_id).await?;
+        let reservation = self.confirm_reservation(&request.order_id).await?;
+        if reservation.status != "committed" {
+            return Err(OrderError::State(format!(
+                "reservation {} did not commit during payment",
+                request.order_id
+            )));
+        }
         let paid = self
             .dao
             .transition(&request.order_id, pb::MallOrderStatus::Paid as i32, None)
@@ -311,15 +348,48 @@ impl Domain {
                 "a paid order cannot be cancelled here".to_string(),
             ));
         }
-        self.release_reservation(&request.order_id).await?;
-        self.dao
+        if order.status == pb::MallOrderStatus::PaymentProcessing as i32 {
+            return Err(OrderError::State(
+                "payment confirmation is in progress".to_string(),
+            ));
+        }
+        // Claim cancellation while the order is still pending. A payment
+        // confirmation can only start from that same state, so whichever
+        // transition wins owns the reservation lifecycle and the losing
+        // operation must observe the durable state instead of compensating it.
+        let cancelled = match self
+            .dao
             .transition(
                 &request.order_id,
                 pb::MallOrderStatus::Cancelled as i32,
                 None,
             )
             .await
-            .map_err(repo_error)
+        {
+            Ok(cancelled) => cancelled,
+            Err(error) => {
+                let current = self.get_by_id(&request.user_id, &request.order_id).await?;
+                if matches!(
+                    current.status,
+                    value if value == pb::MallOrderStatus::PaymentProcessing as i32
+                        || value == pb::MallOrderStatus::Paid as i32
+                        || value == pb::MallOrderStatus::Cancelled as i32
+                        || value == pb::MallOrderStatus::Expired as i32
+                ) {
+                    return Ok(current);
+                }
+                return Err(repo_error(error));
+            }
+        };
+        // Release after the state claim. If the inventory call is retried, the
+        // order is already durably cancelled and payment can never commit it.
+        let reservation = self.release_reservation(&request.order_id).await?;
+        if reservation.status == "committed" {
+            // Defensive reconciliation for an inventory implementation that
+            // reports a late commit; never manufacture a cancelled response.
+            return self.get_by_id(&request.user_id, &request.order_id).await;
+        }
+        Ok(cancelled)
     }
 
     pub(crate) async fn expire_pending(
@@ -384,15 +454,47 @@ impl Domain {
     }
 
     async fn expire_if_needed(&self, order: pb::Order) -> Result<pb::Order, OrderError> {
-        if order.status != pb::MallOrderStatus::PendingPayment as i32 || !expired(&order.expires_at)
+        if !matches!(
+            order.status,
+            value if value == pb::MallOrderStatus::PendingPayment as i32
+                || value == pb::MallOrderStatus::PaymentProcessing as i32
+        ) || !expired(&order.expires_at)
         {
             return Ok(order);
         }
-        self.release_reservation(&order.id).await?;
-        self.dao
+        let reservation = self.release_reservation(&order.id).await?;
+        if reservation.status == "committed" {
+            // Payment won the inventory race. Leave the order in processing so
+            // its final payment transition can complete without being
+            // overwritten by expiry.
+            return self
+                .dao
+                .get(&order.user_id, &order.id)
+                .await
+                .map_err(repo_error);
+        }
+        match self
+            .dao
             .transition(&order.id, pb::MallOrderStatus::Expired as i32, None)
             .await
-            .map_err(repo_error)
+        {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let current = self
+                    .dao
+                    .get(&order.user_id, &order.id)
+                    .await
+                    .map_err(repo_error)?;
+                if !matches!(
+                    current.status,
+                    value if value == pb::MallOrderStatus::PendingPayment as i32
+                        || value == pb::MallOrderStatus::PaymentProcessing as i32
+                ) {
+                    return Ok(current);
+                }
+                Err(repo_error(error))
+            }
+        }
     }
 
     async fn catalog_skus(&self, ids: Vec<String>) -> Result<Vec<mall_pb::MallSku>, OrderError> {
@@ -482,7 +584,10 @@ impl Domain {
         Ok(())
     }
 
-    async fn confirm_reservation(&self, reservation_id: &str) -> Result<(), OrderError> {
+    async fn confirm_reservation(
+        &self,
+        reservation_id: &str,
+    ) -> Result<inventory_pb::Reservation, OrderError> {
         let mut client = self.inventory.clone();
         client
             .confirm(service_request(
@@ -492,13 +597,16 @@ impl Domain {
                 },
             )?)
             .await
-            .map_err(|error| upstream_status("mall-inventory", error))?;
-        Ok(())
+            .map_err(|error| upstream_status("mall-inventory", error))
+            .map(|response| response.into_inner())
     }
 
-    async fn release_reservation(&self, reservation_id: &str) -> Result<(), OrderError> {
+    async fn release_reservation(
+        &self,
+        reservation_id: &str,
+    ) -> Result<inventory_pb::Reservation, OrderError> {
         let mut client = self.inventory.clone();
-        client
+        let reservation = client
             .release(service_request(
                 "mall-inventory",
                 inventory_pb::IdRequest {
@@ -506,8 +614,9 @@ impl Domain {
                 },
             )?)
             .await
-            .map_err(|error| upstream_status("mall-inventory", error))?;
-        Ok(())
+            .map_err(|error| upstream_status("mall-inventory", error))?
+            .into_inner();
+        Ok(reservation)
     }
 }
 

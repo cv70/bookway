@@ -248,6 +248,13 @@ mod tests {
         let stock = dao.stock("sku-1").await.expect("stock exists");
         assert_eq!(stock.available, 0);
         assert_eq!(stock.reserved, 0);
+        assert_eq!(
+            dao.release("order-1")
+                .await
+                .expect("releasing a committed reservation is idempotent")
+                .status,
+            "committed"
+        );
 
         let released = dao
             .release("order-without-reservation")
