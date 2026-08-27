@@ -15,6 +15,9 @@ message AdCampaign {
   double predicted_ctr = 22; double predicted_cvr = 23; uint32 global_frequency_cap = 24;
   string route_id = 25; string action_node_id = 26;
   string scene_equipment = 27;
+  // Empty arrays mean unrestricted; a delivery request with an unknown
+  // region/os only matches campaigns that declare no restriction.
+  repeated string geo_regions = 28; repeated string device_os = 29;
 }
 message CreateCampaignRequest {
   string advertiser_id = 1; string name = 2; string placement = 3; string title = 4;
@@ -24,6 +27,7 @@ message CreateCampaignRequest {
   double predicted_ctr = 15; double predicted_cvr = 16; uint32 global_frequency_cap = 17;
   string route_id = 18; string action_node_id = 19;
   string scene_equipment = 20;
+  repeated string geo_regions = 21; repeated string device_os = 22;
 }
 message UpdateCampaignRequest {
   string campaign_id = 1; optional CampaignStatus status = 2; optional string name = 3;
@@ -34,15 +38,23 @@ message UpdateCampaignRequest {
   optional double predicted_ctr = 14; optional double predicted_cvr = 15; optional uint32 global_frequency_cap = 16;
   string advertiser_id = 17;
   optional string scene_equipment = 18;
+  optional StringList geo_regions = 19; optional StringList device_os = 20;
 }
 message CampaignIdRequest { string campaign_id = 1; string advertiser_id = 2; }
 message AdvertiserCampaignQuery { string advertiser_id = 1; optional uint32 limit = 2; }
-message EligibleRequest { string user_id = 1; string placement = 2; string domain = 3; uint32 limit = 4; string route_id = 5; string action_node_id = 6; string scene_equipment = 7; }
+message EligibleRequest { string user_id = 1; string placement = 2; string domain = 3; uint32 limit = 4; string route_id = 5; string action_node_id = 6; string scene_equipment = 7; string geo_region = 8; string device_os = 9; }
 message CampaignList { repeated AdCampaign items = 1; }
 message RecordEventRequest { string user_id = 1; string event_id = 2; string request_id = 3; string campaign_id = 4; EventType event_type = 5; }
 message RegisterDecisionRequest { string user_id = 1; string request_id = 2; string placement = 3; repeated string campaign_ids = 4; string route_id = 5; string action_node_id = 6; string scene_equipment = 7; }
 message EventReceipt { string event_id = 1; bool accepted = 2; bool duplicate = 3; }
 message EmptyResponse {}
+message GetDeliveryGuardrailsRequest {}
+// Only scopes whose enforcement exists server-side belong here; knobs without
+// a serving-side effect stay out of the contract instead of pretending.
+message DeliveryGuardrails { uint32 user_daily_total_cap = 1; }
+message AdDeliveryReportRequest { string advertiser_id = 1; string from_date = 2; string to_date = 3; }
+message AdDeliveryReportRow { string campaign_id = 1; string stat_date = 2; int64 impressions = 3; int64 clicks = 4; int64 spent_micros = 5; }
+message AdDeliveryReport { repeated AdDeliveryReportRow rows = 1; }
 
 service AdCenter {
   rpc CreateCampaign(CreateCampaignRequest) returns (AdCampaign);
@@ -52,4 +64,7 @@ service AdCenter {
   rpc Eligible(EligibleRequest) returns (CampaignList);
   rpc RegisterDecisions(RegisterDecisionRequest) returns (EmptyResponse);
   rpc RecordEvent(RecordEventRequest) returns (EventReceipt);
+  rpc GetDeliveryGuardrails(GetDeliveryGuardrailsRequest) returns (DeliveryGuardrails);
+  rpc SetUserDailyTotalCap(DeliveryGuardrails) returns (DeliveryGuardrails);
+  rpc DeliveryReport(AdDeliveryReportRequest) returns (AdDeliveryReport);
 }

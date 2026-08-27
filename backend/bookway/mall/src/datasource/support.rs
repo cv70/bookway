@@ -27,6 +27,12 @@ pub(crate) trait CatalogDao: Send + Sync {
         request: pb::NodeOfferQueryRequest,
     ) -> Result<Vec<pb::NodeOffer>, DaoError>;
     async fn node_offer(&self, id: &str) -> Result<pb::NodeOffer, DaoError>;
+    /// Whether the merchant owns the product carrying this SKU. Ownership is
+    /// judged live (no cache indirection) because it authorizes a mutation.
+    async fn verify_merchant_sku(
+        &self,
+        request: pb::MerchantSkuRequest,
+    ) -> Result<pb::MerchantSkuDecision, DaoError>;
 }
 
 fn new_product(request: pb::CreateProductRequest) -> pb::MallProduct {
@@ -52,6 +58,8 @@ fn new_product(request: pb::CreateProductRequest) -> pb::MallProduct {
         image_url: request.image_url,
         status: request.status,
         skus,
+        product_kind: request.product_kind,
+        course_resource_id: request.course_resource_id,
         created_at: now.clone(),
         updated_at: now,
     }
@@ -71,6 +79,14 @@ fn apply_update(
     }
     if let Some(value) = request.status {
         product.status = value;
+    }
+    // The domain layer only forwards a complete (kind, resource id) pair, so
+    // an accepted update never desynchronises the catalogue binding halves.
+    if let Some(kind) = request.product_kind {
+        product.product_kind = kind;
+    }
+    if let Some(resource_id) = request.course_resource_id {
+        product.course_resource_id = resource_id;
     }
     for update in request.sku_updates {
         let sku = product
@@ -116,6 +132,24 @@ fn parse_status(value: &str) -> Result<i32, DaoError> {
         _ => Err(DaoError::Failed(format!("unknown product status {value}"))),
     }
 }
+/// Catalogue kinds persist as their lowercase proto value names, matching the
+/// CHECK constraint installed by migration 0076.
+fn kind_name(value: i32) -> Result<&'static str, DaoError> {
+    match pb::MallProductKind::try_from(value).ok() {
+        Some(pb::MallProductKind::Physical) => Ok("physical"),
+        Some(pb::MallProductKind::Course) => Ok("course"),
+        Some(pb::MallProductKind::ResourcePack) => Ok("resource_pack"),
+        None => Err(DaoError::Failed("invalid product kind".to_string())),
+    }
+}
+fn parse_kind(value: &str) -> Result<i32, DaoError> {
+    match value {
+        "physical" => Ok(pb::MallProductKind::Physical as i32),
+        "course" => Ok(pb::MallProductKind::Course as i32),
+        "resource_pack" => Ok(pb::MallProductKind::ResourcePack as i32),
+        _ => Err(DaoError::Failed(format!("unknown product kind {value}"))),
+    }
+}
 fn database(error: sqlx::Error) -> DaoError {
     DaoError::Failed(error.to_string())
 }
@@ -146,6 +180,8 @@ mod tests {
                 description: String::new(),
                 image_url: String::new(),
                 status: pb::MallProductStatus::Draft as i32,
+                product_kind: pb::MallProductKind::Physical as i32,
+                course_resource_id: String::new(),
                 skus: vec![pb::CreateSkuRequest {
                     title: "Paper".to_string(),
                     price_cents: 100,
@@ -192,6 +228,8 @@ mod tests {
                 description: String::new(),
                 image_url: String::new(),
                 status: pb::MallProductStatus::Draft as i32,
+                product_kind: pb::MallProductKind::Physical as i32,
+                course_resource_id: String::new(),
                 skus: vec![pb::CreateSkuRequest {
                     title: "Default".to_string(),
                     price_cents: 100,
@@ -232,6 +270,8 @@ mod tests {
                 description: String::new(),
                 image_url: String::new(),
                 status: pb::MallProductStatus::Active as i32,
+                product_kind: pb::MallProductKind::Physical as i32,
+                course_resource_id: String::new(),
                 skus: vec![
                     pb::CreateSkuRequest {
                         title: "Standard".to_string(),
@@ -313,6 +353,58 @@ mod tests {
             offers[0].product.as_ref().map(|product| product.skus.len()),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn merchant_sku_ownership_only_matches_the_owning_merchant() {
+        let dao = MemoryCatalogDao::default();
+        let product = dao
+            .create(pb::CreateProductRequest {
+                merchant_id: "merchant-a".to_string(),
+                title: "Owned SKU".to_string(),
+                description: String::new(),
+                image_url: String::new(),
+                status: pb::MallProductStatus::Active as i32,
+                product_kind: pb::MallProductKind::Physical as i32,
+                course_resource_id: String::new(),
+                skus: vec![pb::CreateSkuRequest {
+                    title: "Standard".to_string(),
+                    price_cents: 1_000,
+                    currency: "CNY".to_string(),
+                    attributes: Default::default(),
+                    saleable: true,
+                }],
+            })
+            .await
+            .expect("product should be created");
+        let sku_id = product.skus[0].id.clone();
+
+        let owned = dao
+            .verify_merchant_sku(pb::MerchantSkuRequest {
+                merchant_id: "merchant-a".to_string(),
+                sku_id: sku_id.clone(),
+            })
+            .await
+            .expect("ownership check should succeed");
+        assert!(owned.owned);
+
+        let foreign = dao
+            .verify_merchant_sku(pb::MerchantSkuRequest {
+                merchant_id: "merchant-b".to_string(),
+                sku_id,
+            })
+            .await
+            .expect("ownership check should succeed");
+        assert!(!foreign.owned);
+
+        let unknown = dao
+            .verify_merchant_sku(pb::MerchantSkuRequest {
+                merchant_id: "merchant-a".to_string(),
+                sku_id: "sku-missing".to_string(),
+            })
+            .await
+            .expect("ownership check should succeed");
+        assert!(!unknown.owned);
     }
 }
 

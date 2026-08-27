@@ -33,7 +33,9 @@ impl Domain {
             )),
         };
         let content_audit = match config.content_audit_grpc_url.clone() {
-            Some(url) => Some(ContentAuditClient::connect(url).await?),
+            Some(url) => Some(ContentAuditClient::new(
+                bookway_runtime::grpc_channel(&url).await?,
+            )),
             None => None,
         };
         Ok(Self {

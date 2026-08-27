@@ -15,6 +15,8 @@ struct CampaignRow {
     image_url: String,
     landing_url: String,
     target_domains: serde_json::Value,
+    geo_regions: Vec<String>,
+    device_os: Vec<String>,
     status: String,
     pricing_model: String,
     bid_micros: i64,
@@ -48,6 +50,8 @@ impl CampaignRow {
             landing_url: self.landing_url,
             target_domains: serde_json::from_value(self.target_domains)
                 .map_err(|error| DaoError::Failed(error.to_string()))?,
+            geo_regions: self.geo_regions,
+            device_os: self.device_os,
             status: parse_status(&self.status)? as i32,
             pricing_model: parse_pricing(&self.pricing_model)? as i32,
             bid_micros: self.bid_micros,
@@ -73,6 +77,22 @@ pub(crate) struct PostgresCampaignDao {
 }
 
 impl PostgresCampaignDao {
+    /// Auction input filters. `true` adds both per-campaign impression-cap
+    /// subqueries (`$8` is the user); `false` keeps targeting/schedule/budget
+    /// only, for callers whose frequency adjudication happens elsewhere.
+    fn eligible_query(include_frequency_caps: bool) -> String {
+        let mut clause = "c.status = 'active' AND c.placement = $1 AND c.route_id = $2 AND c.action_node_id = $3 AND c.scene_equipment = $4 AND (c.starts_at IS NULL OR c.starts_at <= now()) AND (c.ends_at IS NULL OR c.ends_at > now()) AND (c.daily_budget_micros = 0 OR COALESCE(stats.spent_micros, 0) < c.daily_budget_micros) AND ($5 = '' OR c.target_domains = '[]'::jsonb OR c.target_domains @> jsonb_build_array($5::text)) AND (cardinality(c.geo_regions) = 0 OR $6 = ANY(c.geo_regions)) AND (cardinality(c.device_os) = 0 OR $7 = ANY(c.device_os))"
+            .to_string();
+        if include_frequency_caps {
+            // Keeps campaigns already capped today from consuming recall/rank
+            // capacity; RecordEvent remains the authoritative adjudication.
+            clause.push_str(" AND (c.frequency_cap = 0 OR (SELECT count(*) FROM ad_delivery_events e WHERE e.campaign_id = c.id AND e.user_id = $8 AND e.event_type = 'impression' AND e.occurred_at >= date_trunc('day', now())) < c.frequency_cap) AND (c.global_frequency_cap = 0 OR (SELECT count(*) FROM ad_delivery_events e WHERE e.campaign_id = c.id AND e.event_type = 'impression' AND e.occurred_at >= date_trunc('day', now())) < c.global_frequency_cap)");
+        }
+        // Unrestricted rows (empty arrays) pass unconditionally, so an absent
+        // context value can only serve campaigns that declared no restriction.
+        let limit = if include_frequency_caps { "$9" } else { "$8" };
+        campaign_select(&format!("WHERE {clause} ORDER BY c.bid_micros DESC, c.id LIMIT {limit}"))
+    }
     pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -101,7 +121,7 @@ impl CampaignDao for PostgresCampaignDao {
     async fn create(&self, request: pb::CreateCampaignRequest) -> Result<pb::AdCampaign, DaoError> {
         let campaign = new_campaign(request);
         sqlx::query(
-            "INSERT INTO ad_campaigns (id, advertiser_id, name, placement, route_id, action_node_id, scene_equipment, title, body, image_url, landing_url, target_domains, status, pricing_model, bid_micros, daily_budget_micros, frequency_cap, predicted_ctr, predicted_cvr, global_frequency_cap, starts_at, ends_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+            "INSERT INTO ad_campaigns (id, advertiser_id, name, placement, route_id, action_node_id, scene_equipment, title, body, image_url, landing_url, target_domains, geo_regions, device_os, status, pricing_model, bid_micros, daily_budget_micros, frequency_cap, predicted_ctr, predicted_cvr, global_frequency_cap, starts_at, ends_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
         )
         .bind(&campaign.id)
         .bind(&campaign.advertiser_id)
@@ -115,6 +135,8 @@ impl CampaignDao for PostgresCampaignDao {
         .bind(&campaign.image_url)
         .bind(&campaign.landing_url)
         .bind(serde_json::to_value(&campaign.target_domains).map_err(|error| DaoError::Failed(error.to_string()))?)
+        .bind(&campaign.geo_regions)
+        .bind(&campaign.device_os)
         .bind(status_name(campaign.status))
         .bind(pricing_name(campaign.pricing_model))
         .bind(campaign.bid_micros)
@@ -146,7 +168,7 @@ impl CampaignDao for PostgresCampaignDao {
             })
             .transpose()?;
         let updated = sqlx::query(
-            "UPDATE ad_campaigns SET status=COALESCE($3,status), name=COALESCE($4,name), title=COALESCE($5,title), body=COALESCE($6,body), image_url=COALESCE($7,image_url), landing_url=COALESCE($8,landing_url), target_domains=COALESCE($9,target_domains), bid_micros=COALESCE($10,bid_micros), daily_budget_micros=COALESCE($11,daily_budget_micros), frequency_cap=COALESCE($12,frequency_cap), starts_at=COALESCE($13,starts_at), ends_at=COALESCE($14,ends_at), predicted_ctr=COALESCE($15,predicted_ctr), predicted_cvr=COALESCE($16,predicted_cvr), global_frequency_cap=COALESCE($17,global_frequency_cap), scene_equipment=COALESCE($18,scene_equipment), updated_at=now() WHERE id=$1 AND advertiser_id=$2",
+            "UPDATE ad_campaigns SET status=COALESCE($3,status), name=COALESCE($4,name), title=COALESCE($5,title), body=COALESCE($6,body), image_url=COALESCE($7,image_url), landing_url=COALESCE($8,landing_url), target_domains=COALESCE($9,target_domains), bid_micros=COALESCE($10,bid_micros), daily_budget_micros=COALESCE($11,daily_budget_micros), frequency_cap=COALESCE($12,frequency_cap), starts_at=COALESCE($13,starts_at), ends_at=COALESCE($14,ends_at), predicted_ctr=COALESCE($15,predicted_ctr), predicted_cvr=COALESCE($16,predicted_cvr), global_frequency_cap=COALESCE($17,global_frequency_cap), scene_equipment=COALESCE($18,scene_equipment), geo_regions=COALESCE($19,geo_regions), device_os=COALESCE($20,device_os), updated_at=now() WHERE id=$1 AND advertiser_id=$2",
         )
         .bind(campaign_id)
         .bind(&request.advertiser_id)
@@ -166,6 +188,8 @@ impl CampaignDao for PostgresCampaignDao {
         .bind(request.predicted_cvr)
         .bind(request.global_frequency_cap.map(|value| i32::try_from(value).unwrap_or(i32::MAX)))
         .bind(request.scene_equipment)
+        .bind(request.geo_regions.map(|values| values.values))
+        .bind(request.device_os.map(|values| values.values))
         .execute(&self.pool)
         .await
         .map_err(database)?
@@ -201,22 +225,96 @@ impl CampaignDao for PostgresCampaignDao {
         campaigns.into_iter().map(CampaignRow::into_proto).collect()
     }
 
+    /// Auction input filters. `true` adds both per-campaign impression-cap
+    /// subqueries (`$6` is the user); `false` keeps targeting/schedule/budget
+    /// only, for callers whose frequency adjudication happens elsewhere.
     async fn eligible(&self, query: EligibleQuery<'_>) -> Result<Vec<pb::AdCampaign>, DaoError> {
-        // Apply targeting and both frequency caps in the candidate query. This
-        // keeps the auction input bounded under load and prevents campaigns
-        // that are already capped from consuming recall/rank capacity.
-        let values = sqlx::query_as::<_, CampaignRow>(&campaign_select("WHERE c.status = 'active' AND c.placement = $1 AND c.route_id = $2 AND c.action_node_id = $3 AND c.scene_equipment = $4 AND (c.starts_at IS NULL OR c.starts_at <= now()) AND (c.ends_at IS NULL OR c.ends_at > now()) AND (c.daily_budget_micros = 0 OR COALESCE(stats.spent_micros, 0) < c.daily_budget_micros) AND ($5 = '' OR c.target_domains = '[]'::jsonb OR c.target_domains @> jsonb_build_array($5::text)) AND (c.frequency_cap = 0 OR (SELECT count(*) FROM ad_delivery_events e WHERE e.campaign_id = c.id AND e.user_id = $6 AND e.event_type = 'impression' AND e.occurred_at >= date_trunc('day', now())) < c.frequency_cap) AND (c.global_frequency_cap = 0 OR (SELECT count(*) FROM ad_delivery_events e WHERE e.campaign_id = c.id AND e.event_type = 'impression' AND e.occurred_at >= date_trunc('day', now())) < c.global_frequency_cap) ORDER BY c.bid_micros DESC, c.id LIMIT $7"))
+        // Full SQL adjudication including both per-campaign impression caps;
+        // this is the fail-open path when the Redis pre-filter is unavailable,
+        // and the sole input source whenever there is no gate configured.
+        let values = sqlx::query_as::<_, CampaignRow>(&PostgresCampaignDao::eligible_query(true))
             .bind(query.placement)
             .bind(query.route_id)
             .bind(query.action_node_id)
             .bind(query.scene_equipment)
             .bind(query.domain)
+            .bind(query.geo_region)
+            .bind(query.device_os)
             .bind(query.user_id)
             .bind(i64::try_from(query.limit).unwrap_or(i64::MAX))
             .fetch_all(&self.pool)
             .await
             .map_err(database)?;
         values.into_iter().map(CampaignRow::into_proto).collect()
+    }
+
+    async fn eligible_candidates(
+        &self,
+        query: EligibleQuery<'_>,
+    ) -> Result<Vec<pb::AdCampaign>, DaoError> {
+        // Same targeting/schedule/budget filters as `eligible` minus the two
+        // impression-cap subqueries: the Redis gate owns per-campaign counts
+        // on this path and RecordEvent re-adjudicates before anything serves.
+        let values = sqlx::query_as::<_, CampaignRow>(&PostgresCampaignDao::eligible_query(false))
+            .bind(query.placement)
+            .bind(query.route_id)
+            .bind(query.action_node_id)
+            .bind(query.scene_equipment)
+            .bind(query.domain)
+            .bind(query.geo_region)
+            .bind(query.device_os)
+            .bind(i64::try_from(query.limit).unwrap_or(i64::MAX))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(database)?;
+        values.into_iter().map(CampaignRow::into_proto).collect()
+    }
+
+    async fn user_daily_total_cap(&self) -> Result<u32, DaoError> {
+        let value: Option<i32> =
+            sqlx::query_scalar("SELECT value FROM ad_delivery_guardrails WHERE scope = 'user_daily_total'")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(database)?;
+        Ok(value.and_then(|value| u32::try_from(value).ok()).unwrap_or(DEFAULT_USER_DAILY_TOTAL_CAP))
+    }
+
+    async fn set_user_daily_total_cap(&self, cap: u32) -> Result<u32, DaoError> {
+        let value: i32 = sqlx::query_scalar(
+            "INSERT INTO ad_delivery_guardrails (scope, value) VALUES ('user_daily_total', $1) ON CONFLICT (scope) DO UPDATE SET value = EXCLUDED.value, updated_at = now() RETURNING value",
+        )
+        .bind(i32::try_from(cap).map_err(|error| DaoError::Failed(error.to_string()))?)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(database)?;
+        u32::try_from(value).map_err(|error| DaoError::Failed(error.to_string()))
+    }
+
+    async fn delivery_report(
+        &self,
+        query: DeliveryReportQuery<'_>,
+    ) -> Result<Vec<DeliveryReportRow>, DaoError> {
+        let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
+            "SELECT s.campaign_id, to_char(s.stat_date, 'YYYY-MM-DD'), s.impressions, s.clicks, s.spent_micros FROM ad_campaign_daily_stats s JOIN ad_campaigns c ON c.id = s.campaign_id WHERE c.advertiser_id = $1 AND s.stat_date BETWEEN $2 AND $3 ORDER BY s.stat_date DESC, s.campaign_id ASC",
+        )
+        .bind(query.advertiser_id)
+        .bind(query.from_date)
+        .bind(query.to_date)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(campaign_id, stat_date, impressions, clicks, spent_micros)| DeliveryReportRow {
+                    campaign_id,
+                    stat_date,
+                    impressions,
+                    clicks,
+                    spent_micros,
+                },
+            )
+            .collect())
     }
 
     async fn register_decisions(
@@ -508,13 +606,13 @@ impl CampaignDao for PostgresCampaignDao {
             .execute(&mut *tx)
             .await
             .map_err(database)?;
-        let (spent,): (i64,) = sqlx::query_as("SELECT spent_micros FROM ad_campaign_daily_stats WHERE campaign_id=$1 AND stat_date=$2 FOR UPDATE")
+        let (spent, daily_impressions): (i64, i64) = sqlx::query_as("SELECT spent_micros,impressions FROM ad_campaign_daily_stats WHERE campaign_id=$1 AND stat_date=$2 FOR UPDATE")
             .bind(&campaign.id)
             .bind(day)
             .fetch_one(&mut *tx)
             .await
             .map_err(database)?;
-        let cost = event_cost(&campaign, request.event_type);
+        let cost = event_cost(&campaign, request.event_type, daily_impressions);
         let impressions: i64 = if request.event_type == pb::EventType::Impression as i32 {
             sqlx::query_scalar("SELECT count(*) FROM ad_delivery_events WHERE campaign_id=$1 AND user_id=$2 AND event_type='impression' AND occurred_at >= date_trunc('day', now())")
                 .bind(&campaign.id)
@@ -555,6 +653,36 @@ impl CampaignDao for PostgresCampaignDao {
                     accepted: false,
                     duplicate: false,
                 });
+            }
+        }
+        // Cross-campaign guardrail: even when individual campaigns still have
+        // per-campaign headroom, one user's impressions for today may not pass
+        // the platform-wide daily total.
+        if request.event_type == pb::EventType::Impression as i32 {
+            let total_cap = sqlx::query_scalar::<_, i32>(
+                "SELECT value FROM ad_delivery_guardrails WHERE scope = 'user_daily_total'",
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database)?
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(DEFAULT_USER_DAILY_TOTAL_CAP);
+            if total_cap > 0 {
+                let user_total: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM ad_delivery_events WHERE user_id=$1 AND event_type='impression' AND occurred_at >= date_trunc('day', now())",
+                )
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database)?;
+                if user_total >= i64::from(total_cap) {
+                    tx.commit().await.map_err(database)?;
+                    return Ok(pb::EventReceipt {
+                        event_id: request.event_id,
+                        accepted: false,
+                        duplicate: false,
+                    });
+                }
             }
         }
         sqlx::query("INSERT INTO ad_delivery_events (id, request_id, campaign_id, user_id, event_type, cost_micros) VALUES ($1,$2,$3,$4,$5,$6)")

@@ -93,6 +93,39 @@ impl AdCenter for GrpcServer {
             .map_err(ad_error)?;
         Ok(Response::new(pb::EmptyResponse {}))
     }
+
+    async fn get_delivery_guardrails(
+        &self,
+        _request: Request<pb::GetDeliveryGuardrailsRequest>,
+    ) -> Result<Response<pb::DeliveryGuardrails>, Status> {
+        Ok(Response::new(
+            self.domain.delivery_guardrails().await.map_err(ad_error)?,
+        ))
+    }
+
+    async fn set_user_daily_total_cap(
+        &self,
+        request: Request<pb::DeliveryGuardrails>,
+    ) -> Result<Response<pb::DeliveryGuardrails>, Status> {
+        Ok(Response::new(
+            self.domain
+                .set_user_daily_total_cap(request.into_inner())
+                .await
+                .map_err(ad_error)?,
+        ))
+    }
+
+    async fn delivery_report(
+        &self,
+        request: Request<pb::AdDeliveryReportRequest>,
+    ) -> Result<Response<pb::AdDeliveryReport>, Status> {
+        Ok(Response::new(
+            self.domain
+                .advertiser_delivery_report(request.into_inner())
+                .await
+                .map_err(ad_error)?,
+        ))
+    }
 }
 
 pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {

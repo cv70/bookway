@@ -221,6 +221,14 @@ function CampaignDetails({
             <dd>{campaign.creativeName}</dd>
           </div>
           <div>
+            <dt>创意标题</dt>
+            <dd>{campaign.title || campaign.creativeName}</dd>
+          </div>
+          <div>
+            <dt>落地页</dt>
+            <dd>{campaign.landingUrl || "未设置"}</dd>
+          </div>
+          <div>
             <dt>日预算</dt>
             <dd>{campaign.budget}</dd>
           </div>
@@ -235,6 +243,16 @@ function CampaignDetails({
           <div>
             <dt>频控</dt>
             <dd>单用户每日最多 {campaign.frequencyCap} 次</dd>
+          </div>
+          <div>
+            <dt>地域定向</dt>
+            <dd>
+              {campaign.geoRegions.length ? campaign.geoRegions.join("、") : "不限"}
+            </dd>
+          </div>
+          <div>
+            <dt>设备定向</dt>
+            <dd>{campaign.deviceOs.length ? campaign.deviceOs.join("、") : "不限"}</dd>
           </div>
           <div>
             <dt>竞价与预估</dt>
@@ -371,6 +389,46 @@ export function CampaignDialog({
           </select>
         </label>
         <label>
+          创意标题
+          <input
+            name="title"
+            required
+            minLength={4}
+            maxLength={60}
+            defaultValue={campaign?.title || campaign?.creativeName}
+            placeholder="在行动节点展示的主标题（4-60 字）"
+          />
+        </label>
+        <label>
+          创意正文
+          <textarea
+            name="body"
+            maxLength={200}
+            defaultValue={campaign?.body}
+            placeholder="说明该内容如何帮助用户完成当前节点（可选，≤200 字）"
+          />
+        </label>
+        <div className="form-grid">
+          <label>
+            图片 URL（可选）
+            <input
+              name="imageUrl"
+              type="url"
+              defaultValue={campaign?.imageUrl}
+              placeholder="https://…"
+            />
+          </label>
+          <label>
+            落地页链接（可选）
+            <input
+              name="landingUrl"
+              type="url"
+              defaultValue={campaign?.landingUrl}
+              placeholder="https://…"
+            />
+          </label>
+        </div>
+        <label>
           单用户日频控（次）
           <input
             name="frequencyCap"
@@ -381,9 +439,29 @@ export function CampaignDialog({
             defaultValue={campaign?.frequencyCap || 3}
           />
         </label>
+        <div className="form-grid">
+          <label>
+            地域定向（可选）
+            <input
+              name="geoRegions"
+              placeholder="留空不限；多个用逗号分隔，如 cn-bj,cn-sh"
+              defaultValue={campaign?.geoRegions.join(",")}
+            />
+          </label>
+          <label>
+            设备定向（可选）
+            <input
+              name="deviceOs"
+              placeholder="留空不限；如 ios,android"
+              defaultValue={campaign?.deviceOs.join(",")}
+            />
+          </label>
+        </div>
         <div className="frequency">
-          <strong>频控保护</strong>
-          <p>系统将在投放时自动执行活动与用户日频控。</p>
+          <strong>定向说明</strong>
+          <p>
+            只能使用平台观察到的公开投送上下文；观察不到地域或设备时，仅投放未做该维度限定的活动。
+          </p>
         </div>
         <div className="dialog-actions">
           <button type="button" className="button secondary" onClick={close}>

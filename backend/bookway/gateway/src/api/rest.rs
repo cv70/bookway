@@ -816,6 +816,8 @@ pub(crate) enum SearchType {
     Users,
     Topics,
     Resources,
+    Nodes,
+    Equipment,
 }
 
 impl SearchType {
@@ -827,6 +829,8 @@ impl SearchType {
             Self::Users => search_pb::SearchType::Users as i32,
             Self::Topics => search_pb::SearchType::Topics as i32,
             Self::Resources => search_pb::SearchType::Resources as i32,
+            Self::Nodes => search_pb::SearchType::Nodes as i32,
+            Self::Equipment => search_pb::SearchType::Equipment as i32,
         }
     }
 }
@@ -871,6 +875,8 @@ enum SearchResultType {
     Topic,
     Resource,
     Ad,
+    ActionNode,
+    SceneEquipment,
 }
 
 impl SearchResultType {
@@ -882,6 +888,8 @@ impl SearchResultType {
             Some(search_pb::SearchResultType::Topic) => Ok(Self::Topic),
             Some(search_pb::SearchResultType::Resource) => Ok(Self::Resource),
             Some(search_pb::SearchResultType::Ad) => Ok(Self::Ad),
+            Some(search_pb::SearchResultType::ActionNode) => Ok(Self::ActionNode),
+            Some(search_pb::SearchResultType::SceneEquipment) => Ok(Self::SceneEquipment),
             None => Err(format!("bbs-search returned unknown result type {value}")),
         }
     }
@@ -3917,6 +3925,39 @@ pub(crate) struct FollowRequest {
     active: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct FollowerPageQuery {
+    cursor: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct RoutePeersQuery {
+    cursor: Option<String>,
+    limit: Option<u32>,
+}
+
+impl FollowerPageQuery {
+    pub(crate) fn into_pb(self, user_id: String) -> bbs_pb::ListFollowersRequest {
+        bbs_pb::ListFollowersRequest {
+            user_id,
+            cursor: self.cursor.unwrap_or_default(),
+            limit: self.limit.unwrap_or(0),
+        }
+    }
+}
+
+impl RoutePeersQuery {
+    pub(crate) fn into_pb(self, viewer_id: String, route_id: String) -> bbs_pb::ListRoutePeersRequest {
+        bbs_pb::ListRoutePeersRequest {
+            viewer_id,
+            route_id,
+            cursor: self.cursor.unwrap_or_default(),
+            limit: self.limit.unwrap_or(0),
+        }
+    }
+}
+
 impl FollowRequest {
     pub(crate) fn into_pb(self, user_id: String, target_user_id: String) -> bbs_pb::SetEdgeRequest {
         bbs_pb::SetEdgeRequest {
@@ -5848,7 +5889,7 @@ mod tests {
     }
 
     #[test]
-    fn rag_context_request_forces_server_side_lexical_boundary() {
+    fn rag_context_transports_plain_questions_without_client_vectors() {
         let request: RouteNodeRagContextRequest = serde_json::from_value(serde_json::json!({
             "question": "如何开始这一步？",
             "limit": 4,

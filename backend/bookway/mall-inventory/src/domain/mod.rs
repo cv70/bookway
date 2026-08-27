@@ -7,6 +7,7 @@ use crate::{
 };
 use std::sync::Arc;
 use thiserror::Error;
+const MAX_IDENTIFIER_LENGTH: usize = 160;
 #[derive(Debug, Error)]
 pub(crate) enum InventoryError {
     #[error("{0}")]
@@ -48,9 +49,10 @@ impl Domain {
     }
     pub(crate) async fn set_stock(
         &self,
-        request: pb::SetStockRequest,
+        mut request: pb::SetStockRequest,
     ) -> Result<pb::InventoryItem, InventoryError> {
-        if request.sku_id.trim().is_empty() || request.available < 0 {
+        request.sku_id = request.sku_id.trim().to_string();
+        if invalid_identifier(&request.sku_id) || request.available < 0 {
             return Err(InventoryError::Validation(
                 "sku_id and a non-negative available count are required".to_string(),
             ));
@@ -59,9 +61,10 @@ impl Domain {
     }
     pub(crate) async fn stock(
         &self,
-        request: pb::IdRequest,
+        mut request: pb::IdRequest,
     ) -> Result<pb::InventoryItem, InventoryError> {
-        if request.id.trim().is_empty() {
+        request.id = request.id.trim().to_string();
+        if invalid_identifier(&request.id) {
             return Err(InventoryError::Validation("sku id is required".to_string()));
         }
         self.dao.stock(&request.id).await.map_err(repo_error)
@@ -70,13 +73,17 @@ impl Domain {
         &self,
         mut request: pb::ReserveRequest,
     ) -> Result<pb::Reservation, InventoryError> {
-        if request.reservation_id.trim().is_empty()
+        request.reservation_id = request.reservation_id.trim().to_string();
+        for item in &mut request.items {
+            item.sku_id = item.sku_id.trim().to_string();
+        }
+        if invalid_identifier(&request.reservation_id)
             || request.items.is_empty()
             || request.items.len() > 100
             || request
                 .items
                 .iter()
-                .any(|item| item.sku_id.trim().is_empty() || item.quantity == 0)
+                .any(|item| invalid_identifier(&item.sku_id) || item.quantity == 0)
         {
             return Err(InventoryError::Validation(
                 "reservation_id and 1-100 positive SKU quantities are required".to_string(),
@@ -104,14 +111,26 @@ impl Domain {
     }
     pub(crate) async fn confirm(
         &self,
-        request: pb::IdRequest,
+        mut request: pb::IdRequest,
     ) -> Result<pb::Reservation, InventoryError> {
+        request.id = request.id.trim().to_string();
+        if invalid_identifier(&request.id) {
+            return Err(InventoryError::Validation(
+                "reservation id is required".to_string(),
+            ));
+        }
         self.dao.confirm(&request.id).await.map_err(repo_error)
     }
     pub(crate) async fn release(
         &self,
-        request: pb::IdRequest,
+        mut request: pb::IdRequest,
     ) -> Result<pb::Reservation, InventoryError> {
+        request.id = request.id.trim().to_string();
+        if invalid_identifier(&request.id) {
+            return Err(InventoryError::Validation(
+                "reservation id is required".to_string(),
+            ));
+        }
         self.dao.release(&request.id).await.map_err(repo_error)
     }
     pub(crate) async fn expire_reservations(
@@ -126,6 +145,10 @@ impl Domain {
                 .map_err(repo_error)?,
         })
     }
+}
+fn invalid_identifier(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value.chars().count() > MAX_IDENTIFIER_LENGTH
 }
 fn repo_error(error: DaoError) -> InventoryError {
     match error {

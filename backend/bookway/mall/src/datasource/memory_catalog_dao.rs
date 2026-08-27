@@ -205,6 +205,27 @@ impl CatalogDao for MemoryCatalogDao {
             .cloned()
             .ok_or_else(|| DaoError::NotFound(id.to_string()))
     }
+    async fn verify_merchant_sku(
+        &self,
+        request: pb::MerchantSkuRequest,
+    ) -> Result<pb::MerchantSkuDecision, DaoError> {
+        let product_owner = {
+            let products = self.products.read().await;
+            products
+                .values()
+                .find(|product| product.skus.iter().any(|sku| sku.id == request.sku_id))
+                .map(|product| product.id.clone())
+        };
+        let owned = match product_owner {
+            Some(product_id) => {
+                self.product_merchants.read().await.get(&product_id).is_some_and(|owner| {
+                    owner == &request.merchant_id
+                })
+            }
+            None => false,
+        };
+        Ok(pb::MerchantSkuDecision { owned })
+    }
 }
 
 fn customer_product(product: &pb::MallProduct) -> pb::MallProduct {

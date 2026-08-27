@@ -155,19 +155,12 @@ export function StockDialog({
           </select>
         </label>
         <label>
-          调整方向
-          <select name="direction">
-            <option value="in">入库增加</option>
-            <option value="out">出库扣减</option>
-          </select>
-        </label>
-        <label>
-          调整数量
+          目标可售数量
           <input
-            name="quantity"
+            name="target_stock"
             required
             type="number"
-            min="1"
+            min="0"
             defaultValue="10"
           />
         </label>

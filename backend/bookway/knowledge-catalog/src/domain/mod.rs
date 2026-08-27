@@ -6,7 +6,8 @@ use bookway_knowledge_catalog_api::pb;
 use crate::{
     conf::Config,
     datasource::{
-        DaoError, MemoryResourceDao, NewNodeResourceAttachment, PostgresResourceDao, ResourceDao,
+        DaoError, EmbeddingProvider, MemoryResourceDao, NewNodeResourceAttachment,
+        PostgresResourceDao, ResourceDao,
     },
 };
 
@@ -15,6 +16,7 @@ pub(crate) struct Domain {
     config: Config,
     dao: Arc<dyn ResourceDao>,
     bbs_link: Option<BbsLinkClient<tonic::transport::Channel>>,
+    embeddings: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -22,7 +24,7 @@ pub(crate) enum DomainInitError {
     #[error("could not initialize resource storage: {0}")]
     Data(#[from] bookway_data::DataError),
     #[error("could not connect to BBS Link: {0}")]
-    Transport(#[from] tonic::transport::Error),
+    Transport(#[from] bookway_runtime::ConnectFailure),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,11 +45,24 @@ impl Domain {
                 bookway_data::postgres_pool().await?,
             )),
         };
-        let bbs_link = BbsLinkClient::connect(config.bbs_link_url.clone()).await?;
+        let bbs_link =
+            BbsLinkClient::new(bookway_runtime::grpc_channel(&config.bbs_link_url).await?);
+        let embeddings = config
+            .embeddings
+            .as_ref()
+            .map(|embedding_config| {
+                Arc::new(crate::datasource::OpenAiCompatibleEmbeddingProvider::new(
+                    embedding_config.clone(),
+                )) as Arc<dyn EmbeddingProvider>
+            });
+        if embeddings.is_none() {
+            tracing::info!("RAG vector retrieval disabled; questions fall back to lexical retrieval");
+        }
         Ok(Self {
             config,
             dao,
             bbs_link: Some(bbs_link),
+            embeddings,
         })
     }
     pub(crate) fn config(&self) -> &Config {
@@ -57,8 +72,13 @@ impl Domain {
         &self,
         mut request: pb::SearchRequest,
     ) -> Result<pb::SearchResponse, DomainError> {
-        request.query = request.query.trim().chars().take(200).collect();
-        request.topic = request.topic.trim().chars().take(80).collect();
+        request.query = request.query.trim().to_string();
+        request.topic = request.topic.trim().to_string();
+        if request.query.chars().count() > 200 || request.topic.chars().count() > 80 {
+            return Err(DomainError::Validation(
+                "resource search fields exceed their limits".to_string(),
+            ));
+        }
         request.cursor = request.cursor.trim().to_string();
         request.limit = Some(request.limit.unwrap_or(20).clamp(1, 50));
         Ok(self.dao.search(&request).await?)
@@ -123,9 +143,9 @@ impl Domain {
             .ok()
             .filter(|kind| *kind != pb::AttachmentKind::Unspecified)
             .ok_or_else(|| DomainError::Validation("attachment kind is required".to_string()))?;
-        let title_override = bounded_optional(&request.title_override, 200);
-        let note = bounded_optional(&request.note, 1_000);
-        let retrieval_scope = bounded_optional(&request.retrieval_scope, 240);
+        let title_override = bounded_optional("title_override", &request.title_override, 200)?;
+        let note = bounded_optional("note", &request.note, 1_000)?;
+        let retrieval_scope = bounded_optional("retrieval_scope", &request.retrieval_scope, 240)?;
         let embedding_collection = if request.rag_enabled || kind == pb::AttachmentKind::RagCorpus {
             embedding_collection(&route_id, &action_node_id)
         } else {
@@ -210,38 +230,66 @@ impl Domain {
                 ));
             }
             validate_embedding_vector(&request.embedding_model, &request.query_embedding)?;
-            let hits = self
-                .dao
-                .search_rag_embeddings(
-                    &route_id,
-                    &action_node_id,
-                    &expected_collection,
-                    request.embedding_model.trim(),
-                    &request.query_embedding,
-                    limit,
-                )
-                .await?;
-            let by_id = attachments
-                .iter()
-                .map(|attachment| (attachment.id.as_str(), attachment))
-                .collect::<std::collections::HashMap<_, _>>();
-            let contexts = hits
-                .into_iter()
-                .filter_map(|hit| {
-                    let attachment = by_id.get(hit.attachment_id.as_str())?;
-                    let resource = attachment.resource.as_ref()?;
-                    Some(pb::RagContext {
-                        excerpt: rag_excerpt(attachment, resource),
-                        attachment: Some((*attachment).clone()),
-                        relevance: hit.relevance,
-                    })
-                })
-                .collect::<Vec<_>>();
-            if !contexts.is_empty() {
-                retrieval_mode = "vector";
-                contexts
-            } else {
+            let scope = VectorSearchScope {
+                route_id: &route_id,
+                action_node_id: &action_node_id,
+                collection: &expected_collection,
+                embedding_model: request.embedding_model.trim(),
+                query_embedding: &request.query_embedding,
+            };
+            let hit_contexts = self.vector_contexts(&scope, &attachments, limit).await?;
+            if hit_contexts.is_empty() {
                 lexical_contexts(&question, attachments, limit)
+            } else {
+                retrieval_mode = "vector";
+                hit_contexts
+            }
+        } else if let Some(provider) = self.embeddings.as_ref() {
+            // Server-side semantic retrieval: embed the question here so
+            // callers never handle models or vectors. Any failure along this
+            // path silently degrades to the lexical context that every
+            // deployment already serves.
+            match provider.embed(&question).await {
+                Ok(query_embedding)
+                    if crate::datasource::EMBEDDING_DIM_RANGE.contains(&query_embedding.len()) =>
+                {
+                    let scope = VectorSearchScope {
+                        route_id: &route_id,
+                        action_node_id: &action_node_id,
+                        collection: &expected_collection,
+                        embedding_model: provider.model(),
+                        query_embedding: &query_embedding,
+                    };
+                    match self.vector_contexts(&scope, &attachments, limit).await
+                    {
+                        Ok(hit_contexts) if !hit_contexts.is_empty() => {
+                            retrieval_mode = "vector";
+                            hit_contexts
+                        }
+                        Ok(_) => lexical_contexts(&question, attachments, limit),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "rag embedding lookup degraded; falling back to lexical"
+                            );
+                            lexical_contexts(&question, attachments, limit)
+                        }
+                    }
+                }
+                Ok(embedding) => {
+                    tracing::warn!(
+                        dimensions = embedding.len(),
+                        "provider produced an unusable dimension; falling back to lexical"
+                    );
+                    lexical_contexts(&question, attachments, limit)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "question embedding failed; falling back to lexical"
+                    );
+                    lexical_contexts(&question, attachments, limit)
+                }
             }
         } else {
             lexical_contexts(&question, attachments, limit)
@@ -260,6 +308,44 @@ impl Domain {
             embedding_collections,
             retrieval_mode: retrieval_mode.to_string(),
         })
+    }
+
+    /// Runs a vector search scoped to the node's attachments and projects the
+    /// hits back into RAG contexts. Attachments without a published resource
+    /// or already detached from this node are skipped.
+    async fn vector_contexts(
+        &self,
+        scope: &VectorSearchScope<'_>,
+        attachments: &[pb::RouteNodeResourceAttachment],
+        limit: usize,
+    ) -> Result<Vec<pb::RagContext>, DaoError> {
+        let hits = self
+            .dao
+            .search_rag_embeddings(
+                scope.route_id,
+                scope.action_node_id,
+                scope.collection,
+                scope.embedding_model,
+                scope.query_embedding,
+                limit,
+            )
+            .await?;
+        let by_id = attachments
+            .iter()
+            .map(|attachment| (attachment.id.as_str(), attachment))
+            .collect::<std::collections::HashMap<_, _>>();
+        Ok(hits
+            .into_iter()
+            .filter_map(|hit| {
+                let attachment = by_id.get(hit.attachment_id.as_str())?;
+                let resource = attachment.resource.as_ref()?;
+                Some(pb::RagContext {
+                    excerpt: rag_excerpt(attachment, resource),
+                    attachment: Some((*attachment).clone()),
+                    relevance: hit.relevance,
+                })
+            })
+            .collect::<Vec<_>>())
     }
 
     pub(crate) async fn upsert_rag_embedding(
@@ -397,6 +483,17 @@ impl Domain {
     }
 }
 
+/// Everything one node-scoped vector lookup needs. Kept as a struct because
+/// the same scope drives both the caller-supplied and the provider-embedded
+/// retrieval paths.
+struct VectorSearchScope<'a> {
+    route_id: &'a str,
+    action_node_id: &'a str,
+    collection: &'a str,
+    embedding_model: &'a str,
+    query_embedding: &'a [f32],
+}
+
 fn validate_route_action_node(
     route: &bbs_link::Content,
     action_node_id: &str,
@@ -445,15 +542,27 @@ fn validate_route_action_node(
 }
 
 fn bounded_required(name: &str, value: &str, max_chars: usize) -> Result<String, DomainError> {
-    let value = bounded_optional(value, max_chars);
+    let value = value.trim();
+    if value.chars().count() > max_chars {
+        return Err(DomainError::Validation(format!(
+            "{name} exceeds {max_chars} characters"
+        )));
+    }
+    let value = value.to_string();
     if value.is_empty() {
         return Err(DomainError::Validation(format!("{name} is required")));
     }
     Ok(value)
 }
 
-fn bounded_optional(value: &str, max_chars: usize) -> String {
-    value.trim().chars().take(max_chars).collect()
+fn bounded_optional(name: &str, value: &str, max_chars: usize) -> Result<String, DomainError> {
+    let value = value.trim();
+    if value.chars().count() > max_chars {
+        return Err(DomainError::Validation(format!(
+            "{name} exceeds {max_chars} characters"
+        )));
+    }
+    Ok(value.to_string())
 }
 
 fn validate_embedding_vector(model: &str, embedding: &[f32]) -> Result<(), DomainError> {
@@ -616,6 +725,10 @@ mod tests {
             "route-1"
         );
         assert!(matches!(
+            bounded_required("route_id", &"r".repeat(21), 20),
+            Err(DomainError::Validation(message)) if message.contains("exceeds")
+        ));
+        assert!(matches!(
             bounded_required("resource_id", "   ", 20),
             Err(DomainError::Validation(message)) if message == "resource_id is required"
         ));
@@ -698,9 +811,11 @@ mod tests {
             config: Config {
                 listen_addr: "127.0.0.1:0".parse::<SocketAddr>().expect("socket address"),
                 bbs_link_url: "http://127.0.0.1:18004".to_string(),
+                embeddings: None,
             },
             dao: Arc::new(MemoryResourceDao::seeded()),
             bbs_link: None,
+            embeddings: None,
         };
         let request = pb::AttachNodeResourceRequest {
             route_id: "route/one".to_string(),

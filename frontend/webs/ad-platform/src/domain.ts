@@ -10,8 +10,16 @@ export type Campaign = {
   color: string;
   binding: ActionNodeBinding;
   creativeName: string;
+  // Serving creative synced to ad-center (rendered on the action node).
+  title: string;
+  body: string;
+  imageUrl: string;
+  landingUrl: string;
   frequencyCap: number;
   bid: number;
+  // Delivery targeting slugs; empty arrays mean unrestricted.
+  geoRegions: string[];
+  deviceOs: string[];
   predictions: {
     pctr: number;
     pcvr: number;
@@ -43,19 +51,14 @@ export type Scene = {
   reach: string;
   enabled: boolean;
 };
+// Only the server-enforced platform guardrail. Per-campaign impression caps
+// live on each campaign; decision pacing lives in ad-main configuration.
 export type DeliveryGuardrails = {
   userDailyCap: number;
-  campaignDailyCap: number;
-  cooldownMinutes: number;
-  explorationShare: number;
-  sameRouteLimit: number;
 };
+// Mirrors migration 0078's seeded row.
 export const guardrailSeed: DeliveryGuardrails = {
   userDailyCap: 8,
-  campaignDailyCap: 3,
-  cooldownMinutes: 20,
-  explorationShare: 30,
-  sameRouteLimit: 2,
 };
 
 export const actionNodes: ActionNodeBinding[] = [
@@ -97,8 +100,14 @@ export const seed: Campaign[] = [
     color: "navy",
     binding: actionNodes[0],
     creativeName: "秋日徒步背包主视觉",
+    title: "秋日徒步背包主视觉",
+    body: "周末轻徒步的背负系统与防磨袜搭配指南。",
+    imageUrl: "https://images.bookway.example/hike-backpack.jpg",
+    landingUrl: "https://mall.bookway.example/hike-gear",
     frequencyCap: 3,
     bid: 2.6,
+    geoRegions: [],
+    deviceOs: [],
     predictions: { pctr: 0.0416, pcvr: 0.1274, pwegu: 0.0718 },
   },
   {
@@ -112,8 +121,14 @@ export const seed: Campaign[] = [
     color: "cyan",
     binding: actionNodes[1],
     creativeName: "骑行装备清单",
+    title: "骑行装备清单卡片",
+    body: "出发前逐项核对头盔、手套与补给，安心上路。",
+    imageUrl: "https://images.bookway.example/bike-check.jpg",
+    landingUrl: "https://mall.bookway.example/bike-kit",
     frequencyCap: 3,
     bid: 2.2,
+    geoRegions: ["cn-bj", "cn-sh"],
+    deviceOs: [],
     predictions: { pctr: 0.0351, pcvr: 0.0938, pwegu: 0.0542 },
   },
   {
@@ -127,8 +142,14 @@ export const seed: Campaign[] = [
     color: "violet",
     binding: actionNodes[2],
     creativeName: "露营灯场景图",
+    title: "露营灯场景图",
+    body: "夜间照明节点的营地灯布置与备用电源建议。",
+    imageUrl: "https://images.bookway.example/camp-light.jpg",
+    landingUrl: "https://mall.bookway.example/camp-light",
     frequencyCap: 2,
     bid: 1.8,
+    geoRegions: [],
+    deviceOs: ["ios"],
     predictions: { pctr: 0.0278, pcvr: 0.1046, pwegu: 0.0693 },
   },
   {
@@ -142,8 +163,14 @@ export const seed: Campaign[] = [
     color: "gray",
     binding: actionNodes[0],
     creativeName: "秋日徒步背包主视觉",
+    title: "保温杯秋季新品图",
+    body: "徒步补水场景中的保温杯收纳与容量选择。",
+    imageUrl: "https://images.bookway.example/cup-autumn.jpg",
+    landingUrl: "https://mall.bookway.example/thermos",
     frequencyCap: 3,
     bid: 1.5,
+    geoRegions: [],
+    deviceOs: [],
     predictions: { pctr: 0.031, pcvr: 0.081, pwegu: 0.048 },
   },
 ];
@@ -202,44 +229,6 @@ export const sceneSeed: Scene[] = [
     reach: "5,160 人",
     enabled: false,
   },
-];
-export const reportRows = [
-  [
-    "秋日徒步装备推广",
-    "商品成交",
-    "¥4,918.30",
-    "72,481",
-    "234",
-    "¥21.02",
-    "4.16%",
-    "12.74%",
-    "7.18%",
-    "42.6%",
-  ],
-  [
-    "城市骑行系列",
-    "落地页访问",
-    "¥2,764.15",
-    "39,044",
-    "96",
-    "¥28.79",
-    "3.51%",
-    "9.38%",
-    "5.42%",
-    "35.1%",
-  ],
-  [
-    "露营新手季",
-    "商品成交",
-    "¥744.30",
-    "17,115",
-    "46",
-    "¥16.18",
-    "2.78%",
-    "10.46%",
-    "6.93%",
-    "38.9%",
-  ],
 ];
 export const nav: [View, string, string][] = [
   ["overview", "▦", "概览"],

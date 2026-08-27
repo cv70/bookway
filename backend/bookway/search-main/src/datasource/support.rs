@@ -75,6 +75,25 @@ pub(crate) fn builtin_query_rewrite_dictionary() -> QueryRewriteDictionary {
                 trigger: "徒步".to_string(),
                 expansion_terms: vec!["登山".to_string(), "步道".to_string(), "远足".to_string()],
             },
+            // Route action nodes and their equipment are first-class search
+            // vocabulary. Keep these expansions bounded and versioned so a
+            // semantic improvement can be rolled back with the dictionary.
+            QueryRewriteRule {
+                trigger: "登山鞋".to_string(),
+                expansion_terms: vec![
+                    "徒步鞋".to_string(),
+                    "越野鞋".to_string(),
+                    "防滑鞋".to_string(),
+                ],
+            },
+            QueryRewriteRule {
+                trigger: "头盔".to_string(),
+                expansion_terms: vec!["骑行头盔".to_string(), "安全帽".to_string()],
+            },
+            QueryRewriteRule {
+                trigger: "行动节点".to_string(),
+                expansion_terms: vec!["行动".to_string(), "步骤".to_string(), "任务".to_string()],
+            },
         ],
     }
 }

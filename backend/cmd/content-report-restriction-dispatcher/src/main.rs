@@ -128,12 +128,10 @@ impl GrpcRestrictionTarget {
     async fn connect(
         bbs_link_url: String,
         service_auth_token: Option<MetadataValue<Ascii>>,
-    ) -> Result<Self, tonic::transport::Error> {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let channel = bookway_runtime::grpc_channel(&bbs_link_url).await?;
         Ok(Self {
-            bbs_link: bookway_bbs_link_api::pb::bbs_link_client::BbsLinkClient::connect(
-                bbs_link_url,
-            )
-            .await?,
+            bbs_link: bookway_bbs_link_api::pb::bbs_link_client::BbsLinkClient::new(channel),
             service_auth_token,
         })
     }

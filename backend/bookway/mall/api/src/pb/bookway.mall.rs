@@ -39,6 +39,12 @@ pub struct MallProduct {
     pub created_at: ::prost::alloc::string::String,
     #[prost(string, tag = "8")]
     pub updated_at: ::prost::alloc::string::String,
+    #[prost(enumeration = "MallProductKind", tag = "9")]
+    pub product_kind: i32,
+    /// Public knowledge-catalog resource bound to this product; required for
+    /// course and resource-pack kinds and always empty for physical goods.
+    #[prost(string, tag = "10")]
+    pub course_resource_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -72,6 +78,10 @@ pub struct CreateProductRequest {
     pub status: i32,
     #[prost(message, repeated, tag = "6")]
     pub skus: ::prost::alloc::vec::Vec<CreateSkuRequest>,
+    #[prost(enumeration = "MallProductKind", tag = "7")]
+    pub product_kind: i32,
+    #[prost(string, tag = "8")]
+    pub course_resource_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -115,6 +125,10 @@ pub struct UpdateProductRequest {
     pub status: ::core::option::Option<i32>,
     #[prost(message, repeated, tag = "7")]
     pub sku_updates: ::prost::alloc::vec::Vec<UpdateSkuRequest>,
+    #[prost(enumeration = "MallProductKind", optional, tag = "8")]
+    pub product_kind: ::core::option::Option<i32>,
+    #[prost(string, optional, tag = "9")]
+    pub course_resource_id: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -155,6 +169,23 @@ pub struct SkuIdsRequest {
 pub struct SkuListResponse {
     #[prost(message, repeated, tag = "1")]
     pub items: ::prost::alloc::vec::Vec<MallSku>,
+}
+/// Service-to-service ownership check. Public catalog reads deliberately omit
+/// merchant facts; inventory writes must still prove the caller's merchant owns
+/// the SKU before mutating stock.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MerchantSkuRequest {
+    #[prost(string, tag = "1")]
+    pub merchant_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub sku_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct MerchantSkuDecision {
+    #[prost(bool, tag = "1")]
+    pub owned: bool,
 }
 /// A contextual offer is attached to a public route action node.  The mall
 /// owns this association so content services never need to copy product facts.
@@ -256,6 +287,38 @@ impl MallProductStatus {
             "MALL_PRODUCT_STATUS_DRAFT" => Some(Self::Draft),
             "MALL_PRODUCT_STATUS_ACTIVE" => Some(Self::Active),
             "MALL_PRODUCT_STATUS_ARCHIVED" => Some(Self::Archived),
+            _ => None,
+        }
+    }
+}
+/// Catalogue segmentation. Knowledge products bind a knowledge-catalog public
+/// resource through `course_resource_id`; physical goods never carry one.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MallProductKind {
+    Physical = 0,
+    Course = 1,
+    ResourcePack = 2,
+}
+impl MallProductKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Physical => "MALL_PRODUCT_KIND_PHYSICAL",
+            Self::Course => "MALL_PRODUCT_KIND_COURSE",
+            Self::ResourcePack => "MALL_PRODUCT_KIND_RESOURCE_PACK",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MALL_PRODUCT_KIND_PHYSICAL" => Some(Self::Physical),
+            "MALL_PRODUCT_KIND_COURSE" => Some(Self::Course),
+            "MALL_PRODUCT_KIND_RESOURCE_PACK" => Some(Self::ResourcePack),
             _ => None,
         }
     }
@@ -541,6 +604,32 @@ pub mod mall_client {
                 .insert(GrpcMethod::new("bookway.mall.Mall", "GetNodeOffer"));
             self.inner.unary(req, path, codec).await
         }
+        /// Lets gateways verify merchant ownership of a SKU before authorizing an
+        /// inventory mutation without exposing merchant identity on public reads.
+        pub async fn verify_merchant_sku(
+            &mut self,
+            request: impl tonic::IntoRequest<super::MerchantSkuRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MerchantSkuDecision>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.mall.Mall/VerifyMerchantSku",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.mall.Mall", "VerifyMerchantSku"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -594,6 +683,15 @@ pub mod mall_server {
             &self,
             request: tonic::Request<super::IdRequest>,
         ) -> std::result::Result<tonic::Response<super::NodeOffer>, tonic::Status>;
+        /// Lets gateways verify merchant ownership of a SKU before authorizing an
+        /// inventory mutation without exposing merchant identity on public reads.
+        async fn verify_merchant_sku(
+            &self,
+            request: tonic::Request<super::MerchantSkuRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MerchantSkuDecision>,
+            tonic::Status,
+        >;
     }
     #[derive(Debug)]
     pub struct MallServer<T> {
@@ -1051,6 +1149,49 @@ pub mod mall_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetNodeOfferSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.mall.Mall/VerifyMerchantSku" => {
+                    #[allow(non_camel_case_types)]
+                    struct VerifyMerchantSkuSvc<T: Mall>(pub Arc<T>);
+                    impl<T: Mall> tonic::server::UnaryService<super::MerchantSkuRequest>
+                    for VerifyMerchantSkuSvc<T> {
+                        type Response = super::MerchantSkuDecision;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::MerchantSkuRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Mall>::verify_merchant_sku(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = VerifyMerchantSkuSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

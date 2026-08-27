@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("community-notification-dispatcher");
     let config = Config::from_env()?;
     let pool = bookway_data::postgres_pool().await?;
-    let growth = GrowthClient::connect(config.growth_url.clone()).await?;
+    let growth = GrowthClient::new(bookway_runtime::grpc_channel(&config.growth_url).await?);
 
     loop {
         match claim_jobs(&pool, &config).await {

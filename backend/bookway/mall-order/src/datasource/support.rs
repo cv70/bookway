@@ -67,6 +67,10 @@ pub(crate) trait OrderDao: Send + Sync {
         merchant_id: &str,
         settlement_id: &str,
     ) -> Result<pb::AffiliateSettlement, DaoError>;
+    /// Refund-path ledger fact: flips the order's settlement from eligible to
+    /// reversed. Replaying an already reversed order returns that row; a
+    /// settled or pending settlement is not reversible here.
+    async fn reverse_affiliate(&self, order_id: &str) -> Result<pb::AffiliateSettlement, DaoError>;
 }
 #[derive(Clone)]
 struct MemoryOrder {
@@ -358,6 +362,113 @@ mod tests {
 
         assert_eq!(paid.status, pb::MallOrderStatus::Paid as i32);
         assert_eq!(paid.payment_reference.as_deref(), Some("payment-1"));
+    }
+
+    #[tokio::test]
+    async fn paying_a_contextual_order_enqueues_exactly_one_purchase_event() {
+        let dao = MemoryOrderDao::default();
+        // draft() carries node_offer_id "offer-1": a contextual order.
+        dao.create(NewOrder {
+            order: draft("order-ctx"),
+            idempotency_key: "key-ctx".to_string(),
+            request_fingerprint: "sku-1:1".to_string(),
+        })
+        .await
+        .expect("contextual order should be created");
+        begin_and_pay(&dao, "order-ctx", "payment-ctx").await;
+        // A paid replay stays paid and must not re-enqueue.
+        dao.transition(
+            "order-ctx",
+            pb::MallOrderStatus::Paid as i32,
+            Some("payment-ctx".to_string()),
+        )
+        .await
+        .expect("paid replay is idempotent");
+
+        let mut unattributed = draft("order-plain");
+        unattributed.node_offer_id = String::new();
+        dao.create(NewOrder {
+            order: unattributed,
+            idempotency_key: "key-plain".to_string(),
+            request_fingerprint: "sku-1:1".to_string(),
+        })
+        .await
+        .expect("unattributed order should be created");
+        begin_and_pay(&dao, "order-plain", "payment-plain").await;
+
+        let queue = dao.purchase_queue().await;
+        assert_eq!(queue.len(), 1, "one contextual order, one queued event");
+        let entry = queue.first().expect("queue must hold the queued event");
+        assert_eq!(entry.order_id, "order-ctx");
+        assert_eq!(entry.user_id, "user-1");
+        assert_eq!(entry.node_offer_id, "offer-1");
+    }
+
+    async fn begin_and_pay(dao: &MemoryOrderDao, id: &str, reference: &str) {
+        dao.begin_payment(id, reference)
+            .await
+            .expect("payment should claim the order");
+        dao.transition(id, pb::MallOrderStatus::Paid as i32, None)
+            .await
+            .expect("order should be paid");
+    }
+
+    #[tokio::test]
+    async fn affiliate_reversal_flips_only_eligible_settlements_and_replays_idempotently() {
+        let dao = MemoryOrderDao::default();
+        let mut paid = draft("order-1");
+        paid.commission_cents = 120;
+        dao.ensure_settlement(&paid)
+            .await
+            .expect("settlement should exist");
+
+        let reversed = dao
+            .reverse_affiliate("order-1")
+            .await
+            .expect("eligible settlement should reverse");
+        assert_eq!(
+            reversed.status,
+            pb::AffiliateSettlementStatus::Reversed as i32
+        );
+        assert_eq!(reversed.amount_cents, 120);
+
+        let replay = dao
+            .reverse_affiliate("order-1")
+            .await
+            .expect("a reversal replay is idempotent");
+        assert_eq!(
+            replay.status,
+            pb::AffiliateSettlementStatus::Reversed as i32
+        );
+
+        // A settled share has already been paid out; the refund money channel,
+        // not this ledger hook, owns clawing funds back.
+        let mut settled_order = draft("order-2");
+        settled_order.commission_cents = 50;
+        dao.ensure_settlement(&settled_order)
+            .await
+            .expect("second settlement should exist");
+        let id = dao
+            .settlements("merchant-1", None, None, 10)
+            .await
+            .expect("list merchant settlements")
+            .into_iter()
+            .find(|item| item.order_id == "order-2")
+            .map(|item| item.id)
+            .expect("settlement for order-2");
+        dao.settle_affiliate("merchant-1", &id)
+            .await
+            .expect("merchant settles order-2's share");
+        let error = dao
+            .reverse_affiliate("order-2")
+            .await
+            .expect_err("a settled share cannot be reversed here");
+        assert!(matches!(error, DaoError::State(_)));
+
+        assert!(matches!(
+            dao.reverse_affiliate("order-missing").await,
+            Err(DaoError::NotFound(_))
+        ));
     }
 }
 

@@ -74,6 +74,12 @@
 | `0072_route_node_resource_embeddings.sql` | knowledge-catalog | 节点作用域 RAG 向量索引及模型边界 |
 | `0073_route_completion_event_index.sql` | feature-main | 路线完成度同用户加入事实校验的事件索引 |
 | `0074_order_payment_processing.sql` | mall-order | 支付处理中间状态与取消/过期竞态保护 |
+| `0075_rag_embedding_builder_state.sql` | knowledge-catalog | RAG 嵌入构建器的重试簿记列（是否待嵌入以向量行缺席为准） |
+| `0076_mall_product_kinds.sql` | mall | 商品类目（physical/course/resource_pack）与知识资源绑定列 |
+| `0077_purchase_event_outbox.sql` | mall-order | 支付同事务入队的购买归因 Outbox 与死信/退避状态机 |
+| `0078_ad_delivery_guardrails.sql` | ad-center | 跨 campaign 用户日曝光上限等投放护栏配置（缺行回退代码默认值） |
+| `0079_ad_campaign_geo_device.sql` | ad-center | 活动地域/设备定向数组（空=不限，fail-closed 匹配）与 GIN 索引 |
+| `0080_bbs_follower_pages.sql` | bbs | 粉丝 keyset 分页的部分覆盖索引（follow+未删按时间/ID 降序） |
 
 `STORAGE_MODE=postgres` 时服务使用 SQLx PostgreSQL Dao；`STORAGE_MODE=memory` 仅用于无依赖本地演示。生产部署必须先运行 `cargo run -p bookway-db-migrate`，再启动业务服务并确认连接池、Outbox/Worker 和迁移版本健康。`0016` 在持有参与事实表 DDL 锁的同一事务中安装计数触发器并回填，因此旧 BBS 实例的后续写入也会维护分片，可先迁移再滚动升级服务。`0019` 不为旧行动编造精确时间；旧数据保留原有本地日期行为，只有新建或显式改期的行动会写入精确安排瞬间和时区。`0020` 为精确安排引入版本号；改期或完成会取消旧的排队投递，而提醒调度器以 `(action_id, schedule_revision, channel, device_id)` 去重创建通知命令。`0021` 使用 `(kind, source_id)` 将生产端重试折叠为唯一收件箱项，并提供按用户的稳定游标和未读索引。`0026` 让终态申诉、恢复公开命令和作者收件箱任务原子落库；`0027` 将接受举报后的下架任务与决议同事务提交，两个调度器都由租约负责重试，`dead` 状态必须纳入运营告警与人工补偿。`0032` 在启用支付回调前要求确认历史数据不存在重复的 provider 流水号；迁移后同一流水号只能结算一个订单。`0034` 会把既有内容回填为待投影任务；上线后应启动 `bookway-search-indexer`，并由 `bookway-search-index-outbox-recovery` 报告死信；只有明确操作者和原因的 `requeue_dead` 运行才能将死信安全重排。`0035` 保持旧客户端的已发布标记而不重复创建未知原帖；新记录的 `entry_publication_jobs.status = 'dead'` 也必须进入告警，并由用户显式重试或运营补偿处理。`0036` 将 `complete_upload` 后的资产放入处理队列，只有 `bookway-media-processor` 验证完成的 `ready` 资产能进入 BBS Link；必须对 `media_processing_jobs.status = 'dead'` 告警。`0039` 会将每次已持久化曝光对应的模型版本与实验桶保留下来，并建立只含请求归因事件的读取索引；`bookway-recommendation-evaluator` 必须使用已完成标签窗口的固定时间范围，它的快照是观察性评估记录，不得用作未经验证的训练或自动发布依据。`0040` 为 Search Main 增加受限、版本化的查询改写词典和原子活动指针；词典切换前必须完成离线检查，调用 `activate_search_query_rewrite` 后各实例会热刷新，旧分页会话保持创建时的改写版本。`0041` 为 `bookway-search-evaluator` 保存按改写版本和结果类型聚合的观察性指标；每次运行都必须使用完整标签窗口，样本不足的快照不能作为词典升级依据。`0043` 持久化搜索索引对账的受限检查点、聚合差异、Outbox 未投递数量和最终健康结论；同一未完成运行由租约串行恢复，只有完成、全量且 Outbox 已清空的运行才可能标记为健康。检查点包含内部内容 ID，必须仅向受控运维数据库访问者开放。`0044` 将提醒 Provider 投递从收件箱创建中分离为可租约领取的 Worker：发送前必须复核行动版本和设备，Provider 以 delivery ID 幂等，超时退避、失效设备撤销、终态失败均可审计。`0045` 让 Gateway 在互动后将已解析接收者和固定来源键写入可靠的社区通知任务，Worker 以租约投递 Growth；它不能跨服务消除互动已提交但 Gateway 尚未入队的窗口，且 `dead` 与入队失败日志必须由运营监控处理。`0046` 为知识资源增加可选社区内容来源标识和用户级唯一索引；它不回填正文或媒体，收集公开内容只保存受控元数据与原内容引用，内容可见性始终由 BBS Link 决定。`0047` 为关注时间流提供 `(author_id, created_at DESC, id DESC)` 的已公开内容读取索引；推荐召回只能使用 BBS 派生的关注作者集合，空关注集合必须返回空流而非回退到全局推荐。`0048` 为显式创建行动增加用户级幂等键；同一键配合相同动作返回已有行动，键与动作内容不匹配则返回冲突，重复计划自动物化的后继行动不使用该键。`0049` 使 PostgreSQL 的 `user_events` 枚举约束接受 Gateway 产生的 `save_knowledge` 事件；应用、特征和离线评估的高意图语义由此在生产存储中保持一致。`0050` 以用户级幂等键折叠复盘/行记创建的弱网重试；公开行记只会产生一条持久发布任务，而已发布后的同键重试仍会返回原始记录。
 
@@ -83,3 +89,11 @@
 `0067` 把路线行动节点与公共资源的挂载关系收敛在 Knowledge Catalog 限界上下文中，并要求每条挂载声明该行动节点已公开声明的场景装备。挂载记录只引用公开资源、公开路线节点标识和装备上下文，不复制路线树或资源正文；`embedding_collection` 为后续 RAG/AI 行动指南提供稳定检索集合名。
 
 `0074` 为订单支付确认增加 `payment_processing` 中间状态。订单先原子进入处理中，再确认库存并完成支付；取消与过期不会抢占处理中订单，支付重试可继续同一支付号。
+
+`0077` 让购买归因从 best-effort gRPC 升级为事务 Outbox：标记已支付的同事务写入 `purchase_event_outbox`（每单一行，仅含路线归因的场景订单），`bookway-outbox-relay` 在投递时解析 Offer 路线并以确定性 UUIDv5 键调用 user-event（重放天然幂等），瞬时失败按指数退避、永久失败与超限死信均落入 `dead` 需运营告警。迁移会将既有已支付场景订单一次性回填入队，重复执行不产生重复事件。
+
+`0078` 将广告平台此前仅存在于浏览器演示态的“单用户全局日曝光上限”落为服务端护栏表 `ad_delivery_guardrails`（种子 8）。ad-center 的 `RecordEvent` 在每次曝光受理时读取该值并在跨所有 campaign 的用户日总达标后拒绝；Redis 预过滤（`FrequencyGate`）仅为加速器，计数漂移或 Redis 不可用时自动退回 SQL 权威裁决，删除护栏行不会静默关闭上限。
+
+`0079` 为广告活动增加 `geo_regions`/`device_os` 定向数组。语义是硬过滤且 fail-closed：空数组不限，非空数组要求请求投送上下文携带匹配值；平台观察不到上下文时只有未限定活动可参与。GIN 索引支撑数组过滤；定向 slug 全链路小写归一（如 `cn-bj`、`ios`），网关当前从 User-Agent 派生设备维度，地域维度留待可靠来源接入。
+
+`0080` 为粉丝分页建立部分覆盖索引 `(target_user_id, created_at DESC, source_user_id DESC) WHERE edge_type='follow' AND deleted_at IS NULL`。`ListFollowers` 的 keyset 游标（`(created_at, source_user_id)` 行值比较）依赖该索引把每页收敛为一次有序索引扫描；0002 的通用目标索引保留给可见性上下文读取。

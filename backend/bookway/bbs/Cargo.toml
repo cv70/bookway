@@ -10,6 +10,7 @@ bookway-bbs-api.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 bookway-api.workspace = true
+bookway-cache.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
 tokio.workspace = true

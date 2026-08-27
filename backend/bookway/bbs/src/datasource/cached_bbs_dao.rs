@@ -2,251 +2,75 @@ use super::*;
 
 pub(crate) struct CachedBbsDao {
     inner: Arc<dyn BbsDao>,
-    redis: Option<ConnectionManager>,
-    miss_locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
+    contexts: bookway_cache::VersionedCache<pb::SocialContext>,
+    visibilities: bookway_cache::VersionedCache<pb::SocialVisibility>,
+    stats: bookway_cache::VersionedCache<pb::SocialStats>,
 }
 
 impl CachedBbsDao {
     pub(crate) fn new(inner: Arc<dyn BbsDao>, redis: Option<ConnectionManager>) -> Self {
         Self {
             inner,
-            redis,
-            miss_locks: Arc::new(Mutex::new(HashMap::new())),
+            contexts: relationship_context_cache(redis.clone()),
+            visibilities: relationship_visibility_cache(redis.clone()),
+            // Counts live on the creator profile page, so they ride the same
+            // version-stamped invalidation as the other relationship reads.
+            stats: relationship_stats_cache(redis),
         }
     }
 
-    async fn cached_message<M, F, Fut>(
-        &self,
-        kind: &str,
-        user_id: &str,
-        load: F,
+    /// Read-through with version-stamped payloads: a relationship mutation
+    /// bumps the user's counter, so blocks and mutes stop being served the
+    /// moment they commit instead of when a TTL happens to lapse.
+    async fn cached_message<M>(
+        cache: &bookway_cache::VersionedCache<M>,
+        key: &str,
+        load: impl Future<Output = Result<M, DaoError>>,
     ) -> Result<M, DaoError>
     where
-        M: Message + Default + Clone,
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<M, DaoError>>,
+        M: prost::Message + Default + Clone,
     {
-        let cache_key = relationship_cache_key(kind, user_id);
-        if let Some(value) = self.load_message(kind, user_id).await {
+        if let Some(value) = cache.load(key, key).await {
             return Ok(value);
         }
 
-        let _local = self.miss_lock(&cache_key).await;
-        if let Some(value) = self.load_message(kind, user_id).await {
+        let guard = cache.refresh_lock(key).await;
+        if let Some(value) = cache.load(key, key).await {
+            guard.release().await;
             return Ok(value);
         }
-
-        let lease_key = relationship_refresh_key(kind, user_id);
-        let lease = self.refresh_lock(&lease_key).await;
-        if matches!(lease, RefreshLeaseDecision::Peer) {
-            if let Some(value) = self.load_message(kind, user_id).await {
-                return Ok(value);
-            }
+        if guard.peer_holds_lease() {
+            guard.release().await;
             return Err(DaoError::CachePeerRefresh);
         }
 
-        let version_key = relationship_version_key(kind, user_id);
-        let version = self.cache_version(&version_key).await;
-        let result = load().await;
+        // Snapshot before reloading: a mutation that invalidates mid-reload
+        // will bump past this stamp and retire whatever we store.
+        let version = cache.version(key).await;
+        let result = load.await;
         if let (Some(version), Ok(value)) = (version, result.as_ref()) {
-            self.store_message(&version_key, &cache_key, version, value, kind)
-                .await;
+            cache.store(key, version, value).await;
         }
-        if let RefreshLeaseDecision::Owned(Some(lease)) = lease {
-            lease.release().await;
-        }
+        guard.release().await;
         result
-    }
-
-    async fn miss_lock(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self.miss_locks.lock().await;
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
-                lock
-            } else {
-                let lock = Arc::new(tokio::sync::Mutex::new(()));
-                locks.insert(key.to_string(), Arc::downgrade(&lock));
-                lock
-            }
-        };
-        lock.lock_owned().await
-    }
-
-    async fn refresh_lock(&self, key: &str) -> RefreshLeaseDecision {
-        let Some(mut manager) = self.redis.clone() else {
-            return RefreshLeaseDecision::Owned(None);
-        };
-        let token = format!("{}-{}", std::process::id(), uuid::Uuid::now_v7());
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_millis(RELATIONSHIP_REFRESH_LOCK_WAIT_MS);
-        loop {
-            let result: redis::RedisResult<Option<String>> = redis::cmd("SET")
-                .arg(key)
-                .arg(&token)
-                .arg("NX")
-                .arg("PX")
-                .arg(RELATIONSHIP_REFRESH_LOCK_TTL_MS)
-                .query_async(&mut manager)
-                .await;
-            match result {
-                Ok(Some(_)) => {
-                    return RefreshLeaseDecision::Owned(Some(RedisRefreshLease {
-                        manager,
-                        key: key.to_string(),
-                        token,
-                    }));
-                }
-                Ok(None) if tokio::time::Instant::now() < deadline => {
-                    sleep(Duration::from_millis(RELATIONSHIP_REFRESH_LOCK_POLL_MS)).await;
-                }
-                Ok(None) => {
-                    tracing::debug!(
-                        key,
-                        "bbs relationship refresh lease held by another instance"
-                    );
-                    return RefreshLeaseDecision::Peer;
-                }
-                Err(error) => {
-                    tracing::debug!(%error, key, "bbs relationship refresh lease unavailable; using dao");
-                    return RefreshLeaseDecision::Owned(None);
-                }
-            }
-        }
-    }
-
-    async fn cache_version(&self, key: &str) -> Option<u64> {
-        let mut manager = self.redis.clone()?;
-        let result: redis::RedisResult<Option<String>> =
-            redis::cmd("GET").arg(key).query_async(&mut manager).await;
-        match result {
-            Ok(Some(value)) => value.parse().ok(),
-            Ok(None) => Some(0),
-            Err(error) => {
-                tracing::debug!(%error, key, "bbs relationship cache version read degraded");
-                None
-            }
-        }
-    }
-
-    async fn load_message<M>(&self, kind: &str, user_id: &str) -> Option<M>
-    where
-        M: Message + Default,
-    {
-        let mut manager = self.redis.clone()?;
-        let version_key = relationship_version_key(kind, user_id);
-        let cache_key = relationship_cache_key(kind, user_id);
-        let result: redis::RedisResult<Vec<Option<Vec<u8>>>> = redis::cmd("MGET")
-            .arg(version_key)
-            .arg(cache_key)
-            .query_async(&mut manager)
-            .await;
-        match result {
-            Ok(values) => {
-                let version = values
-                    .first()
-                    .and_then(Option::as_ref)
-                    .and_then(|value| std::str::from_utf8(value).ok())
-                    .map_or(Some(0), |value| value.parse::<u64>().ok())?;
-                let payload = values.get(1).and_then(Option::as_ref)?;
-                if payload.len() < std::mem::size_of::<u64>() {
-                    return None;
-                }
-                let stored_version = u64::from_be_bytes(
-                    payload[..std::mem::size_of::<u64>()]
-                        .try_into()
-                        .unwrap_or_default(),
-                );
-                if stored_version != version {
-                    return None;
-                }
-                match M::decode(&payload[std::mem::size_of::<u64>()..]) {
-                    Ok(value) => Some(value),
-                    Err(error) => {
-                        tracing::warn!(%error, kind, "bbs relationship cache payload invalid");
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::debug!(%error, kind, "bbs relationship cache read degraded");
-                None
-            }
-        }
-    }
-
-    async fn store_message<M>(
-        &self,
-        version_key: &str,
-        cache_key: &str,
-        version: u64,
-        value: &M,
-        kind: &str,
-    ) where
-        M: Message,
-    {
-        let Some(mut manager) = self.redis.clone() else {
-            return;
-        };
-        let mut payload = version.to_be_bytes().to_vec();
-        payload.extend_from_slice(&value.encode_to_vec());
-        let result: redis::RedisResult<i32> = redis::Script::new(STORE_IF_VERSION_UNCHANGED)
-            .key(version_key)
-            .key(cache_key)
-            .arg(version.to_string())
-            .arg(payload)
-            .arg(RELATIONSHIP_CACHE_TTL_SECONDS)
-            .arg(RELATIONSHIP_VERSION_TTL_SECONDS)
-            .invoke_async(&mut manager)
-            .await;
-        if let Err(error) = result {
-            tracing::debug!(%error, kind, "bbs relationship cache write degraded");
-        }
-    }
-
-    async fn invalidate(&self, kind: &str, user_id: &str) {
-        let Some(mut manager) = self.redis.clone() else {
-            return;
-        };
-        let version_key = relationship_version_key(kind, user_id);
-        let cache_key = relationship_cache_key(kind, user_id);
-        let result: redis::RedisResult<i32> = redis::Script::new(INVALIDATE_CACHE)
-            .key(version_key)
-            .key(cache_key)
-            .arg(RELATIONSHIP_VERSION_TTL_SECONDS)
-            .invoke_async(&mut manager)
-            .await;
-        if let Err(error) = result {
-            tracing::warn!(%error, kind, "bbs relationship cache invalidation degraded");
-        }
-    }
-
-    async fn invalidate_relationship(
-        &self,
-        user_id: &str,
-        target_user_id: &str,
-        edge: pb::SocialEdgeType,
-    ) {
-        self.invalidate("context", user_id).await;
-        self.invalidate("visibility", user_id).await;
-        if edge == pb::SocialEdgeType::Block {
-            self.invalidate("context", target_user_id).await;
-            self.invalidate("visibility", target_user_id).await;
-        }
     }
 }
 
 #[async_trait]
 impl BbsDao for CachedBbsDao {
     async fn context(&self, user_id: &str) -> Result<pb::SocialContext, DaoError> {
-        self.cached_message("context", user_id, || self.inner.context(user_id))
-            .await
+        Self::cached_message(&self.contexts, &relationship_identity(user_id), async move {
+            self.inner.context(user_id).await
+        })
+        .await
     }
 
     async fn visibility_context(&self, user_id: &str) -> Result<pb::SocialVisibility, DaoError> {
-        self.cached_message("visibility", user_id, || {
-            self.inner.visibility_context(user_id)
-        })
+        Self::cached_message(
+            &self.visibilities,
+            &relationship_identity(user_id),
+            async move { self.inner.visibility_context(user_id).await },
+        )
         .await
     }
 
@@ -261,9 +85,59 @@ impl BbsDao for CachedBbsDao {
             .inner
             .set_edge(user_id, target_user_id, edge, active)
             .await?;
-        self.invalidate_relationship(user_id, target_user_id, edge)
-            .await;
+        let user_key = relationship_identity(user_id);
+        self.contexts.invalidate(&user_key).await;
+        self.visibilities.invalidate(&user_key).await;
+        // Every follow changes both ends' counts, so both stats caches retire.
+        let target_key = relationship_identity(target_user_id);
+        self.stats.invalidate(&user_key).await;
+        self.stats.invalidate(&target_key).await;
+        if edge == pb::SocialEdgeType::Block {
+            // A block must also retire what the blocked party sees about them.
+            self.contexts.invalidate(&target_key).await;
+            self.visibilities.invalidate(&target_key).await;
+        }
         Ok(context)
+    }
+
+    async fn list_followers(
+        &self,
+        user_id: &str,
+        before: Option<KeysetCursor>,
+        limit: u32,
+    ) -> Result<Vec<FollowedEdge>, DaoError> {
+        // Keyset pages are one cheap ordered index scan each; caching them
+        // would buy little and would blur page boundaries while follows move.
+        self.inner.list_followers(user_id, before, limit).await
+    }
+
+    async fn list_route_peers(
+        &self,
+        route_id: &str,
+        viewer_id: &str,
+        excluded_user_ids: &[String],
+        before: Option<KeysetCursor>,
+        limit: u32,
+    ) -> Result<Vec<PeerEdge>, DaoError> {
+        // The exclusion set is resolved fresh per call by the domain's
+        // fail-closed visibility read; caching it would mask relationship
+        // changes between pages.
+        self.inner
+            .list_route_peers(route_id, viewer_id, excluded_user_ids, before, limit)
+            .await
+    }
+
+    async fn social_stats(&self, user_id: &str) -> Result<(u64, u64), DaoError> {
+        let key = relationship_identity(user_id);
+        let stats = Self::cached_message(&self.stats, &key, async move {
+            let (followers, following) = self.inner.social_stats(user_id).await?;
+            Ok(pb::SocialStats {
+                followers,
+                following,
+            })
+        })
+        .await?;
+        Ok((stats.followers, stats.following))
     }
 
     async fn list_route_participations(

@@ -35,6 +35,7 @@ const MAX_RECALL_PAGES_PER_RESPONSE: usize = 8;
 const MAX_PUBLIC_CURSOR_BYTES: usize = 128;
 const MAX_QUERY_LENGTH: usize = 100;
 const MAX_REWRITE_TERMS: usize = 6;
+const MAX_ROUTE_CONTEXT_FIELD_LENGTH: usize = 160;
 const QUERY_REWRITE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const BBS_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_500);
 const BBS_LINK_TIMEOUT: Duration = Duration::from_millis(1_500);
@@ -43,6 +44,12 @@ const FEATURE_RERANK_TIMEOUT: Duration = Duration::from_millis(35);
 const MAX_FEATURE_RERANK_CANDIDATES: usize = 200;
 const AD_DECISION_TIMEOUT: Duration = Duration::from_millis(25);
 const DEFAULT_AD_PLACEMENT: &str = "search";
+/// Search ads stay low density: 15% of the page, three organic results
+/// minimum, slots from the shared `commercial-mix` schedule. The same policy
+/// decides how many ads to request so supply never exceeds what a page can
+/// legitimately render.
+const SEARCH_AD_POLICY: bookway_commercial_mix::MixPolicy =
+    bookway_commercial_mix::MixPolicy::new(1_500, 3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SearchIntent {
@@ -51,6 +58,10 @@ enum SearchIntent {
     User,
     Journey,
     Resource,
+    /// Query names a route action node ("节点") — prefer typed node results.
+    ActionNode,
+    /// Query names scene gear ("装备"/"器材") — prefer typed equipment results.
+    Equipment,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +75,10 @@ struct SearchPlan {
     original_query: String,
     recalls: Vec<RecallPlan>,
     intent: SearchIntent,
+    /// The search type forwarded to BBS recalls. General surfaces route
+    /// entity-intent queries to the typed NODES/EQUIPMENT indices while the
+    /// caller-facing fingerprint keeps using the requested type.
+    bbs_search_type: pb::SearchType,
     query_rewrite_version: String,
 }
 
@@ -298,11 +313,23 @@ impl Domain {
                 .action_node_id
                 .as_deref()
                 .is_some_and(|value| value.trim().is_empty())
+            || request
+                .route_id
+                .as_deref()
+                .is_some_and(|value| value.trim().chars().count() > MAX_ROUTE_CONTEXT_FIELD_LENGTH)
+            || request
+                .action_node_id
+                .as_deref()
+                .is_some_and(|value| value.trim().chars().count() > MAX_ROUTE_CONTEXT_FIELD_LENGTH)
             || request.route_id.is_some() != request.action_node_id.is_some()
             || request
                 .scene_equipment
                 .as_deref()
                 .is_some_and(|value| value.trim().is_empty())
+            || request
+                .scene_equipment
+                .as_deref()
+                .is_some_and(|value| value.trim().chars().count() > MAX_ROUTE_CONTEXT_FIELD_LENGTH)
             || (request.scene_equipment.is_some()
                 && (request.route_id.is_none() || request.action_node_id.is_none()))
         {
@@ -356,12 +383,15 @@ impl Domain {
 
         session.delivered_count += page.len();
         let mut ad_degraded = false;
-        // Search ads are a first-page contextual slot. Organic exposure is
+        // Search ads are a first-page contextual mix. Organic exposure is
         // persisted above so ad delivery never becomes a fake search result
-        // in attribution or pagination state.
+        // in attribution or pagination state. Displaced organic tail items
+        // go back to the pending buffer head in order, so the next page
+        // resumes exactly where this one's commercial slots cut it short.
+        let ad_slots = SEARCH_AD_POLICY.ad_slots_for(limit);
         if request.cursor.is_none()
-            && page.len() >= 3
-            && limit >= 4
+            && ad_slots > 0
+            && page.len() >= SEARCH_AD_POLICY.min_natural_results
             && let Some(context) = route_context.as_ref()
             && !context.scene_equipment.is_empty()
             && let Some(user_id) = request
@@ -370,35 +400,42 @@ impl Domain {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
         {
-            match self.contextual_search_ad(&request, context, user_id).await {
-                Ok(Some(ad)) => {
-                    let insertion_index = page.len().min(3);
-                    if page.len() == limit
-                        && let Some(displaced) = page.pop()
-                    {
-                        session.pending.insert(0, displaced);
-                        session.delivered_count = session.delivered_count.saturating_sub(1);
+            match self.contextual_search_ad(&request, context, user_id, ad_slots).await {
+                Ok(ads) if !ads.is_empty() => {
+                    let ads = ads.into_iter().map(|ad| pb::SearchResult {
+                        id: format!("ad:{}", ad.campaign_id),
+                        result_type: pb::SearchResultType::Ad as i32,
+                        title: ad.title.clone(),
+                        snippet: ad.body.clone(),
+                        cover_url: (!ad.image_url.is_empty()).then(|| ad.image_url.clone()),
+                        author_id: None,
+                        author_name: None,
+                        domain: None,
+                        score: ad.ecpm,
+                        highlights: Vec::new(),
+                        post: None,
+                        resource: None,
+                        ad: Some(ad),
+                    });
+                    let organics = std::mem::take(&mut page);
+                    let (mixed, overflow) =
+                        bookway_commercial_mix::mix_page(organics, ads.collect(), limit, SEARCH_AD_POLICY);
+                    page.reserve(mixed.len());
+                    for item in mixed {
+                        match item {
+                            bookway_commercial_mix::MixedItem::Organic(result) => page.push(result),
+                            bookway_commercial_mix::MixedItem::Ad(result) => page.push(result),
+                        }
                     }
-                    page.insert(
-                        insertion_index,
-                        pb::SearchResult {
-                            id: format!("ad:{}", ad.campaign_id),
-                            result_type: pb::SearchResultType::Ad as i32,
-                            title: ad.title.clone(),
-                            snippet: ad.body.clone(),
-                            cover_url: (!ad.image_url.is_empty()).then(|| ad.image_url.clone()),
-                            author_id: None,
-                            author_name: None,
-                            domain: None,
-                            score: ad.ecpm,
-                            highlights: Vec::new(),
-                            post: None,
-                            resource: None,
-                            ad: Some(ad),
-                        },
-                    );
+                    if !overflow.is_empty() {
+                        let displaced = overflow.len();
+                        // Recompute delivered_count so paging state reflects
+                        // only what was actually rendered.
+                        session.delivered_count = session.delivered_count.saturating_sub(displaced);
+                        session.pending.splice(0..0, overflow);
+                    }
                 }
-                Ok(None) => {}
+                Ok(_) => {}
                 Err(error) => {
                     ad_degraded = true;
                     tracing::debug!(%error, "contextual search ad degraded");
@@ -492,9 +529,13 @@ impl Domain {
         request: &pb::SearchRequest,
         context: &RouteSearchContext,
         user_id: &str,
-    ) -> Result<Option<pb::SearchAd>, String> {
+        slots: usize,
+    ) -> Result<Vec<pb::SearchAd>, String> {
+        if slots == 0 {
+            return Ok(Vec::new());
+        }
         let Some(ad_main) = self.ad_main.as_ref() else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let placement = request
             .ad_placement
@@ -505,12 +546,16 @@ impl Domain {
             .to_string();
         let rpc = ad_pb::DecisionRequest {
             user_id: user_id.to_string(),
-            placement,
+            placement: placement.clone(),
             domain: None,
-            limit: Some(1),
+            limit: Some(u32::try_from(slots).unwrap_or(1)),
             route_id: context.route_id.clone(),
             action_node_id: context.action_node_id.clone(),
             scene_equipment: Some(context.scene_equipment.clone()),
+            // No observable delivery context reaches search mixing yet;
+            // unknown context serves unrestricted campaigns only.
+            geo_region: String::new(),
+            device_os: String::new(),
         };
         let mut client = ad_main.clone();
         let request = bookway_runtime::grpc_service_request(rpc)
@@ -520,18 +565,26 @@ impl Domain {
             .map_err(|_| "ad-main decision timed out".to_string())?
             .map_err(|error| error.to_string())?
             .into_inner();
-        Ok(response.items.into_iter().find_map(|ad| {
-            (ad.route_id == context.route_id
-                && ad.action_node_id == context.action_node_id
-                && !ad.campaign_id.trim().is_empty()
-                && !ad.request_id.trim().is_empty()
-                && ad.ecpm.is_finite()
-                && ad.ecpm >= 0.0
-                && ad
-                    .scene_equipment
-                    .trim()
-                    .eq_ignore_ascii_case(&context.scene_equipment))
-            .then(|| pb::SearchAd {
+        // Decision items arrive in auction (eCPM) order; keep that order so
+        // the mixer consumes the strongest inventory first.
+        Ok(response
+            .items
+            .into_iter()
+            .filter(|ad| {
+                ad.route_id == context.route_id
+                    && ad.action_node_id == context.action_node_id
+                    && ad.placement == placement
+                    && !ad.campaign_id.trim().is_empty()
+                    && !ad.request_id.trim().is_empty()
+                    && ad.ecpm.is_finite()
+                    && ad.ecpm >= 0.0
+                    && ad
+                        .scene_equipment
+                        .trim()
+                        .eq_ignore_ascii_case(&context.scene_equipment)
+            })
+            .map(|ad| {
+                pb::SearchAd {
                 request_id: ad.request_id,
                 campaign_id: ad.campaign_id,
                 placement: ad.placement,
@@ -539,13 +592,17 @@ impl Domain {
                 body: ad.body,
                 image_url: ad.image_url,
                 landing_url: ad.landing_url,
-                ecpm: ad.ecpm.max(ad.score),
+                // `score` includes targeting and pacing tie-breakers and is
+                // intentionally not a billable impression value. Preserve
+                // the auction's normalized eCPM as the only pricing signal.
+                ecpm: ad.ecpm,
                 model_version: ad.model_version,
                 route_id: ad.route_id,
                 action_node_id: ad.action_node_id,
                 scene_equipment: ad.scene_equipment,
+            }
             })
-        }))
+            .collect())
     }
 
     pub(crate) async fn validate_attributions(
@@ -597,6 +654,9 @@ impl Domain {
             source_request.q = recall.query.clone();
             source_request.cursor = recall.source_cursor.clone();
             source_request.limit = Some(RECALL_PAGE_SIZE as u32);
+            if matches!(recall.source, RecallSource::Bbs) {
+                source_request.search_type = plan.bbs_search_type as i32;
+            }
             calls += 1;
 
             let recall_result = match recall.source {
@@ -1064,6 +1124,18 @@ fn make_search_plan(
     let original_query = normalize_query(query)?;
     let mut recalls = Vec::new();
     let intent = search_intent(&original_query);
+    // Entity-intent queries asked on a general surface search the typed
+    // node/equipment indices; an explicit tab (Journeys, Users, …) wins.
+    let bbs_search_type = match (search_type, intent) {
+        (
+            pb::SearchType::All | pb::SearchType::Posts,
+            SearchIntent::ActionNode | SearchIntent::Equipment,
+        ) => match intent {
+            SearchIntent::ActionNode => pb::SearchType::Nodes,
+            _ => pb::SearchType::Equipment,
+        },
+        _ => search_type,
+    };
     let aliases = matches!(intent, SearchIntent::Generic | SearchIntent::Journey)
         .then(|| synonym_aliases(&original_query, dictionary))
         .unwrap_or_default();
@@ -1101,6 +1173,7 @@ fn make_search_plan(
         intent,
         original_query,
         recalls,
+        bbs_search_type,
         query_rewrite_version: dictionary.version.clone(),
     })
 }
@@ -1223,6 +1296,10 @@ fn search_intent(query: &str) -> SearchIntent {
         .any(|term| query.contains(term))
     {
         SearchIntent::Resource
+    } else if query.contains("节点") {
+        SearchIntent::ActionNode
+    } else if ["装备", "器材"].iter().any(|term| query.contains(term)) {
+        SearchIntent::Equipment
     } else {
         SearchIntent::Generic
     }
@@ -1297,6 +1374,10 @@ fn rerank_results(
             SearchIntent::User => item.result_type == pb::SearchResultType::User as i32,
             SearchIntent::Journey => item.result_type == pb::SearchResultType::Journey as i32,
             SearchIntent::Resource => item.result_type == pb::SearchResultType::Resource as i32,
+            SearchIntent::ActionNode => item.result_type == pb::SearchResultType::ActionNode as i32,
+            SearchIntent::Equipment => {
+                item.result_type == pb::SearchResultType::SceneEquipment as i32
+            }
         };
         if matches_intent {
             item.score += 2.0;
@@ -1383,7 +1464,8 @@ fn result_type_name(result_type: i32) -> &'static str {
         Ok(pb::SearchResultType::Topic) => "topic",
         Ok(pb::SearchResultType::Resource) => "resource",
         Ok(pb::SearchResultType::Ad) => "ad",
-        Err(_) => "resource",
+        Ok(pb::SearchResultType::ActionNode) => "node",
+        Ok(pb::SearchResultType::SceneEquipment) | Err(_) => "resource",
     }
 }
 
@@ -1486,6 +1568,8 @@ fn search_type_name(search_type: pb::SearchType) -> &'static str {
         pb::SearchType::Users => "users",
         pb::SearchType::Topics => "topics",
         pb::SearchType::Resources => "resources",
+        pb::SearchType::Nodes => "nodes",
+        pb::SearchType::Equipment => "equipment",
     }
 }
 
@@ -1794,7 +1878,8 @@ mod tests {
 
         let endpoint = format!("http://{address}");
         for _ in 0..20 {
-            if let Ok(search_client) = BbsSearchClient::connect(endpoint.clone()).await {
+            if let Ok(channel) = bookway_runtime::grpc_channel(&endpoint).await {
+                let search_client = BbsSearchClient::new(channel);
                 return Domain::with_test_dependencies(
                     search_client,
                     Arc::new(MemorySearchSessionStore::default()),
@@ -1822,8 +1907,8 @@ mod tests {
 
         let endpoint = format!("http://{address}");
         for _ in 0..20 {
-            if let Ok(client) = BbsLinkClient::connect(endpoint.clone()).await {
-                return client;
+            if let Ok(channel) = bookway_runtime::grpc_channel(&endpoint).await {
+                return BbsLinkClient::new(channel);
             }
             sleep(Duration::from_millis(10)).await;
         }
@@ -1846,8 +1931,8 @@ mod tests {
 
         let endpoint = format!("http://{address}");
         for _ in 0..20 {
-            if let Ok(client) = KnowledgeCatalogClient::connect(endpoint.clone()).await {
-                return client;
+            if let Ok(channel) = bookway_runtime::grpc_channel(&endpoint).await {
+                return KnowledgeCatalogClient::new(channel);
             }
             sleep(Duration::from_millis(10)).await;
         }
@@ -2021,6 +2106,20 @@ mod tests {
             normalize_query(&"x".repeat(101)).expect_err("long query should be rejected"),
             SearchMainError::QueryTooLong
         ));
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_route_context_fields() {
+        let source = Arc::new(RecordingSearchSource::default());
+        let service = service(source).await;
+        let mut request = request("路线");
+        request.route_id = Some("r".repeat(MAX_ROUTE_CONTEXT_FIELD_LENGTH + 1));
+        request.action_node_id = Some("node-1".to_string());
+        let error = service
+            .search(request)
+            .await
+            .expect_err("oversized route context must be rejected");
+        assert!(matches!(error, SearchMainError::InvalidCursor(_)));
     }
 
     #[test]
@@ -2326,6 +2425,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_equipment_queries_expand_through_the_versioned_dictionary() {
+        let source = Arc::new(RecordingSearchSource::default());
+        let service = service(source.clone()).await;
+
+        service
+            .search(request("登山鞋"))
+            .await
+            .expect("equipment search works");
+
+        let queries = source
+            .requests
+            .lock()
+            .await
+            .iter()
+            .map(|request| request.q.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(queries, vec!["登山鞋", "登山鞋 徒步鞋 越野鞋 防滑鞋"]);
+    }
+
+    #[tokio::test]
     async fn resources_search_uses_public_catalog_without_bbs_recall() {
         let search_source = Arc::new(RecordingSearchSource::default());
         let resource_source = RecordingResourceSource::default();
@@ -2462,6 +2581,70 @@ mod tests {
                 .filter(|item| item.id == "shared")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn entity_intents_route_general_surfaces_to_typed_bbs_indices() {
+        let dictionary = QueryRewriteDictionary {
+            version: "test-1".to_string(),
+            rules: Vec::new(),
+        };
+        let plan = make_search_plan(
+            "徒步装备",
+            pb::SearchType::All,
+            &dictionary,
+            false,
+        )
+        .expect("plan builds");
+        assert_eq!(plan.intent, SearchIntent::Equipment);
+        assert_eq!(plan.bbs_search_type, pb::SearchType::Equipment);
+
+        let node_plan = make_search_plan(
+            "晨跑打卡节点",
+            pb::SearchType::Posts,
+            &dictionary,
+            false,
+        )
+        .expect("node plan builds");
+        assert_eq!(node_plan.intent, SearchIntent::ActionNode);
+        assert_eq!(node_plan.bbs_search_type, pb::SearchType::Nodes);
+
+        // An explicit tab keeps its type even when entity words appear.
+        let journey_plan = make_search_plan(
+            "徒步路线装备",
+            pb::SearchType::Journeys,
+            &dictionary,
+            false,
+        )
+        .expect("journey plan builds");
+        assert_eq!(journey_plan.intent, SearchIntent::Journey);
+        assert_eq!(journey_plan.bbs_search_type, pb::SearchType::Journeys);
+    }
+
+    #[tokio::test]
+    async fn equipment_intent_queries_recall_the_typed_equipment_index() {
+        let source = Arc::new(RecordingSearchSource::default());
+        source
+            .respond("徒步装备", None, response(Vec::new(), None))
+            .await;
+        let service = service(source.clone()).await;
+
+        service
+            .search(request("徒步装备"))
+            .await
+            .expect("entity search succeeds");
+
+        let requests = source.requests.lock().await;
+        assert!(
+            !requests.is_empty(),
+            "the BBS recall must run for an equipment query"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|sent| sent.search_type == pb::SearchType::Equipment as i32),
+            "every BBS recall round must search the typed equipment index"
         );
     }
 

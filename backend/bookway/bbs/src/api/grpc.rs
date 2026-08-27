@@ -83,6 +83,42 @@ impl Bbs for GrpcServer {
                 .map_err(domain_error)?,
         ))
     }
+
+    async fn list_followers(
+        &self,
+        request: Request<pb::ListFollowersRequest>,
+    ) -> Result<Response<pb::FollowerPage>, Status> {
+        Ok(Response::new(
+            self.domain
+                .list_followers(request.into_inner())
+                .await
+                .map_err(domain_error)?,
+        ))
+    }
+
+    async fn get_social_stats(
+        &self,
+        request: Request<pb::SocialStatsRequest>,
+    ) -> Result<Response<pb::SocialStats>, Status> {
+        Ok(Response::new(
+            self.domain
+                .get_social_stats(request.into_inner())
+                .await
+                .map_err(domain_error)?,
+        ))
+    }
+
+    async fn list_route_peers(
+        &self,
+        request: Request<pb::ListRoutePeersRequest>,
+    ) -> Result<Response<pb::RoutePeerPage>, Status> {
+        Ok(Response::new(
+            self.domain
+                .list_route_peers(request.into_inner())
+                .await
+                .map_err(domain_error)?,
+        ))
+    }
 }
 
 pub(crate) async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {

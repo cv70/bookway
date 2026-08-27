@@ -8,6 +8,8 @@ struct ProductRow {
     description: String,
     image_url: String,
     status: String,
+    product_kind: String,
+    course_resource_id: String,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
 }
@@ -24,6 +26,8 @@ impl ProductRow {
                 .into_iter()
                 .map(SkuRow::into_proto)
                 .collect::<Result<_, _>>()?,
+            product_kind: parse_kind(&self.product_kind)?,
+            course_resource_id: self.course_resource_id,
             created_at: timestamp(self.created_at),
             updated_at: timestamp(self.updated_at),
         })
@@ -119,7 +123,7 @@ impl PostgresCatalogDao {
     }
     async fn load_internal(&self, id: &str) -> Result<pb::MallProduct, DaoError> {
         let product = sqlx::query_as::<_, ProductRow>(
-            "SELECT id,title,description,image_url,status,created_at,updated_at FROM mall_products WHERE id=$1",
+            "SELECT id,title,description,image_url,status,product_kind,course_resource_id,created_at,updated_at FROM mall_products WHERE id=$1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -131,7 +135,7 @@ impl PostgresCatalogDao {
 
     async fn load_customer(&self, id: &str) -> Result<pb::MallProduct, DaoError> {
         let product = sqlx::query_as::<_, ProductRow>(
-            "SELECT id,title,description,image_url,status,created_at,updated_at FROM mall_products WHERE id=$1 AND status='active' AND EXISTS (SELECT 1 FROM mall_skus WHERE product_id=mall_products.id AND saleable=true)",
+            "SELECT id,title,description,image_url,status,product_kind,course_resource_id,created_at,updated_at FROM mall_products WHERE id=$1 AND status='active' AND EXISTS (SELECT 1 FROM mall_skus WHERE product_id=mall_products.id AND saleable=true)",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -155,7 +159,7 @@ impl CatalogDao for PostgresCatalogDao {
         let merchant_id = request.merchant_id.clone();
         let product = new_product(request);
         let mut tx = self.pool.begin().await.map_err(database)?;
-        sqlx::query("INSERT INTO mall_products (id,merchant_id,title,description,image_url,status) VALUES ($1,$2,$3,$4,$5,$6)").bind(&product.id).bind(&merchant_id).bind(&product.title).bind(&product.description).bind(&product.image_url).bind(status_name(product.status)?).execute(&mut *tx).await.map_err(database)?;
+        sqlx::query("INSERT INTO mall_products (id,merchant_id,title,description,image_url,status,product_kind,course_resource_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)").bind(&product.id).bind(&merchant_id).bind(&product.title).bind(&product.description).bind(&product.image_url).bind(status_name(product.status)?).bind(kind_name(product.product_kind)?).bind(&product.course_resource_id).execute(&mut *tx).await.map_err(database)?;
         for sku in &product.skus {
             sqlx::query("INSERT INTO mall_skus (id,product_id,title,price_cents,currency,attributes,saleable) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(&sku.id).bind(&sku.product_id).bind(&sku.title).bind(sku.price_cents).bind(&sku.currency).bind(serde_json::to_value(&sku.attributes).map_err(|error| DaoError::Failed(error.to_string()))?).bind(sku.saleable).execute(&mut *tx).await.map_err(database)?;
         }
@@ -167,7 +171,7 @@ impl CatalogDao for PostgresCatalogDao {
         let id = &request.product_id;
         let mut transaction = self.pool.begin().await.map_err(database)?;
         let changed = sqlx::query(
-            "UPDATE mall_products SET title=COALESCE($3,title),description=COALESCE($4,description),image_url=COALESCE($5,image_url),status=COALESCE($6,status),updated_at=now() WHERE id=$1 AND merchant_id=$2",
+            "UPDATE mall_products SET title=COALESCE($3,title),description=COALESCE($4,description),image_url=COALESCE($5,image_url),status=COALESCE($6,status),product_kind=COALESCE($7,product_kind),course_resource_id=COALESCE($8,course_resource_id),updated_at=now() WHERE id=$1 AND merchant_id=$2",
         )
         .bind(id)
         .bind(&request.merchant_id)
@@ -175,6 +179,12 @@ impl CatalogDao for PostgresCatalogDao {
         .bind(request.description)
         .bind(request.image_url)
         .bind(request.status.map(status_name).transpose()?)
+        .bind(request
+            .product_kind
+            .map(kind_name)
+            .transpose()?
+            .map(str::to_string))
+        .bind(request.course_resource_id)
         .execute(&mut *transaction)
         .await
         .map_err(database)?
@@ -213,7 +223,7 @@ impl CatalogDao for PostgresCatalogDao {
     }
     async fn list(&self, request: pb::ProductQueryRequest) -> Result<pb::ProductPage, DaoError> {
         let limit = usize::try_from(request.limit.unwrap_or(20).clamp(1, 100)).unwrap_or(100);
-        let rows = sqlx::query_as::<_, ProductRow>("SELECT id,title,description,image_url,status,created_at,updated_at FROM mall_products WHERE id > $1 AND ($2='' OR title ILIKE '%' || $2 || '%') AND ($3='' OR merchant_id=$3) AND ($4 OR (status='active' AND EXISTS (SELECT 1 FROM mall_skus WHERE product_id=mall_products.id AND saleable=true))) ORDER BY id LIMIT $5").bind(request.cursor.unwrap_or_default()).bind(request.query.unwrap_or_default()).bind(request.merchant_id.unwrap_or_default()).bind(request.include_inactive).bind(i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)).fetch_all(&self.pool).await.map_err(database)?;
+        let rows = sqlx::query_as::<_, ProductRow>("SELECT id,title,description,image_url,status,product_kind,course_resource_id,created_at,updated_at FROM mall_products WHERE id > $1 AND ($2='' OR title ILIKE '%' || $2 || '%') AND ($3='' OR merchant_id=$3) AND ($4 OR (status='active' AND EXISTS (SELECT 1 FROM mall_skus WHERE product_id=mall_products.id AND saleable=true))) ORDER BY id LIMIT $5").bind(request.cursor.unwrap_or_default()).bind(request.query.unwrap_or_default()).bind(request.merchant_id.unwrap_or_default()).bind(request.include_inactive).bind(i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)).fetch_all(&self.pool).await.map_err(database)?;
         let more = rows.len() > limit;
         let mut values = Vec::with_capacity(rows.len().min(limit));
         for row in rows.into_iter().take(limit) {
@@ -339,5 +349,19 @@ impl CatalogDao for PostgresCatalogDao {
         .map_err(database)?
         .ok_or_else(|| DaoError::NotFound(id.to_string()))?;
         Ok(row.into_proto())
+    }
+    async fn verify_merchant_sku(
+        &self,
+        request: pb::MerchantSkuRequest,
+    ) -> Result<pb::MerchantSkuDecision, DaoError> {
+        let owned = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM mall_skus s INNER JOIN mall_products p ON p.id=s.product_id WHERE s.id=$1 AND p.merchant_id=$2)",
+        )
+        .bind(&request.sku_id)
+        .bind(&request.merchant_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(database)?;
+        Ok(pb::MerchantSkuDecision { owned })
     }
 }

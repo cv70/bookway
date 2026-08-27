@@ -1,11 +1,54 @@
 use super::*;
 
+/// Test-side mirror of the Postgres `purchase_event_outbox` row payload. A
+/// real purchase relay only exists against Postgres storage, so this queue
+/// (and its capture in `transition`) is compiled for tests alone; production
+/// attribution goes through the SQL lane documented in mall-order's README.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct PurchaseOutboxEntry {
+    pub(crate) order_id: String,
+    pub(crate) user_id: String,
+    pub(crate) node_offer_id: String,
+}
+
 #[derive(Default)]
 pub(crate) struct MemoryOrderDao {
     orders: RwLock<HashMap<String, MemoryOrder>>,
     idempotency: RwLock<HashMap<(String, String), String>>,
     payment_references: RwLock<HashMap<String, String>>,
     settlements: RwLock<HashMap<String, pb::AffiliateSettlement>>,
+    #[cfg(test)]
+    purchase_queue: RwLock<Vec<PurchaseOutboxEntry>>,
+}
+
+#[cfg(test)]
+impl MemoryOrderDao {
+    pub(crate) async fn purchase_queue(&self) -> Vec<PurchaseOutboxEntry> {
+        self.purchase_queue.read().await.clone()
+    }
+}
+
+// Both binaries call this at the same point the Postgres dao enqueues the
+// outbox row. Only test builds retain the rows: the real delivery lane
+// consumes the SQL table directly, so a plain memory-mode process has no
+// reader for them.
+impl MemoryOrderDao {
+    async fn mirror_purchase_outbox(&self, order: &pb::Order) {
+        let _ = order;
+        #[cfg(test)]
+        {
+            if order.status != pb::MallOrderStatus::Paid as i32 || order.node_offer_id.is_empty()
+            {
+                return;
+            }
+            self.purchase_queue.write().await.push(PurchaseOutboxEntry {
+                order_id: order.id.clone(),
+                user_id: order.user_id.clone(),
+                node_offer_id: order.node_offer_id.clone(),
+            });
+        }
+    }
 }
 
 #[async_trait]
@@ -228,6 +271,10 @@ impl OrderDao for MemoryOrderDao {
         }
         order.order.status = status;
         order.order.updated_at = timestamp(OffsetDateTime::now_utc());
+        // Mirrors the Postgres transition: a paid contextual order enters the
+        // attribution outbox exactly once, in the same step that flips the
+        // state. Unattributed carts never enqueue.
+        self.mirror_purchase_outbox(&order.order).await;
         Ok(order.order.clone())
     }
     async fn merchant_orders(
@@ -342,5 +389,20 @@ impl OrderDao for MemoryOrderDao {
         item.status = pb::AffiliateSettlementStatus::Settled as i32;
         item.settled_at = Some(timestamp(OffsetDateTime::now_utc()));
         Ok(item.clone())
+    }
+    async fn reverse_affiliate(&self, order_id: &str) -> Result<pb::AffiliateSettlement, DaoError> {
+        let mut settlements = self.settlements.write().await;
+        let item = settlements
+            .get_mut(order_id)
+            .ok_or_else(|| DaoError::NotFound(order_id.to_string()))?;
+        match pb::AffiliateSettlementStatus::try_from(item.status).ok() {
+            Some(pb::AffiliateSettlementStatus::Eligible) => {
+                item.status = pb::AffiliateSettlementStatus::Reversed as i32;
+                item.settled_at = None;
+                Ok(item.clone())
+            }
+            Some(pb::AffiliateSettlementStatus::Reversed) => Ok(item.clone()),
+            _ => Err(DaoError::State("settlement is not reversible".to_string())),
+        }
     }
 }

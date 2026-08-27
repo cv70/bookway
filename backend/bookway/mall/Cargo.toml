@@ -8,11 +8,14 @@ rust-version.workspace = true
 [dependencies]
 bookway-mall-api.workspace = true
 bookway-bbs-link-api.workspace = true
+bookway-knowledge-catalog-api.workspace = true
 async-trait.workspace = true
 bookway-api.workspace = true
+bookway-cache.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
 prost.workspace = true
+redis.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -21,6 +24,7 @@ time.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 

@@ -2,11 +2,11 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   affiliateSettlements,
   AffiliateRule,
+  AffiliateSettlement,
   initialAffiliateRules,
   initialOffers,
   initialOrders,
   initialProducts,
-  initialSettlements,
   Order,
   Product,
   productImages,
@@ -22,6 +22,7 @@ import {
   AdminApiError,
 } from "../lib/adminApi";
 import {
+  affiliateFromMall,
   createMallProduct,
   productFromMall,
   productsFromMall,
@@ -61,13 +62,21 @@ export function useMerchantAdmin(notify: (message: string) => void) {
     "local" | "loading" | "ready" | "auth" | "error"
   >(isMerchantAdminApiConfigured() ? "loading" : "local");
   const [remoteMessage, setRemoteMessage] = useState("");
-  const settlements = initialSettlements;
+  // The affiliate settlement ledger is authoritative on the backend; seeds
+  // only exist for the local sandbox mode and are replaced on remote load.
+  const [affiliateRows, setAffiliateRows] = useState<AffiliateSettlement[]>(
+    affiliateSettlements,
+  );
 
   useEffect(() => {
     if (!isMerchantAdminApiConfigured()) return;
     let cancelled = false;
-    Promise.all([merchantAdminApi.listProducts(), merchantAdminApi.listOrders()])
-      .then(([catalog, remoteOrders]) => {
+    Promise.all([
+      merchantAdminApi.listProducts(),
+      merchantAdminApi.listOrders(),
+      merchantAdminApi.listAffiliateSettlements(),
+    ])
+      .then(([catalog, remoteOrders, remoteSettlements]) => {
         if (cancelled) return;
         setProducts(productsFromMall(catalog.items));
         setOrders(
@@ -87,6 +96,7 @@ export function useMerchantAdmin(notify: (message: string) => void) {
             tracking: order.tracking_number || undefined,
           })),
         );
+        setAffiliateRows(remoteSettlements.items.map(affiliateFromMall));
         setRemoteStatus("ready");
         setRemoteMessage("");
       })
@@ -103,7 +113,7 @@ export function useMerchantAdmin(notify: (message: string) => void) {
     return () => {
       cancelled = true;
     };
-  }, [setProducts, setOrders]);
+  }, [setProducts, setOrders, setAffiliateRows]);
 
   useEffect(() => {
     setProducts((current) => {
@@ -265,39 +275,66 @@ export function useMerchantAdmin(notify: (message: string) => void) {
     }
     closeProductDialog();
   };
-  const adjustStock = (event: FormEvent<HTMLFormElement>) => {
+  // Stock management submits the target saleable count directly, matching the
+  // inventory service's absolute SetStock semantics: no read-modify-write
+  // race, and concurrent reservations can reject an over-reduction.
+  const adjustStock = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const requestedQuantity = Number(data.get("quantity"));
+    const targetStock = Number(data.get("target_stock"));
     const sku = String(data.get("sku"));
     const product = products.find((item) => item.sku === sku);
     const reason = String(data.get("reason") || "其他");
-    const quantity =
-      data.get("direction") === "out" ? -requestedQuantity : requestedQuantity;
     if (
       !product ||
-      !Number.isInteger(requestedQuantity) ||
-      requestedQuantity < 1
+      !Number.isInteger(targetStock) ||
+      targetStock < 0
     ) {
-      notify("请输入有效的调整数量。");
+      notify("请输入有效的目标可售数量。");
       return;
     }
-    if (product.stock + quantity < 0) {
-      notify("扣减数量超过当前可售库存，无法完成调整。");
+    const quantity = targetStock - product.stock;
+    if (quantity === 0) {
+      setShowStockForm(false);
+      notify(`“${product.name}”可售库存未变化。`);
       return;
     }
-    setProducts((current) =>
-      current.map((item) =>
-        item.sku === sku ? { ...item, stock: item.stock + quantity } : item,
-      ),
-    );
+    if (isMerchantAdminApiConfigured()) {
+      try {
+        const remote = await merchantAdminApi.setSkuStock(
+          product.skuId,
+          targetStock,
+        );
+        setProducts((current) =>
+          current.map((item) =>
+            item.sku === sku ? { ...item, stock: remote.available } : item,
+          ),
+        );
+        setRemoteStatus("ready");
+      } catch (error) {
+        const apiError = error instanceof AdminApiError ? error : undefined;
+        setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
+        setRemoteMessage(apiError?.message || "库存同步失败，请稍后重试。");
+        notify(
+          apiError?.message ||
+            "库存调整被库存服务拒绝（可能低于订单预占），请稍后重试。",
+        );
+        return;
+      }
+    } else {
+      setProducts((current) =>
+        current.map((item) =>
+          item.sku === sku ? { ...item, stock: targetStock } : item,
+        ),
+      );
+    }
     setStockAdjustments((current) =>
       [
         {
           id: `ADJ-${Date.now()}`,
           sku,
-          product: product?.name || "商品",
-          warehouse: product?.warehouse || "北京中心仓",
+          product: product.name,
+          warehouse: product.warehouse || "北京中心仓",
           quantity,
           reason,
           createdAt: new Date().toLocaleString("zh-CN", { hour12: false }),
@@ -333,6 +370,46 @@ export function useMerchantAdmin(notify: (message: string) => void) {
     );
     setShippingOrder(null);
     notify(`订单 ${shippingOrder.id} 已发货，物流单号 ${tracking}。`);
+  };
+  // Payout settles an eligible creator share through the mall-order ledger.
+  // The backend is idempotent on replays and rejects non-eligible rows with
+  // FailedPrecondition; the local guard only avoids futile calls.
+  const payAffiliate = async (settlementId: string) => {
+    const target = affiliateRows.find((item) => item.id === settlementId);
+    if (!target) {
+      notify("未找到该分账单。");
+      return;
+    }
+    if (target.status !== "待结算") {
+      notify(`该笔分账当前为“${target.status}”，无法打款。`);
+      return;
+    }
+    if (isMerchantAdminApiConfigured()) {
+      try {
+        const remote = await merchantAdminApi.settleAffiliate(settlementId);
+        setAffiliateRows((current) =>
+          current.map((item) =>
+            item.id === settlementId ? affiliateFromMall(remote) : item,
+          ),
+        );
+        setRemoteStatus("ready");
+        notify(`分账单 ${remote.id} 已完成打款。`);
+      } catch (error) {
+        const apiError = error instanceof AdminApiError ? error : undefined;
+        setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
+        setRemoteMessage(apiError?.message || "打款失败，请稍后重试。");
+        notify(apiError?.message || "打款失败，请稍后重试。");
+      }
+      return;
+    }
+    setAffiliateRows((current) =>
+      current.map((item) =>
+        item.id === settlementId
+          ? { ...item, status: "已结算", date: new Date().toISOString() }
+          : item,
+      ),
+    );
+    notify("分账单已完成打款（本地演示）。");
   };
   const toggleOffer = (id: string) => {
     const target = offers.find((offer) => offer.id === id);
@@ -440,52 +517,17 @@ export function useMerchantAdmin(notify: (message: string) => void) {
         order.tracking || "",
       ]),
     );
-  const exportSettlements = () =>
-    downloadCsv(
-      "bookway-settlements.csv",
-      [
-        "结算单",
-        "周期",
-        "订单成交",
-        "平台与分账",
-        "应付金额",
-        "状态",
-        "到账时间",
-      ],
-      settlements.map((item) => [
-        item.id,
-        item.period,
-        item.gross,
-        item.commission,
-        item.payable,
-        item.status,
-        item.date,
-      ]),
-    );
   const exportAffiliates = () =>
     downloadCsv(
       "bookway-affiliate-settlements.csv",
-      [
-        "分账单",
-        "创作者",
-        "路线",
-        "行动节点",
-        "场景装备",
-        "成交订单",
-        "分账比例",
-        "应付金额",
-        "状态",
-      ],
-      affiliateSettlements.map((item) => [
+      ["分账单", "订单", "创作者", "应付金额", "状态", "时间"],
+      affiliateRows.map((item) => [
         item.id,
+        item.order_id,
         item.creator,
-        item.route,
-        item.node,
-        item.equipment,
-        String(item.orders),
-        item.rate,
         item.payable,
         item.status,
+        item.date,
       ]),
     );
   const addAffiliateRule = (rule: Omit<AffiliateRule, "id">) => {
@@ -542,8 +584,7 @@ export function useMerchantAdmin(notify: (message: string) => void) {
     products,
     offers,
     stockAdjustments,
-    settlements,
-    affiliateSettlements,
+    affiliateSettlements: affiliateRows,
     affiliateRules,
     filteredProducts,
     filteredOrders,
@@ -575,8 +616,8 @@ export function useMerchantAdmin(notify: (message: string) => void) {
     createOffer,
     removeOffer,
     exportOrders,
-    exportSettlements,
     exportAffiliates,
+    payAffiliate,
     addAffiliateRule,
     toggleAffiliateRule,
     removeAffiliateRule,

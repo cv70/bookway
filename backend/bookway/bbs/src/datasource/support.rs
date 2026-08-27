@@ -1,19 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    sync::{Arc, Weak},
-    time::Duration,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
-use prost::Message;
 use redis::aio::ConnectionManager;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::{
-    sync::{Mutex, RwLock},
-    time::sleep,
-};
+use tokio::sync::RwLock;
 
 use crate::api::pb;
 
@@ -25,6 +20,8 @@ pub(crate) enum DaoError {
     Database(#[source] sqlx::Error),
     #[error("timestamp formatting failed: {0}")]
     Timestamp(#[from] time::error::Format),
+    #[error("stored timestamp failed to parse: {0}")]
+    TimestampParse(#[from] time::error::Parse),
     #[error("relationship cache refresh is in progress")]
     CachePeerRefresh,
 }
@@ -40,6 +37,29 @@ pub(crate) trait BbsDao: Send + Sync {
         edge: pb::SocialEdgeType,
         active: bool,
     ) -> Result<pb::SocialContext, DaoError>;
+    /// Keyset page of a user's followers: the newest follows first, resuming
+    /// strictly after `before` when present. A structured cursor (not an
+    /// offset) keeps pages stable while new follows stream in at the head.
+    async fn list_followers(
+        &self,
+        user_id: &str,
+        before: Option<KeysetCursor>,
+        limit: u32,
+    ) -> Result<Vec<FollowedEdge>, DaoError>;
+    /// Keyset page of a route's public co-walkers: active participants other
+    /// than the viewer, minus the viewer's visibility exclusions (blocks in
+    /// either direction plus outgoing mutes, resolved by the domain).
+    async fn list_route_peers(
+        &self,
+        route_id: &str,
+        viewer_id: &str,
+        excluded_user_ids: &[String],
+        before: Option<KeysetCursor>,
+        limit: u32,
+    ) -> Result<Vec<PeerEdge>, DaoError>;
+    /// Live follower/following counts for one user. Cheap enough to serve
+    /// without a dedicated counter table; caching happens in the wrapper.
+    async fn social_stats(&self, user_id: &str) -> Result<(u64, u64), DaoError>;
     async fn list_route_participations(
         &self,
         user_id: &str,
@@ -59,62 +79,77 @@ pub(crate) trait BbsDao: Send + Sync {
     ) -> Result<pb::RouteParticipationState, DaoError>;
 }
 
-const RELATIONSHIP_CACHE_TTL_SECONDS: usize = 30;
+/// Resume position for a keyset page over `(time, id)` pairs: everything at or
+/// before this instant and id has already been served.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct KeysetCursor {
+    pub(crate) at: time::OffsetDateTime,
+    pub(crate) id: String,
+}
+
+/// One inbound follow edge with its commit time.
+#[derive(Debug, Clone)]
+pub(crate) struct FollowedEdge {
+    pub(crate) follower_id: String,
+    pub(crate) followed_at: time::OffsetDateTime,
+}
+
+/// One active route participation with its join time.
+#[derive(Debug, Clone)]
+pub(crate) struct PeerEdge {
+    pub(crate) user_id: String,
+    pub(crate) joined_at: time::OffsetDateTime,
+}
+
+const RELATIONSHIP_CACHE_TTL_SECONDS: u64 = 30;
 // The version must outlive a cache entry so a stale payload cannot become
 // valid after a write. It still expires to avoid one permanent Redis key per
 // historical user.
-const RELATIONSHIP_VERSION_TTL_SECONDS: usize = 120;
+const RELATIONSHIP_VERSION_TTL_SECONDS: u64 = 120;
 const RELATIONSHIP_REFRESH_LOCK_TTL_MS: usize = 2_000;
 const RELATIONSHIP_REFRESH_LOCK_WAIT_MS: u64 = 80;
 const RELATIONSHIP_REFRESH_LOCK_POLL_MS: u64 = 10;
-const RELEASE_REFRESH_LOCK: &str = r#"
-if redis.call('get', KEYS[1]) == ARGV[1] then
-  return redis.call('del', KEYS[1])
-end
-return 0
-"#;
-const STORE_IF_VERSION_UNCHANGED: &str = r#"
-local current = redis.call('get', KEYS[1])
-if not current then
-  current = '0'
-  redis.call('set', KEYS[1], current, 'EX', ARGV[4])
-end
-if current ~= ARGV[1] then
-  return 0
-end
-redis.call('set', KEYS[2], ARGV[2], 'EX', ARGV[3])
-redis.call('expire', KEYS[1], ARGV[4])
-return 1
-"#;
-const INVALIDATE_CACHE: &str = r#"
-redis.call('incr', KEYS[1])
-redis.call('expire', KEYS[1], ARGV[1])
-return redis.call('del', KEYS[2])
-"#;
 
-struct RedisRefreshLease {
-    manager: ConnectionManager,
-    key: String,
-    token: String,
+/// Both relationship caches stamp payloads with the user's invalidation
+/// counter and serve them only while the stamp matches, so a committed block
+/// or mute retires cached visibility immediately. Construction, tuning, and
+/// the Redis-fail-open rules live in `bookway_cache::VersionedCache`.
+fn relationship_cache<M>(
+    redis: Option<ConnectionManager>,
+    kind: &str,
+) -> bookway_cache::VersionedCache<M>
+where
+    M: prost::Message + Default + Clone,
+{
+    bookway_cache::VersionedCache::new(
+        redis,
+        &format!("bookway:bbs:{kind}"),
+        RELATIONSHIP_CACHE_TTL_SECONDS,
+        RELATIONSHIP_VERSION_TTL_SECONDS,
+    )
+    .with_refresh_tuning(
+        RELATIONSHIP_REFRESH_LOCK_WAIT_MS,
+        RELATIONSHIP_REFRESH_LOCK_POLL_MS,
+        RELATIONSHIP_REFRESH_LOCK_TTL_MS,
+    )
 }
 
-impl RedisRefreshLease {
-    async fn release(self) {
-        let mut manager = self.manager;
-        let result: redis::RedisResult<i32> = redis::Script::new(RELEASE_REFRESH_LOCK)
-            .key(self.key)
-            .arg(self.token)
-            .invoke_async(&mut manager)
-            .await;
-        if let Err(error) = result {
-            tracing::debug!(%error, "bbs relationship refresh lease release degraded");
-        }
-    }
+pub(crate) fn relationship_context_cache(
+    redis: Option<ConnectionManager>,
+) -> bookway_cache::VersionedCache<pb::SocialContext> {
+    relationship_cache(redis, "context")
 }
 
-enum RefreshLeaseDecision {
-    Owned(Option<RedisRefreshLease>),
-    Peer,
+pub(crate) fn relationship_visibility_cache(
+    redis: Option<ConnectionManager>,
+) -> bookway_cache::VersionedCache<pb::SocialVisibility> {
+    relationship_cache(redis, "visibility")
+}
+
+pub(crate) fn relationship_stats_cache(
+    redis: Option<ConnectionManager>,
+) -> bookway_cache::VersionedCache<pb::SocialStats> {
+    relationship_cache(redis, "stats")
 }
 
 /// Redis is an acceleration and coordination layer only. The wrapped
@@ -127,31 +162,13 @@ fn relationship_identity(user_id: &str) -> String {
         .collect()
 }
 
-fn relationship_cache_key(kind: &str, user_id: &str) -> String {
-    format!("bookway:bbs:{kind}:{}", relationship_identity(user_id))
-}
-
-fn relationship_version_key(kind: &str, user_id: &str) -> String {
-    format!(
-        "bookway:bbs:{kind}:version:{}",
-        relationship_identity(user_id)
-    )
-}
-
-fn relationship_refresh_key(kind: &str, user_id: &str) -> String {
-    format!(
-        "bookway:bbs:{kind}:refresh:{}",
-        relationship_identity(user_id)
-    )
-}
-
 fn command_is_accepted(current_version: u64, incoming_version: Option<u64>) -> bool {
     incoming_version
         .map(|version| version >= current_version)
         .unwrap_or(current_version == 0)
 }
 
-fn format_timestamp(value: time::OffsetDateTime) -> Result<String, time::error::Format> {
+pub(crate) fn format_timestamp(value: time::OffsetDateTime) -> Result<String, time::error::Format> {
     value.format(&time::format_description::well_known::Rfc3339)
 }
 
@@ -171,13 +188,12 @@ fn ordered_social_pair<'a>(first: &'a str, second: &'a str) -> (&'a str, &'a str
     }
 }
 
-fn targets(
-    edges: &HashSet<(String, String, pb::SocialEdgeType)>,
+fn targets<'a>(
+    edges: impl Iterator<Item = &'a (String, String, pb::SocialEdgeType)>,
     user_id: &str,
     edge_type: pb::SocialEdgeType,
 ) -> Vec<String> {
     edges
-        .iter()
         .filter(|(source, _, edge)| source == user_id && *edge == edge_type)
         .map(|(_, target, _)| target.clone())
         .collect()
@@ -187,7 +203,9 @@ fn targets(
 mod tests {
     use std::sync::Arc;
 
-    use super::{BbsDao, CachedBbsDao, MemoryBbsDao, ordered_social_pair, relationship_cache_key};
+    use super::{
+        BbsDao, CachedBbsDao, MemoryBbsDao, ordered_social_pair, relationship_identity,
+    };
 
     #[test]
     fn social_pair_lock_has_one_key_for_both_directions() {
@@ -199,8 +217,8 @@ mod tests {
 
     #[test]
     fn relationship_cache_keys_do_not_expose_user_ids() {
-        let first = relationship_cache_key("context", "user-a");
-        let second = relationship_cache_key("context", "user-b");
+        let first = relationship_identity("user-a");
+        let second = relationship_identity("user-b");
         assert_ne!(first, second);
         assert!(!first.contains("user-a"));
         assert!(!second.contains("user-b"));

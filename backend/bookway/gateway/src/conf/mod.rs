@@ -27,6 +27,7 @@ pub(crate) struct Config {
     pub(crate) ad_center_url: String,
     pub(crate) ad_main_url: String,
     pub(crate) mall_url: String,
+    pub(crate) mall_inventory_url: String,
     pub(crate) mall_order_url: String,
     pub(crate) cors_allowed_origins: Vec<HeaderValue>,
 }
@@ -56,6 +57,7 @@ impl Config {
             ad_center_url: grpc_url("AD_CENTER_GRPC_URL", "http://127.0.0.1:8097"),
             ad_main_url: grpc_url("AD_MAIN_GRPC_URL", "http://127.0.0.1:8100"),
             mall_url: grpc_url("MALL_GRPC_URL", "http://127.0.0.1:8101"),
+            mall_inventory_url: grpc_url("MALL_INVENTORY_GRPC_URL", "http://127.0.0.1:8102"),
             mall_order_url: grpc_url("MALL_ORDER_GRPC_URL", "http://127.0.0.1:8103"),
             cors_allowed_origins: cors_allowed_origins()?,
         })

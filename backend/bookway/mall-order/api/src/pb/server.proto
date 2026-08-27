@@ -112,6 +112,11 @@ message AffiliateSettlementListResponse {
 }
 message SettleAffiliateRequest { string merchant_id = 1; string settlement_id = 2; }
 
+// Refund-path entry point: reverses the affiliate share of an order whose
+// payment is being returned. Idempotent — replaying a reversal returns the
+// already reversed settlement.
+message ReverseAffiliateRequest { string order_id = 1; }
+
 service MallOrder {
   rpc Create(CreateRequest) returns (Order);
   rpc List(UserRequest) returns (OrderListResponse);
@@ -123,4 +128,7 @@ service MallOrder {
   rpc UpdateFulfillment(UpdateFulfillmentRequest) returns (Order);
   rpc AffiliateSettlements(AffiliateSettlementRequest) returns (AffiliateSettlementListResponse);
   rpc SettleAffiliate(SettleAffiliateRequest) returns (AffiliateSettlement);
+  // Service-to-service hook for the future refund money channel. Reversing is
+  // an internal ledger fact, not a merchant dashboard action.
+  rpc ReverseAffiliate(ReverseAffiliateRequest) returns (AffiliateSettlement);
 }

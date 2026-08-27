@@ -211,6 +211,11 @@ pub enum SearchType {
     Users = 3,
     Topics = 4,
     Resources = 5,
+    /// Entity-level search over public route action nodes. Hits are typed as
+    /// ACTION_NODE results that still carry their enclosing route card.
+    Nodes = 6,
+    /// Entity-level search over scene equipment referenced by route nodes.
+    Equipment = 7,
 }
 impl SearchType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -225,6 +230,8 @@ impl SearchType {
             Self::Users => "SEARCH_TYPE_USERS",
             Self::Topics => "SEARCH_TYPE_TOPICS",
             Self::Resources => "SEARCH_TYPE_RESOURCES",
+            Self::Nodes => "SEARCH_TYPE_NODES",
+            Self::Equipment => "SEARCH_TYPE_EQUIPMENT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -236,6 +243,8 @@ impl SearchType {
             "SEARCH_TYPE_USERS" => Some(Self::Users),
             "SEARCH_TYPE_TOPICS" => Some(Self::Topics),
             "SEARCH_TYPE_RESOURCES" => Some(Self::Resources),
+            "SEARCH_TYPE_NODES" => Some(Self::Nodes),
+            "SEARCH_TYPE_EQUIPMENT" => Some(Self::Equipment),
             _ => None,
         }
     }
@@ -250,6 +259,12 @@ pub enum SearchResultType {
     Topic = 3,
     Resource = 4,
     Ad = 5,
+    /// One route action node matched by title/detail/id. The Journey card stays
+    /// available through the post field for scene-aware commerce linking.
+    ActionNode = 6,
+    /// One (route node, equipment) match. Equipment has no standalone identity,
+    /// so the result ID is "<content-id>/<action-id>/equipment/<name>".
+    SceneEquipment = 7,
 }
 impl SearchResultType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -264,6 +279,8 @@ impl SearchResultType {
             Self::Topic => "SEARCH_RESULT_TYPE_TOPIC",
             Self::Resource => "SEARCH_RESULT_TYPE_RESOURCE",
             Self::Ad => "SEARCH_RESULT_TYPE_AD",
+            Self::ActionNode => "SEARCH_RESULT_TYPE_ACTION_NODE",
+            Self::SceneEquipment => "SEARCH_RESULT_TYPE_SCENE_EQUIPMENT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -275,6 +292,8 @@ impl SearchResultType {
             "SEARCH_RESULT_TYPE_TOPIC" => Some(Self::Topic),
             "SEARCH_RESULT_TYPE_RESOURCE" => Some(Self::Resource),
             "SEARCH_RESULT_TYPE_AD" => Some(Self::Ad),
+            "SEARCH_RESULT_TYPE_ACTION_NODE" => Some(Self::ActionNode),
+            "SEARCH_RESULT_TYPE_SCENE_EQUIPMENT" => Some(Self::SceneEquipment),
             _ => None,
         }
     }

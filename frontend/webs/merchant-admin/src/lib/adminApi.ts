@@ -92,6 +92,13 @@ export type AffiliateSettlement = {
   settled_at?: string;
 };
 
+export type InventoryItem = {
+  sku_id: string;
+  available: number;
+  reserved: number;
+  updated_at: string;
+};
+
 const gatewayUrl = import.meta.env.VITE_GATEWAY_URL?.replace(/\/$/, "");
 
 export const isMerchantAdminApiConfigured = () => Boolean(gatewayUrl);
@@ -169,5 +176,22 @@ export const merchantAdminApi = {
   listAffiliateSettlements: () =>
     request<{ items: AffiliateSettlement[] }>(
       "/v1/admin/mall/affiliate-settlements?limit=100",
+    ),
+  // Settles an eligible affiliate share; replays are idempotent on the
+  // backend and a non-eligible row comes back as FailedPrecondition.
+  settleAffiliate: (settlementId: string) =>
+    request<AffiliateSettlement>(
+      `/v1/admin/mall/affiliate-settlements/${encodeURIComponent(settlementId)}/settle`,
+      { method: "POST" },
+    ),
+  // Absolute saleable count; the backend rejects reductions below the
+  // reserved quantity and returns the authoritative inventory row.
+  setSkuStock: (skuId: string, available: number) =>
+    request<InventoryItem>(
+      `/v1/admin/mall/skus/${encodeURIComponent(skuId)}/stock`,
+      {
+        method: "POST",
+        body: JSON.stringify({ available }),
+      },
     ),
 };

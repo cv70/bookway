@@ -28,6 +28,8 @@ export type AdCampaign = {
   image_url: string;
   landing_url: string;
   target_domains: string[];
+  geo_regions: string[];
+  device_os: string[];
   status: number;
   pricing_model: number;
   bid_micros: number;
@@ -51,6 +53,8 @@ export type UpdateAdCampaign = Partial<
     | "image_url"
     | "landing_url"
     | "target_domains"
+    | "geo_regions"
+    | "device_os"
     | "status"
     | "bid_micros"
     | "daily_budget_micros"
@@ -60,6 +64,20 @@ export type UpdateAdCampaign = Partial<
     | "global_frequency_cap"
   >
 >;
+
+// Platform guardrails that actually exist server-side; writes are limited to
+// platform admins by the gateway.
+export type AdGuardrails = { user_daily_total_cap: number };
+
+// Daily ledger rows from ad_campaign_daily_stats.
+export type AdDeliveryReportRow = {
+  campaign_id: string;
+  stat_date: string;
+  impressions: number;
+  clicks: number;
+  spent_micros: number;
+};
+export type AdDeliveryReport = { rows: AdDeliveryReportRow[] };
 
 const gatewayUrl = import.meta.env.VITE_GATEWAY_URL?.replace(/\/$/, "");
 
@@ -111,4 +129,14 @@ export const adAdminApi = {
       method: "PATCH",
       body: JSON.stringify(campaign),
     }),
+  getGuardrails: () => request<AdGuardrails>("/v1/admin/ads/guardrails"),
+  setUserDailyTotalCap: (cap: number) =>
+    request<AdGuardrails>("/v1/admin/ads/guardrails", {
+      method: "PATCH",
+      body: JSON.stringify({ user_daily_total_cap: cap }),
+    }),
+  deliveryReport: (fromDate: string, toDate: string) =>
+    request<AdDeliveryReport>(
+      `/v1/admin/ads/reports?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}`,
+    ),
 };

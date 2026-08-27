@@ -66,7 +66,8 @@ async fn run_once(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("mall-order-expirer");
     let config = Config::from_env()?;
-    let mut client = MallOrderClient::connect(config.mall_order_url.clone()).await?;
+    let channel = bookway_runtime::grpc_channel(&config.mall_order_url).await?;
+    let mut client = MallOrderClient::new(channel);
     loop {
         match run_once(&mut client, config.batch_size).await {
             Ok(result) if result.scanned == 0 => tokio::time::sleep(config.idle_interval).await,

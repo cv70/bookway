@@ -133,9 +133,10 @@ struct BbsGrpcTarget {
 }
 
 impl BbsGrpcTarget {
-    async fn connect(address: String) -> Result<Self, tonic::transport::Error> {
+    async fn connect(address: String) -> Result<Self, Box<dyn std::error::Error>> {
+        let channel = bookway_runtime::grpc_channel(&address).await?;
         Ok(Self {
-            client: bookway_bbs_api::pb::bbs_client::BbsClient::connect(address).await?,
+            client: bookway_bbs_api::pb::bbs_client::BbsClient::new(channel),
         })
     }
 }

@@ -1,10 +1,19 @@
 use super::*;
 
+use std::{
+    sync::{Arc, Weak},
+    time::Duration,
+};
+use tokio::time::sleep;
+
 #[derive(Clone)]
 pub(crate) struct RedisInventoryDao {
     postgres: PostgresInventoryDao,
     redis: ConnectionManager,
     cache_ttl_seconds: u64,
+    // Coalesce concurrent cache misses for the same SKU before they reach
+    // PostgreSQL. Weak references keep this map bounded by active readers.
+    stock_miss_locks: Arc<Mutex<std::collections::HashMap<String, Weak<Mutex<()>>>>>,
 }
 
 #[async_trait]
@@ -18,7 +27,39 @@ impl InventoryDao for RedisInventoryDao {
     }
 
     async fn stock(&self, sku_id: &str) -> Result<pb::InventoryItem, DaoError> {
-        self.postgres.stock(sku_id).await
+        if let Some(stock) = self.load_cached_stock(sku_id).await {
+            return Ok(stock);
+        }
+
+        let local = self.stock_miss_lock(sku_id).await;
+        if let Some(stock) = self.load_cached_stock(sku_id).await {
+            return Ok(stock);
+        }
+
+        // A short distributed lease prevents every inventory instance from
+        // refreshing the same cold SKU simultaneously. A peer that owns the
+        // lease gets a bounded chance to publish the value; if it does not,
+        // this request still falls back to the durable source of truth.
+        let lease = self.acquire_stock_refresh_lease(sku_id).await;
+        if lease.is_peer() {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(80);
+            while tokio::time::Instant::now() < deadline {
+                sleep(Duration::from_millis(10)).await;
+                if let Some(stock) = self.load_cached_stock(sku_id).await {
+                    return Ok(stock);
+                }
+            }
+        }
+
+        let result = self.postgres.stock(sku_id).await;
+        if let Ok(stock) = &result
+            && let Err(error) = self.cache_stock(stock).await
+        {
+            tracing::debug!(%error, sku_id, "inventory stock cache write degraded");
+        }
+        lease.release().await;
+        drop(local);
+        result
     }
 
     async fn reserve(&self, request: pb::ReserveRequest) -> Result<pb::Reservation, DaoError> {
@@ -155,6 +196,66 @@ impl RedisInventoryDao {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(DEFAULT_REDIS_CACHE_TTL_SECONDS)
                 .clamp(30, 3_600),
+            stock_miss_locks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    async fn stock_miss_lock(&self, sku_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.stock_miss_locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            locks
+                .get(sku_id)
+                .and_then(Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let lock = Arc::new(Mutex::new(()));
+                    locks.insert(sku_id.to_string(), Arc::downgrade(&lock));
+                    lock
+                })
+        };
+        lock.lock_owned().await
+    }
+
+    async fn load_cached_stock(&self, sku_id: &str) -> Option<pb::InventoryItem> {
+        let mut redis = self.redis.clone();
+        let value: redis::RedisResult<Option<String>> = redis::cmd("GET")
+            .arg(stock_cache_key(sku_id))
+            .query_async(&mut redis)
+            .await;
+        let value = match value {
+            Ok(Some(value)) => value,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!(%error, sku_id, "inventory stock cache read degraded");
+                return None;
+            }
+        };
+        let stock = stock_from_cache_value(sku_id, &value);
+        if stock.is_none() {
+            tracing::warn!(sku_id, "inventory stock cache payload invalid");
+        }
+        stock
+    }
+
+    async fn acquire_stock_refresh_lease(&self, sku_id: &str) -> StockRefreshLease {
+        let key = format!("bookway:inventory:stock-refresh:{sku_id}");
+        let token = format!("{}-{}", std::process::id(), uuid::Uuid::now_v7());
+        let mut redis = self.redis.clone();
+        match redis::cmd("SET")
+            .arg(&key)
+            .arg(&token)
+            .arg("NX")
+            .arg("PX")
+            .arg(STOCK_REFRESH_LOCK_TTL_MS)
+            .query_async::<Option<String>>(&mut redis)
+            .await
+        {
+            Ok(Some(_)) => StockRefreshLease::Owned { redis, key, token },
+            Ok(None) => StockRefreshLease::Peer,
+            Err(error) => {
+                tracing::debug!(%error, sku_id, "inventory stock refresh lease degraded");
+                StockRefreshLease::Uncoordinated
+            }
         }
     }
 
@@ -280,17 +381,103 @@ impl RedisInventoryDao {
 
     async fn clear_expiry_cache(&self) -> redis::RedisResult<()> {
         let mut redis = self.redis.clone();
-        let (_, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(0)
-            .arg("MATCH")
-            .arg("bookway:inventory:stock:*")
-            .arg("COUNT")
-            .arg(EXPIRY_SWEEP_LIMIT)
-            .query_async(&mut redis)
-            .await?;
-        if keys.is_empty() {
-            return Ok(());
+        // SCAN is incremental and may return only one batch even when the
+        // database sweep touched more SKUs than the configured count. Drain
+        // the full cursor so an expiry pass cannot leave stale reservations
+        // cached indefinitely behind the first batch.
+        let mut cursor = 0_u64;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("bookway:inventory:stock:*")
+                .arg("COUNT")
+                .arg(EXPIRY_SWEEP_LIMIT)
+                .query_async(&mut redis)
+                .await?;
+            if !keys.is_empty() {
+                let _: () = redis::cmd("DEL").arg(keys).query_async(&mut redis).await?;
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
         }
-        redis::cmd("DEL").arg(keys).query_async(&mut redis).await
+        Ok(())
+    }
+}
+
+fn stock_from_cache_value(sku_id: &str, value: &str) -> Option<pb::InventoryItem> {
+    let (available, reserved) = value.split_once(':')?;
+    let available = available.parse::<i64>().ok()?;
+    let reserved = reserved.parse::<i64>().ok()?;
+    (available >= 0 && reserved >= 0 && reserved <= available).then(|| pb::InventoryItem {
+        sku_id: sku_id.to_string(),
+        available,
+        reserved,
+        // The compact Lua payload intentionally omits a mutable timestamp;
+        // callers receive the read time rather than an invented durable
+        // update time.
+        updated_at: timestamp(time::OffsetDateTime::now_utc()),
+    })
+}
+
+const STOCK_REFRESH_LOCK_TTL_MS: usize = 2_000;
+const RELEASE_STOCK_REFRESH_LOCK: &str = r#"
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end
+return 0
+"#;
+
+enum StockRefreshLease {
+    Owned {
+        redis: ConnectionManager,
+        key: String,
+        token: String,
+    },
+    Peer,
+    Uncoordinated,
+}
+
+impl StockRefreshLease {
+    fn is_peer(&self) -> bool {
+        matches!(self, Self::Peer)
+    }
+
+    async fn release(self) {
+        let Self::Owned {
+            mut redis,
+            key,
+            token,
+        } = self
+        else {
+            return;
+        };
+        let result: redis::RedisResult<i32> = redis::Script::new(RELEASE_STOCK_REFRESH_LOCK)
+            .key(key)
+            .arg(token)
+            .invoke_async(&mut redis)
+            .await;
+        if let Err(error) = result {
+            tracing::debug!(%error, "inventory stock refresh lease release degraded");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stock_from_cache_value;
+
+    #[test]
+    fn stock_cache_reads_only_consistent_snapshots() {
+        let stock = stock_from_cache_value("sku-1", "12:3").expect("valid cache snapshot");
+        assert_eq!(stock.sku_id, "sku-1");
+        assert_eq!(stock.available, 12);
+        assert_eq!(stock.reserved, 3);
+        assert!(!stock.updated_at.is_empty());
+        assert!(stock_from_cache_value("sku-1", "12:13").is_none());
+        assert!(stock_from_cache_value("sku-1", "-1:0").is_none());
+        assert!(stock_from_cache_value("sku-1", "not-a-stock-value").is_none());
     }
 }

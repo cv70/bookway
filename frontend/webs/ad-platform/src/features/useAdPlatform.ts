@@ -14,6 +14,14 @@ import { readAsset, useStoredState } from "../lib/storage";
 import { AdminApiError, adAdminApi, isAdAdminApiConfigured } from "../lib/adminApi";
 import { campaignsFromRemote, updateRemoteCampaign } from "../lib/adminMappers";
 
+// Mirrors the backend targeting normal form: trimmed, lower-cased slugs,
+// blanks dropped. The server still revalidates shape and bounds.
+const parseTargeting = (value: FormDataEntryValue | null) =>
+  String(value ?? "")
+    .split(/[,，、\s]+/)
+    .map((slug) => slug.trim().toLowerCase())
+    .filter(Boolean);
+
 export function useAdPlatform(notify: (message: string) => void) {
   const [campaigns, setCampaigns] = useStoredState<Campaign[]>(
     "ad-campaigns-v5",
@@ -27,8 +35,9 @@ export function useAdPlatform(notify: (message: string) => void) {
     "ad-scenes-v5",
     sceneSeed,
   );
-  const [guardrails, setGuardrails] = useStoredState<DeliveryGuardrails>(
-    "ad-delivery-guardrails-v1",
+  // Server guardrails; seeds only until the gateway answers (or when no
+  // gateway is configured, where the sandbox value matches migration 0078).
+  const [guardrails, setGuardrails] = useState<DeliveryGuardrails>(
     guardrailSeed,
   );
   const [query, setQuery] = useState("");
@@ -65,6 +74,23 @@ export function useAdPlatform(notify: (message: string) => void) {
       cancelled = true;
     };
   }, [setCampaigns]);
+
+  useEffect(() => {
+    if (!isAdAdminApiConfigured()) return;
+    let cancelled = false;
+    adAdminApi
+      .getGuardrails()
+      .then(({ user_daily_total_cap }) => {
+        if (cancelled) return;
+        setGuardrails({ userDailyCap: user_daily_total_cap });
+      })
+      .catch(() => {
+        // Keep the seeded default; the authoritative cap stays server-side.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const sceneBindings: ActionNodeBinding[] = scenes.map((scene) => ({
     id: scene.id,
@@ -189,16 +215,30 @@ export function useAdPlatform(notify: (message: string) => void) {
     );
     const creativeName = String(data.get("creativeName") || "");
     const frequencyCap = Number(data.get("frequencyCap"));
+    const geoRegions = parseTargeting(data.get("geoRegions"));
+    const deviceOs = parseTargeting(data.get("deviceOs"));
+    const title = String(data.get("title") || "").trim();
+    const body = String(data.get("body") || "").trim();
+    const imageUrl = String(data.get("imageUrl") || "").trim();
+    const landingUrl = String(data.get("landingUrl") || "").trim();
+    const invalidLanding =
+      landingUrl.length > 0 && !/^https?:\/\//i.test(landingUrl);
     if (
       !binding ||
       !Number.isFinite(bid) ||
       bid < 0.1 ||
       !Number.isInteger(frequencyCap) ||
       frequencyCap < 1 ||
-      frequencyCap > guardrails.campaignDailyCap
+      frequencyCap > guardrails.userDailyCap ||
+      geoRegions.length > 20 ||
+      deviceOs.length > 20 ||
+      title.length < 4 ||
+      title.length > 60 ||
+      body.length > 200 ||
+      invalidLanding
     ) {
       notify(
-        `请选择有效的路线行动节点，设置有效出价，并将日频控设为 1 到 ${guardrails.campaignDailyCap} 次。`,
+        `请补全有效的路线节点、出价、创意标题（4-60 字）与频控（1 到 ${guardrails.userDailyCap} 次）；落地页链接需以 http(s) 开头。`,
       );
       return;
     }
@@ -225,8 +265,14 @@ export function useAdPlatform(notify: (message: string) => void) {
                   budget: `¥${budget.toLocaleString()}`,
                   binding,
                   creativeName,
+                  title,
+                  body,
+                  imageUrl,
+                  landingUrl,
                   frequencyCap,
                   bid,
+                  geoRegions,
+                  deviceOs,
                 }
               : campaign,
           )
@@ -242,8 +288,14 @@ export function useAdPlatform(notify: (message: string) => void) {
               color: "gray",
               binding,
               creativeName,
+              title,
+              body,
+              imageUrl,
+              landingUrl,
               frequencyCap,
               bid,
+              geoRegions,
+              deviceOs,
               predictions: { pctr: 0.03, pcvr: 0.1, pwegu: 0.05 },
             },
             ...current,
@@ -298,6 +350,21 @@ export function useAdPlatform(notify: (message: string) => void) {
     notify(`“${String(data.get("name"))}”已提交审核。`);
   };
 
+  const saveUserDailyCap = async (cap: number) => {
+    try {
+      const next = await adAdminApi.setUserDailyTotalCap(cap);
+      setGuardrails({ userDailyCap: next.user_daily_total_cap });
+      notify(
+        `单用户全局日曝光上限已更新为 ${next.user_daily_total_cap} 次（服务端立即生效）。`,
+      );
+    } catch (error) {
+      const apiError = error instanceof AdminApiError ? error : undefined;
+      notify(
+        apiError?.message || "护栏保存失败：该上限仅平台管理员可修改。",
+      );
+    }
+  };
+
   return {
     campaigns,
     creatives,
@@ -316,7 +383,7 @@ export function useAdPlatform(notify: (message: string) => void) {
     setCampaigns,
     setCreatives,
     setScenes,
-    setGuardrails,
+    saveUserDailyCap,
     toggleCampaign,
     submitReview,
     approveCampaign,

@@ -9,9 +9,10 @@ pub(crate) struct Domain {
 }
 
 impl Domain {
-    pub(crate) async fn new(config: Config) -> Result<Self, tonic::transport::Error> {
-        let recommend_main =
-            RecommendMainClient::connect(config.recommend_main_url.clone()).await?;
+    pub(crate) async fn new(config: Config) -> Result<Self, bookway_runtime::ConnectFailure> {
+        let recommend_main = RecommendMainClient::new(
+            bookway_runtime::grpc_channel(&config.recommend_main_url).await?,
+        );
         Ok(Self {
             recommend_main,
             config,

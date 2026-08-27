@@ -1,5 +1,6 @@
-import { Product } from "../domain";
+import { AffiliateSettlement, Product } from "../domain";
 import {
+  AffiliateSettlement as RemoteAffiliateSettlement,
   CreateMallProduct,
   MallProduct,
   MallSku,
@@ -48,6 +49,33 @@ export const productsFromMall = (items: MallProduct[]) =>
   items.flatMap((product) =>
     product.skus.map((sku) => productFromMall(product, sku)),
   );
+
+// AffiliateSettlementStatus: PENDING=0, ELIGIBLE=1, SETTLED=2, REVERSED=3.
+const settlementStatusFor = (status: number): AffiliateSettlement["status"] => {
+  switch (status) {
+    case 1:
+      return "待结算";
+    case 2:
+      return "已结算";
+    case 3:
+      return "已冲正";
+    default:
+      return "待生效";
+  }
+};
+
+export function affiliateFromMall(
+  item: RemoteAffiliateSettlement,
+): AffiliateSettlement {
+  return {
+    id: item.id,
+    order_id: item.order_id,
+    creator: item.creator_id,
+    payable: formatPrice(item.amount_cents),
+    status: settlementStatusFor(item.status),
+    date: item.settled_at || item.eligible_at,
+  };
+}
 
 const skuAttributes = (product: Product): Record<string, string> => ({
   spu: product.spu,

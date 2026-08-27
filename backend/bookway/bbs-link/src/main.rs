@@ -11,7 +11,7 @@ use domain::Domain;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("bbs-link");
     let config = Config::from_env()?;
-    let media = MediaClient::connect(config.media_grpc_url.clone()).await?;
+    let media = MediaClient::new(bookway_runtime::grpc_channel(&config.media_grpc_url).await?);
     let domain = Domain::new(config, Some(media)).await?;
     tokio::try_join!(api::serve_http(domain.clone()), async {
         api::serve_grpc(domain)

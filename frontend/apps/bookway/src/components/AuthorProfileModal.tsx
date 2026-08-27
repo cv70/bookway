@@ -2,7 +2,7 @@ import { ArrowUpRight, Ban, Mail, UserPlus, VolumeX, X } from 'lucide-react-nati
 import { ActivityIndicator, Image, Modal, Pressable, ScrollView, StyleSheet, Text, View, type ImageStyle } from 'react-native';
 
 import { colors } from '../theme';
-import { ContentDetail, PublicAuthor } from '../types';
+import { ContentDetail, PublicAuthor, SocialStats } from '../types';
 import { DomainBadge } from './DomainBadge';
 
 type Props = {
@@ -15,6 +15,7 @@ type Props = {
   following: boolean;
   muted: boolean;
   blocked: boolean;
+  stats?: SocialStats;
   onClose: () => void;
   onFollow: (authorId: string) => void;
   onSetRelationship: (authorId: string, edge: 'mute' | 'block', active: boolean) => void;
@@ -23,10 +24,11 @@ type Props = {
   onMessage: (authorId: string) => void;
 };
 
-export function AuthorProfileModal({ author, contents, nextCursor, loading, loadingMore, error, following, muted, blocked, onClose, onFollow, onSetRelationship, onOpenContent, onLoadMore, onMessage }: Props) {
+export function AuthorProfileModal({ author, contents, nextCursor, loading, loadingMore, error, following, muted, blocked, stats, onClose, onFollow, onSetRelationship, onOpenContent, onLoadMore, onMessage }: Props) {
   if (!author) return null;
   const visibleContents = contents.filter((content) => content.post);
   const initial = author.name.trim().slice(0, 1) || '行';
+  const statLine = stats ? `${stats.followers.toLocaleString()} 位关注者 · 关注 ${stats.following.toLocaleString()} 人` : '公开的方法、行记与行动经验';
   return (
     <Modal animationType="slide" onRequestClose={onClose} visible>
       <View style={styles.screen}>
@@ -40,7 +42,7 @@ export function AuthorProfileModal({ author, contents, nextCursor, loading, load
         }} scrollEventThrottle={200} showsVerticalScrollIndicator={false}>
           <View style={styles.authorCard}>
             {author.avatar_url?.trim() ? <Image source={{ uri: author.avatar_url }} style={styles.avatar as ImageStyle} /> : <View style={styles.avatarFallback}><Text style={styles.avatarInitial}>{initial}</Text></View>}
-            <View style={styles.authorCopy}><Text style={styles.authorName}>{author.name}</Text><Text style={styles.authorMeta}>公开的方法、行记与行动经验</Text></View>
+            <View style={styles.authorCopy}><Text style={styles.authorName}>{author.name}</Text><Text style={styles.authorMeta}>{statLine}</Text></View>
             <View style={styles.authorActions}><Pressable accessibilityLabel="发私信" onPress={() => onMessage(author.id)} style={({ pressed }) => [styles.messageButton, pressed && styles.pressed]}><Mail color={colors.evergreen} size={16} /></Pressable><Pressable accessibilityLabel={following ? '取消关注创作者' : '关注创作者'} onPress={() => onFollow(author.id)} style={({ pressed }) => [styles.follow, following && styles.following, pressed && styles.pressed]}><UserPlus color={following ? colors.muted : colors.evergreen} size={16} /><Text style={[styles.followText, following && styles.followingText]}>{following ? '已关注' : '关注'}</Text></Pressable></View>
           </View>
           <View style={styles.relationships}>

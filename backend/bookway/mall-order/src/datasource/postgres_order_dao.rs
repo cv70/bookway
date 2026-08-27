@@ -275,15 +275,17 @@ impl OrderDao for PostgresOrderDao {
         let statement = format!(
             "UPDATE mall_orders SET status=$2,payment_reference=COALESCE($3,payment_reference),updated_at=now() WHERE id=$1 AND {source_clause}"
         );
+        let mut tx = self.pool.begin().await.map_err(database)?;
         let changed = sqlx::query(&statement)
             .bind(id)
             .bind(status_name(status)?)
             .bind(payment_reference)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(payment_reference_error)?
             .rows_affected();
         if changed == 0 {
+            tx.commit().await.map_err(database)?;
             let order = self.load(None, id).await?;
             if order.status == status {
                 return Ok(order);
@@ -292,6 +294,21 @@ impl OrderDao for PostgresOrderDao {
                 "order {id} is not in a transitionable payment state"
             )));
         }
+        // The purchase fact is queued inside the same transaction that makes
+        // the order paid: attribution survives a crash between the state flip
+        // and delivery, and an order can never be paid without its event being
+        // durable. Contextual orders only — the offer column is empty for
+        // unattributed carts, and replays land on ON CONFLICT DO NOTHING.
+        if status == pb::MallOrderStatus::Paid as i32 {
+            sqlx::query(
+                "INSERT INTO purchase_event_outbox (order_id,user_id,node_offer_id) SELECT o.id,o.user_id,o.node_offer_id FROM mall_orders o WHERE o.id=$1 AND o.node_offer_id<>'' ON CONFLICT (order_id) DO NOTHING",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database)?;
+        }
+        tx.commit().await.map_err(database)?;
         self.load(None, id).await
     }
     async fn merchant_orders(
@@ -416,5 +433,31 @@ impl OrderDao for PostgresOrderDao {
             return Err(DaoError::State("settlement is not eligible".to_string()));
         }
         settlement_from_row(row)
+    }
+    async fn reverse_affiliate(&self, order_id: &str) -> Result<pb::AffiliateSettlement, DaoError> {
+        let reversed = sqlx::query_as::<_, SettlementRow>(
+            "UPDATE mall_affiliate_settlements SET status='reversed',updated_at=now() WHERE order_id=$1 AND status='eligible' RETURNING id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at,settled_at,created_at",
+        )
+        .bind(order_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?;
+        if let Some(row) = reversed {
+            return settlement_from_row(row);
+        }
+        // No eligible row left: either the reversal already happened (idempotent
+        // replay) or this order never carried a reversible share.
+        let row = sqlx::query_as::<_, SettlementRow>(
+            "SELECT id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at,settled_at,created_at FROM mall_affiliate_settlements WHERE order_id=$1",
+        )
+        .bind(order_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?
+        .ok_or_else(|| DaoError::NotFound(order_id.to_string()))?;
+        if row.status == "reversed" {
+            return settlement_from_row(row);
+        }
+        Err(DaoError::State("settlement is not reversible".to_string()))
     }
 }

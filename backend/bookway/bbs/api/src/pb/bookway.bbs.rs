@@ -103,6 +103,74 @@ pub struct RouteParticipationRequest {
     pub intent_version: ::core::option::Option<u64>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListFollowersRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub cursor: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub limit: u32,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Follower {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub followed_at: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FollowerPage {
+    #[prost(message, repeated, tag = "1")]
+    pub items: ::prost::alloc::vec::Vec<Follower>,
+    #[prost(string, optional, tag = "2")]
+    pub next_cursor: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SocialStatsRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct SocialStats {
+    #[prost(uint64, tag = "1")]
+    pub followers: u64,
+    #[prost(uint64, tag = "2")]
+    pub following: u64,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListRoutePeersRequest {
+    #[prost(string, tag = "1")]
+    pub viewer_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub route_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub cursor: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    pub limit: u32,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoutePeer {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub joined_at: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoutePeerPage {
+    #[prost(message, repeated, tag = "1")]
+    pub items: ::prost::alloc::vec::Vec<RoutePeer>,
+    #[prost(string, optional, tag = "2")]
+    pub next_cursor: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum SocialEdgeType {
@@ -355,6 +423,69 @@ pub mod bbs_client {
                 .insert(GrpcMethod::new("bookway.bbs.Bbs", "SetRouteParticipation"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn list_followers(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListFollowersRequest>,
+        ) -> std::result::Result<tonic::Response<super::FollowerPage>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.Bbs/ListFollowers",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.Bbs", "ListFollowers"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_social_stats(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SocialStatsRequest>,
+        ) -> std::result::Result<tonic::Response<super::SocialStats>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.Bbs/GetSocialStats",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.Bbs", "GetSocialStats"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_route_peers(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListRoutePeersRequest>,
+        ) -> std::result::Result<tonic::Response<super::RoutePeerPage>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.Bbs/ListRoutePeers",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.bbs.Bbs", "ListRoutePeers"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -406,6 +537,18 @@ pub mod bbs_server {
             tonic::Response<super::RouteParticipationState>,
             tonic::Status,
         >;
+        async fn list_followers(
+            &self,
+            request: tonic::Request<super::ListFollowersRequest>,
+        ) -> std::result::Result<tonic::Response<super::FollowerPage>, tonic::Status>;
+        async fn get_social_stats(
+            &self,
+            request: tonic::Request<super::SocialStatsRequest>,
+        ) -> std::result::Result<tonic::Response<super::SocialStats>, tonic::Status>;
+        async fn list_route_peers(
+            &self,
+            request: tonic::Request<super::ListRoutePeersRequest>,
+        ) -> std::result::Result<tonic::Response<super::RoutePeerPage>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct BbsServer<T> {
@@ -728,6 +871,137 @@ pub mod bbs_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SetRouteParticipationSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.Bbs/ListFollowers" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListFollowersSvc<T: Bbs>(pub Arc<T>);
+                    impl<T: Bbs> tonic::server::UnaryService<super::ListFollowersRequest>
+                    for ListFollowersSvc<T> {
+                        type Response = super::FollowerPage;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListFollowersRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Bbs>::list_followers(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListFollowersSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.Bbs/GetSocialStats" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetSocialStatsSvc<T: Bbs>(pub Arc<T>);
+                    impl<T: Bbs> tonic::server::UnaryService<super::SocialStatsRequest>
+                    for GetSocialStatsSvc<T> {
+                        type Response = super::SocialStats;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SocialStatsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Bbs>::get_social_stats(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetSocialStatsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.bbs.Bbs/ListRoutePeers" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListRoutePeersSvc<T: Bbs>(pub Arc<T>);
+                    impl<
+                        T: Bbs,
+                    > tonic::server::UnaryService<super::ListRoutePeersRequest>
+                    for ListRoutePeersSvc<T> {
+                        type Response = super::RoutePeerPage;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListRoutePeersRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Bbs>::list_route_peers(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListRoutePeersSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

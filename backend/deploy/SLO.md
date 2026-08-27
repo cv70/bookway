@@ -9,8 +9,15 @@
 | Search | 返回搜索结果或显式降级 | `99.90%` | P99 `< 150ms` |
 | Event ingest | 接收并持久化事件 | `99.95%` | P95 `< 100ms` |
 | 内容发布 | 完成审核状态转换 | `99.90%` | P95 `< 2s` |
+| 商城下单（mall-order） | 创建订单（幂等重放返回原单） | `99.95%` | P95 `< 300ms` |
+| 库存预留（mall-inventory） | 预留成功或显式缺货；Redis 门闸故障降级 PG 直连不算失败 | `99.95%` | P95 `< 200ms` |
+| 节点商品读（mall NodeOffer） | 按路线节点返回在售 Offer | `99.90%` | P99 `< 150ms` |
+| 广告决策（ad-main decide） | 返回广告或显式空决策；上下文/频控校验失败返回空不算失败 | `99.90%` | P99 `< 150ms` |
+| 广告回执（ad-center 回执） | 决策登记与曝光/点击事件持久化 | `99.95%` | P95 `< 200ms` |
 
 异步链路目标：Outbox 最老未发布事件小于 `60s`，OpenSearch 索引延迟小于 `30s`，死信事件为 `0`，Redis 限流故障时业务采用 fail-open 并产生告警。运行时 histogram 暴露 `0.15` 秒桶，Feed/Search 的 P99 越过该桶时触发告警。
+
+商业化护栏：跨服务调用一律经过 `bookway_runtime::grpc_channel` 的连接超时与 keep-alive 约束，热点下游叠加 `CircuitBreaker` 快速失败;Redis 频控计数只是 Eligible 预过滤,预算与频控的最终裁决始终在 PostgreSQL 事务内,两者不可互换。Feed 冷启动匿名页缓存 TTL 不超过 `5s`,个性化路径不缓存。
 
 ## 告警
 

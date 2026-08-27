@@ -1,14 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::collections::HashMap;
 
 use serde::Serialize;
-use tokio::time::sleep;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct CandidateFeatures {
@@ -59,32 +51,20 @@ mod snapshot_tests {
 const FEATURE_REFRESH_LOCK_TTL_MS: usize = 5_000;
 const FEATURE_REFRESH_LOCK_WAIT_MS: u64 = 80;
 const FEATURE_REFRESH_LOCK_POLL_MS: u64 = 10;
-const FEATURE_REFRESH_LOCK_RELEASE: &str = r#"
-if redis.call('get', KEYS[1]) == ARGV[1] then
-  return redis.call('del', KEYS[1])
-end
-return 0
-"#;
-static FEATURE_REFRESH_LOCK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) struct RedisRefreshLease {
-    manager: redis::aio::ConnectionManager,
-    key: String,
-    token: String,
-}
+/// Per-user feature read-through cache. The miss single-flight (local lock +
+/// cross-instance `SET NX PX` lease, Redis-fail-open) now lives in the shared
+/// `bookway_cache` crate; keys stay `bookway:features:{user_id}` with a 60s
+/// TTL so existing deployments keep the same cache layout.
+pub(crate) type UserFeatureCache = bookway_cache::SingleFlightCache<HashMap<String, f64>>;
 
-impl RedisRefreshLease {
-    async fn release(self) {
-        let mut manager = self.manager;
-        let result: redis::RedisResult<i32> = redis::Script::new(FEATURE_REFRESH_LOCK_RELEASE)
-            .key(self.key)
-            .arg(self.token)
-            .invoke_async(&mut manager)
-            .await;
-        if let Err(error) = result {
-            tracing::debug!(%error, "feature refresh lease release degraded");
-        }
-    }
+pub(crate) fn user_feature_cache(redis: Option<redis::aio::ConnectionManager>) -> UserFeatureCache {
+    bookway_cache::SingleFlightCache::new(redis, "bookway:features", 60)
+        .with_refresh_tuning(
+            FEATURE_REFRESH_LOCK_WAIT_MS,
+            FEATURE_REFRESH_LOCK_POLL_MS,
+            FEATURE_REFRESH_LOCK_TTL_MS,
+        )
 }
 
 #[cfg(test)]
@@ -96,11 +76,11 @@ mod cache_tests {
 
     use tokio::time::{Duration, sleep};
 
-    use super::FeatureCache;
+    use super::{user_feature_cache, UserFeatureCache};
 
     #[tokio::test]
     async fn per_user_miss_lock_coalesces_concurrent_refreshes() {
-        let cache = FeatureCache::new(None);
+        let cache: UserFeatureCache = user_feature_cache(None);
         let loads = Arc::new(AtomicUsize::new(0));
         let loaded = Arc::new(AtomicBool::new(false));
         let first = {
@@ -108,7 +88,7 @@ mod cache_tests {
             let loads = loads.clone();
             let loaded = loaded.clone();
             tokio::spawn(async move {
-                let _guard = cache.miss_lock("user-1").await;
+                let _guard = cache.refresh_lock("user-1").await;
                 if !loaded.swap(true, Ordering::SeqCst) {
                     loads.fetch_add(1, Ordering::SeqCst);
                     sleep(Duration::from_millis(10)).await;
@@ -120,7 +100,7 @@ mod cache_tests {
             let loads = loads.clone();
             let loaded = loaded.clone();
             tokio::spawn(async move {
-                let _guard = cache.miss_lock("user-1").await;
+                let _guard = cache.refresh_lock("user-1").await;
                 if !loaded.swap(true, Ordering::SeqCst) {
                     loads.fetch_add(1, Ordering::SeqCst);
                 }
@@ -133,7 +113,7 @@ mod cache_tests {
 
     #[tokio::test]
     async fn refresh_lock_falls_back_to_the_local_guard_without_redis() {
-        let cache = FeatureCache::new(None);
+        let cache: UserFeatureCache = user_feature_cache(None);
         let guard = cache.refresh_lock("user-1").await;
         guard.release().await;
     }
@@ -142,9 +122,3 @@ mod cache_tests {
 #[path = "feature_dao.rs"]
 mod feature_dao;
 pub(crate) use feature_dao::FeatureDao;
-#[path = "feature_cache.rs"]
-mod feature_cache;
-pub(crate) use feature_cache::FeatureCache;
-#[path = "feature_refresh_guard.rs"]
-mod feature_refresh_guard;
-pub(crate) use feature_refresh_guard::FeatureRefreshGuard;

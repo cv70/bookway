@@ -51,7 +51,9 @@ impl Domain {
             )),
         };
         let content_audit = match config.content_audit_grpc_url.clone() {
-            Some(url) => Some(ContentAuditClient::connect(url).await?),
+            Some(url) => Some(ContentAuditClient::new(
+                bookway_runtime::grpc_channel(&url).await?,
+            )),
             None if storage_mode == bookway_data::StorageMode::Postgres => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -62,7 +64,7 @@ impl Domain {
             None => None,
         };
         Ok(Self {
-            bbs: BbsClient::connect(config.bbs_grpc_url.clone()).await?,
+            bbs: BbsClient::new(bookway_runtime::grpc_channel(&config.bbs_grpc_url).await?),
             content_audit,
             config,
             dao,

@@ -66,7 +66,8 @@ async fn run_once(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("mall-inventory-sweeper");
     let config = Config::from_env()?;
-    let mut client = MallInventoryClient::connect(config.inventory_url.clone()).await?;
+    let channel = bookway_runtime::grpc_channel(&config.inventory_url).await?;
+    let mut client = MallInventoryClient::new(channel);
     loop {
         match run_once(&mut client, config.batch_size).await {
             Ok(result) if result.expired == 0 => tokio::time::sleep(config.idle_interval).await,

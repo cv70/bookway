@@ -10,8 +10,9 @@ pub struct Domain {
 }
 
 impl Domain {
-    pub async fn new(config: Config) -> Result<Self, tonic::transport::Error> {
-        let content_client = BbsLinkClient::connect(config.bbs_link_url.clone()).await?;
+    pub async fn new(config: Config) -> Result<Self, bookway_runtime::ConnectFailure> {
+        let content_client =
+            BbsLinkClient::new(bookway_runtime::grpc_channel(&config.bbs_link_url).await?);
         Ok(Self {
             content_client,
             max_candidates: config.max_candidates,

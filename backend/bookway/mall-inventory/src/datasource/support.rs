@@ -264,6 +264,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stock_adjustments_cannot_drop_below_active_reservations() {
+        let dao = MemoryInventoryDao::default();
+        dao.set_stock(pb::SetStockRequest {
+            sku_id: "sku-1".to_string(),
+            available: 5,
+        })
+        .await
+        .expect("stock should be initialized");
+        dao.reserve(pb::ReserveRequest {
+            reservation_id: "order-1".to_string(),
+            items: vec![pb::ReservationLine {
+                sku_id: "sku-1".to_string(),
+                quantity: 3,
+            }],
+            ttl_seconds: Some(900),
+        })
+        .await
+        .expect("stock should reserve");
+
+        // The absolute overwrite mirrors a merchant stock-count edit: it may
+        // reach the reserved floor but never cross it.
+        let floored = dao
+            .set_stock(pb::SetStockRequest {
+                sku_id: "sku-1".to_string(),
+                available: 3,
+            })
+            .await
+            .expect("an adjustment down to the reserved floor is legal");
+        assert_eq!(floored.available, 3);
+        assert_eq!(floored.reserved, 3);
+
+        let error = dao
+            .set_stock(pb::SetStockRequest {
+                sku_id: "sku-1".to_string(),
+                available: 2,
+            })
+            .await
+            .expect_err("active reservations block deeper cuts");
+        assert!(matches!(error, DaoError::Insufficient(_)));
+    }
+
+    #[tokio::test]
     async fn sweep_releases_expired_reservations_without_a_follow_up_checkout() {
         let dao = MemoryInventoryDao::default();
         dao.set_stock(pb::SetStockRequest {

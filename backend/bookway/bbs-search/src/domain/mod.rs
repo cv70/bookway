@@ -9,9 +9,10 @@ use bookway_bbs_search_api::pb;
 use thiserror::Error;
 
 use super::datasource::{
-    MemorySearchAnalytics, MemorySearchSessionStore, OpenSearchSource, PostgresSearchAnalytics,
-    PostgresSearchSessionStore, SearchSession, SearchSessionStore, SearchSource, SearchSourceError,
-    SearchSourceResult, SharedSearchAnalytics, search_type_name, stable_hash,
+    EntityBias, MemorySearchAnalytics, MemorySearchSessionStore, OpenSearchSource,
+    PostgresSearchAnalytics, PostgresSearchSessionStore, SearchSession, SearchSessionStore,
+    SearchSource, SearchSourceError, SearchSourceResult, SharedSearchAnalytics, search_type_name,
+    stable_hash,
 };
 use crate::conf::Config;
 
@@ -20,6 +21,8 @@ const MAX_PAGE_SIZE: usize = 50;
 const SOURCE_PAGE_SIZE: usize = 100;
 const MAX_SOURCE_PAGES_PER_RESPONSE: usize = 20;
 const MAX_PUBLIC_CURSOR_BYTES: usize = 128;
+const MAX_QUERY_LENGTH: usize = 100;
+const MAX_ROUTE_CONTEXT_FIELD_LENGTH: usize = 160;
 
 #[derive(Clone)]
 pub(crate) struct Domain {
@@ -30,7 +33,8 @@ pub(crate) struct Domain {
 
 impl Domain {
     pub(crate) async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let content_client = BbsLinkClient::connect(config.bbs_link_url.clone()).await?;
+        let content_client =
+            BbsLinkClient::new(bookway_runtime::grpc_channel(&config.bbs_link_url).await?);
         let source: Option<Arc<dyn SearchSource>> = match config.opensearch_url.clone() {
             Some(url) => Some(Arc::new(OpenSearchSource::new(
                 url,
@@ -142,7 +146,7 @@ impl SearchService {
         let search_type = pb::SearchType::try_from(request.search_type)
             .map_err(|_| SearchError::Validation("搜索类型无效".to_string()))?;
         let query_text = request.q.trim().to_string();
-        if query_text.is_empty() || query_text.chars().count() > 100 {
+        if query_text.is_empty() || query_text.chars().count() > MAX_QUERY_LENGTH {
             return Err(SearchError::Validation(
                 "搜索词需要在 1 到 100 个字符之间".to_string(),
             ));
@@ -157,11 +161,23 @@ impl SearchService {
                 .action_node_id
                 .as_deref()
                 .is_some_and(|value| value.trim().is_empty())
+            || request
+                .route_id
+                .as_deref()
+                .is_some_and(|value| value.trim().chars().count() > MAX_ROUTE_CONTEXT_FIELD_LENGTH)
+            || request
+                .action_node_id
+                .as_deref()
+                .is_some_and(|value| value.trim().chars().count() > MAX_ROUTE_CONTEXT_FIELD_LENGTH)
             || request.route_id.is_some() != request.action_node_id.is_some()
             || request
                 .scene_equipment
                 .as_deref()
                 .is_some_and(|value| value.trim().is_empty())
+            || request
+                .scene_equipment
+                .as_deref()
+                .is_some_and(|value| value.trim().chars().count() > MAX_ROUTE_CONTEXT_FIELD_LENGTH)
             || (request.scene_equipment.is_some()
                 && (request.route_id.is_none() || request.action_node_id.is_none()))
         {
@@ -170,6 +186,11 @@ impl SearchService {
             ));
         }
         let route_context = route_context(&request);
+        let entity_bias = match search_type {
+            pb::SearchType::Nodes => Some(EntityBias::ActionNode),
+            pb::SearchType::Equipment => Some(EntityBias::SceneEquipment),
+            _ => None,
+        };
         let fingerprint = query_fingerprint(
             &query_text,
             search_type,
@@ -229,7 +250,10 @@ impl SearchService {
                     .map(|context| context.route_id.clone()),
                 author_id: None,
                 content_type: match search_type {
-                    pb::SearchType::Journeys => Some(bbs_link_pb::ContentType::Route as i32),
+                    pb::SearchType::Journeys | pb::SearchType::Nodes
+                    | pb::SearchType::Equipment => {
+                        Some(bbs_link_pb::ContentType::Route as i32)
+                    }
                     _ => None,
                 },
                 domain: None,
@@ -241,6 +265,7 @@ impl SearchService {
                     &query_text,
                     &excluded_author_ids,
                     route_context.as_ref(),
+                    entity_bias,
                     content_client.as_ref(),
                 )
                 .await
@@ -337,7 +362,7 @@ impl SearchService {
         content_client: Option<BbsLinkClient<tonic::transport::Channel>>,
     ) -> Result<pb::SuggestionsResponse, SearchError> {
         let query = request.q.trim().to_string();
-        if query.is_empty() {
+        if query.is_empty() || query.chars().count() > MAX_QUERY_LENGTH {
             return Ok(pb::SuggestionsResponse {
                 query,
                 items: Vec::new(),
@@ -358,6 +383,7 @@ impl SearchService {
                 source_query,
                 &query,
                 &excluded_author_ids,
+                None,
                 None,
                 content_client.as_ref(),
             ),
@@ -406,6 +432,7 @@ impl SearchService {
         text: &str,
         excluded_author_ids: &[String],
         route_context: Option<&RouteSearchContext>,
+        entity_bias: Option<EntityBias>,
         content_client: Option<&BbsLinkClient<tonic::transport::Channel>>,
     ) -> Result<SearchSourceResult, SearchSourceError> {
         let is_fallback_cursor = query
@@ -418,10 +445,13 @@ impl SearchService {
             return self.search_bbs_link(query, content_client, true).await;
         }
         let Some(source) = &self.source else {
+            // The BBS Link fallback has no biasable fields; typed extraction
+            // happens domain-side on the plain content reads below.
+            let _ = entity_bias;
             return self.search_bbs_link(query, content_client, false).await;
         };
         match source
-            .search_contents(query.clone(), text, excluded_author_ids)
+            .search_contents(query.clone(), text, excluded_author_ids, entity_bias)
             .await
         {
             Ok(result) => {
@@ -538,9 +568,17 @@ fn reconcile_indexed_page(
                 "bbs-link returned a public summary without post metadata".to_string(),
             ));
         };
+        let Ok(content_type) = bbs_link_pb::ContentType::try_from(summary.content_type) else {
+            return Err(SearchSourceError::Request(
+                "bbs-link returned a public summary with an invalid content type".to_string(),
+            ));
+        };
         if summary.id.is_empty()
             || summary.id != post.id
             || !requested.contains(&summary.id)
+            || post.is_route != (content_type == bbs_link_pb::ContentType::Route)
+            || post.is_milestone != (content_type == bbs_link_pb::ContentType::Milestone)
+            || post.is_question != (content_type == bbs_link_pb::ContentType::Question)
             || authoritative.insert(summary.id.clone(), summary).is_some()
         {
             return Err(SearchSourceError::Request(
@@ -559,6 +597,16 @@ fn reconcile_indexed_page(
             {
                 return None;
             }
+            // The summary is intentionally compact, but public route action
+            // nodes are part of its contract. Rebuild only that public
+            // execution context so indexed and fallback hits have identical
+            // action/equipment semantics without reintroducing private data.
+            let route_template = (summary.content_type == bbs_link_pb::ContentType::Route as i32
+                && !summary.route_actions.is_empty())
+            .then(|| bbs_link_pb::RouteTemplate {
+                actions: summary.route_actions.clone(),
+                ..Default::default()
+            });
             // The index supplies only candidate IDs and rank. Rebuild every
             // displayed field from the current BBS Link public projection.
             Some(bbs_link_pb::Content {
@@ -569,6 +617,7 @@ fn reconcile_indexed_page(
                 status: bbs_link_pb::ContentStatus::Published as i32,
                 topics: summary.topics,
                 quality_score: summary.quality_score,
+                route_template,
                 ..Default::default()
             })
         })
@@ -837,6 +886,8 @@ fn search_results(
         }
         pb::SearchType::Users => user_results(&visible_contents, query),
         pb::SearchType::Topics => topic_results(&visible_contents, query),
+        pb::SearchType::Nodes => action_node_results(&visible_contents, query),
+        pb::SearchType::Equipment => scene_equipment_results(&visible_contents, query),
         pb::SearchType::Resources => Vec::new(),
         pb::SearchType::All => {
             let mut results = content_results(&visible_contents, query, true, true, source_ranked);
@@ -845,6 +896,112 @@ fn search_results(
             results
         }
     }
+}
+
+// Entity results are extracted domain-side for BOTH pipelines: indexed hits
+// revalidate into summaries that rebuild `route_template.actions`, and the
+// BBS Link fallback reads full templates — so nodes and gear keep identical
+// typed semantics no matter which source served the candidates.
+fn action_node_results(
+    contents: &[&bbs_link_pb::Content],
+    query: &str,
+) -> Vec<pb::SearchResult> {
+    contents
+        .iter()
+        .filter(|content| content.content_type == bbs_link_pb::ContentType::Route as i32)
+        .filter_map(|content| {
+            Some((content, content.post.as_ref()?, content.route_template.as_ref()?))
+        })
+        .flat_map(|(content, post, template)| {
+            template
+                .actions
+                .iter()
+                .filter_map(|action| {
+                    let metadata = format!(
+                        "{} {} {}",
+                        post.title,
+                        post.summary,
+                        action.scene_equipment.join(" ")
+                    );
+                    // An exact node-id hit is a legitimate structured lookup.
+                    let id_hit = !query.is_empty() && action.id == query;
+                    let (mut score, mut highlights) = if id_hit {
+                        (10.0, vec![action.title.clone()])
+                    } else {
+                        relevance(query, &[action.title.as_str(), action.detail.as_str()], &metadata)?
+                    };
+                    score += content.quality_score;
+                    highlights.retain(|value| !value.trim().is_empty());
+                    Some(pb::SearchResult {
+                        id: action.id.clone(),
+                        result_type: pb::SearchResultType::ActionNode as i32,
+                        title: action.title.clone(),
+                        snippet: if action.detail.is_empty() {
+                            post.summary.clone()
+                        } else {
+                            action.detail.clone()
+                        },
+                        cover_url: non_empty(&post.cover_url),
+                        author_id: Some(content.author_id.clone()),
+                        author_name: Some(post.author_name.clone()),
+                        domain: Some(growth_domain(post.domain)),
+                        score,
+                        highlights,
+                        // The enclosing route card travels with every node so
+                        // scene-aware commerce and wayfinding stay attached.
+                        post: Some(post_summary(post.clone(), template.actions.clone())),
+                        resource: None,
+                        ad: None,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn scene_equipment_results(
+    contents: &[&bbs_link_pb::Content],
+    query: &str,
+) -> Vec<pb::SearchResult> {
+    let needle = query.to_lowercase();
+    contents
+        .iter()
+        .filter(|content| content.content_type == bbs_link_pb::ContentType::Route as i32)
+        .filter_map(|content| {
+            Some((content, content.post.as_ref()?, content.route_template.as_ref()?))
+        })
+        .flat_map(|(content, post, template)| {
+            let mut matches = Vec::new();
+            for action in &template.actions {
+                for gear in &action.scene_equipment {
+                    if !gear.to_lowercase().contains(&needle) {
+                        continue;
+                    }
+                    // Equipment has no standalone record; its identity is the
+                    // route node it belongs to. Same-gear hits across routes
+                    // deliberately stay separate so route attribution is kept.
+                    let exact = gear.to_lowercase() == needle;
+                    let score = if exact { 8.0 } else { 4.0 } + content.quality_score;
+                    matches.push(pb::SearchResult {
+                        id: format!("{}/{}/equipment/{}", content.id, action.id, gear),
+                        result_type: pb::SearchResultType::SceneEquipment as i32,
+                        title: gear.clone(),
+                        snippet: format!("{} · {}", post.title, action.title),
+                        cover_url: non_empty(&post.cover_url),
+                        author_id: Some(content.author_id.clone()),
+                        author_name: Some(post.author_name.clone()),
+                        domain: Some(growth_domain(post.domain)),
+                        score,
+                        highlights: Vec::new(),
+                        post: Some(post_summary(post.clone(), template.actions.clone())),
+                        resource: None,
+                        ad: None,
+                    });
+                }
+            }
+            matches
+        })
+        .collect()
 }
 
 fn sort_results(items: &mut [pb::SearchResult]) {
@@ -864,6 +1021,8 @@ fn result_identity(item: &pb::SearchResult) -> String {
         Ok(pb::SearchResultType::Topic) => "topic",
         Ok(pb::SearchResultType::Resource) => "resource",
         Ok(pb::SearchResultType::Ad) => "ad",
+        Ok(pb::SearchResultType::ActionNode) => "node",
+        Ok(pb::SearchResultType::SceneEquipment) => "equipment",
         Err(_) => "resource",
     };
     format!("{result_type}:{}", item.id)
@@ -1383,6 +1542,151 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "当前标题");
         assert!(results[0].highlights.is_empty());
+    }
+
+    fn route_with_entities() -> bbs_link_pb::Content {
+        let mut route = content("route-1", "路线作者", "周末徒步路线", "徒步");
+        route.content_type = bbs_link_pb::ContentType::Route as i32;
+        route.post.as_mut().expect("post").is_route = true;
+        route.quality_score = 0.9;
+        route.route_template = Some(bbs_link_pb::RouteTemplate {
+            actions: vec![
+                bbs_link_pb::RouteTemplateAction {
+                    id: "node-summit".to_string(),
+                    title: "登顶观景".to_string(),
+                    detail: "在山顶完成 10 分钟正念".to_string(),
+                    scene_equipment: vec!["登山鞋".to_string(), "登山杖".to_string()],
+                    ..Default::default()
+                },
+                bbs_link_pb::RouteTemplateAction {
+                    id: "node-journal".to_string(),
+                    title: "复盘记录".to_string(),
+                    detail: String::new(),
+                    scene_equipment: vec![],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        route
+    }
+
+    #[test]
+    fn action_node_search_returns_typed_nodes_carrying_the_route_card() {
+        let route = route_with_entities();
+
+        let results = action_node_results(&[&route], "登顶");
+
+        assert_eq!(results.len(), 1);
+        let node = &results[0];
+        assert_eq!(node.id, "node-summit");
+        assert_eq!(node.result_type, pb::SearchResultType::ActionNode as i32);
+        assert_eq!(node.title, "登顶观景");
+        let card = node.post.as_ref().expect("enclosing route card");
+        assert_eq!(card.id, "route-1");
+        assert_eq!(card.route_actions.len(), 2, "full public route context travels along");
+
+        assert!(
+            action_node_results(&[&route], "不存在的节点词").is_empty(),
+            "only entity matches become typed nodes"
+        );
+    }
+
+    #[test]
+    fn scene_equipment_search_keeps_route_and_node_attribution() {
+        let route = route_with_entities();
+
+        let results = scene_equipment_results(&[&route], "登山鞋");
+
+        assert_eq!(results.len(), 1);
+        let gear = &results[0];
+        assert_eq!(gear.result_type, pb::SearchResultType::SceneEquipment as i32);
+        assert_eq!(
+            gear.id,
+            "route-1/node-summit/equipment/登山鞋",
+            "identity binds the gear to its route and action"
+        );
+        let exact = results[0].score;
+        // An exact term outranks a partial mention on the same quality score.
+        let partial = scene_equipment_results(&[&route], "登山");
+        assert!(partial.iter().all(|item| item.score < exact));
+    }
+
+    #[tokio::test]
+    async fn equipment_search_end_to_end_stays_typed_through_the_pipeline() {
+        let route = route_with_entities();
+        let service = SearchService::new(Arc::new(StaticSearchSource {
+            items: vec![route],
+            degraded: false,
+        }));
+
+        let response = service
+            .search(request("登山鞋", pb::SearchType::Equipment, None, Some(5)))
+            .await
+            .expect("equipment search succeeds");
+
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(
+            response.items[0].result_type,
+            pb::SearchResultType::SceneEquipment as i32
+        );
+    }
+
+    #[test]
+    fn revalidation_preserves_public_route_actions_without_private_fields() {
+        let indexed = bbs_link_pb::ContentPage {
+            items: vec![content("route-1", "索引作者", "索引路线", "路线")],
+            next_cursor: Some("pit".to_string()),
+            total_estimate: 1,
+        };
+        let mut summary = public_summary(
+            "route-1",
+            "权威作者",
+            "权威路线",
+            "权威摘要",
+            "路线",
+            bbs_link_pb::ContentType::Route,
+            0.8,
+        );
+        summary.route_actions = vec![bbs_link_pb::RouteTemplateAction {
+            id: "node-1".to_string(),
+            title: "带装备行动".to_string(),
+            scene_equipment: vec!["登山鞋".to_string()],
+            ..Default::default()
+        }];
+
+        let (page, degraded) = reconcile_indexed_page(
+            indexed,
+            bbs_link_pb::PublicContentSummaries {
+                items: vec![summary],
+            },
+            None,
+        )
+        .expect("public route summary should reconcile");
+
+        assert!(!degraded);
+        let route = page.items.first().expect("route result");
+        let template = route.route_template.as_ref().expect("public actions");
+        assert_eq!(template.actions[0].id, "node-1");
+        assert_eq!(template.actions[0].scene_equipment, vec!["登山鞋"]);
+        assert!(route.body.is_empty());
+        assert!(route.media.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_route_context_fields() {
+        let service = SearchService::new(Arc::new(StaticSearchSource {
+            items: Vec::new(),
+            degraded: false,
+        }));
+        let mut request = request("路线", pb::SearchType::Journeys, None, None);
+        request.route_id = Some("r".repeat(MAX_ROUTE_CONTEXT_FIELD_LENGTH + 1));
+        request.action_node_id = Some("node-1".to_string());
+        let error = service
+            .search(request)
+            .await
+            .expect_err("oversized route context must be rejected");
+        assert!(matches!(error, SearchError::Validation(_)));
     }
 
     #[tokio::test]

@@ -6,10 +6,20 @@
 
 ## 接口
 
-- 内部 gRPC：`context`、`visibility_context`、`set_edge`、`list_route_participations`、`route_context`、`set_route_participation`。
+- 内部 gRPC：`context`、`visibility_context`、`set_edge`、`list_followers`、`get_social_stats`、`list_route_peers`、`list_route_participations`、`route_context`、`set_route_participation`。
 - 外部 HTTP：`PUT /v1/users/{user_id}/follow`，请求体使用 `edge=follow|block|mute` 和 `active`。
 
 拉黑会移除双方已有关注关系；处于拉黑关系的用户不能重新关注；服务拒绝空 ID 或用户对自己建立社交关系。每次关系写入都会按无向用户对获取事务 advisory lock，因此并发的关注和拉黑会串行化，拉黑完成后不会再落入新的关注关系。启用 `SERVICE_AUTH_REQUIRED=true` 后，全部业务 gRPC 都必须携带 `x-service-token`，健康检查除外；这使客户端只能经 Gateway 使用可信身份和可见性策略。`visibility_context` 合并当前用户的拉黑/静音对象与拉黑当前用户的作者；推荐、搜索和 Gateway 的直接内容读取/互动据此双向隐藏内容，但不会经客户端社交上下文暴露入站拉黑关系。路线参与命令携带 Growth 意图版本，BBS 在事务内拒绝旧版本，避免延迟加入覆盖较新的退出。
+
+## 粉丝列表与社交计数
+
+`list_followers` 以 keyset 游标返回某用户的入站关注（按 `(followed_at, follower_id)` 降序），游标形如 `{unix_millis}.{follower_id}`；相比偏移量分页，翻页期间新增的关注不会造成重复或漏行。单页默认 50 条、上限 200，非法或负时间戳游标返回校验错误。查询由迁移 `0080_bbs_follower_pages.sql` 的部分覆盖索引 `(target_user_id, created_at DESC, source_user_id DESC)` 支持，每页一次有序索引扫描。`get_social_stats` 返回双向关注计数，与上下文读取共用版本化缓存：任何关系写入都会同时失效两端的计数缓存，未关注变化不会伪装成已刷新。
+
+Gateway 暴露 `GET /v1/users/{user_id}/followers?cursor&limit` 与 `GET /v1/users/{user_id}/social-stats`，供创作者主页展示粉丝与关注数量。
+
+## 同行者列表
+
+`list_route_peers(route_id, viewer_id, cursor)` 从公共参与事实读取一条路线的活跃参与者（不含查看者本人），供路线详情的「同行」模块使用。可见性过滤复用既有安全链路：领域层先经 `visibility_context` 取得查看者的排除集合（双向拉黑加上对外静音），再把集合下推到事实查询；该读失败时整个请求返回错误而不是把未知关系当作可见——fail-closed。参与者的私人旅程 ID 不在响应中暴露。Gateway 路由为 `GET /v1/routes/{route_id}/peers?cursor&limit`，游标语义与粉丝页一致。
 
 ## 热门路线计数
 

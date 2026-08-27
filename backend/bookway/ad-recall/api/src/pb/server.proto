@@ -1,5 +1,5 @@
 syntax = "proto3";
 package bookway.ad.recall;
 import "ad-center/api/src/pb/server.proto";
-message RecallRequest { string user_id = 1; string placement = 2; string domain = 3; uint32 limit = 4; string route_id = 5; string action_node_id = 6; string scene_equipment = 7; }
+message RecallRequest { string user_id = 1; string placement = 2; string domain = 3; uint32 limit = 4; string route_id = 5; string action_node_id = 6; string scene_equipment = 7; string geo_region = 8; string device_os = 9; }
 service AdRecall { rpc Recall(RecallRequest) returns (bookway.ad.center.CampaignList); }

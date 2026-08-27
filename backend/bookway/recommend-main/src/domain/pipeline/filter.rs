@@ -46,6 +46,20 @@ impl CandidateFilter for DuplicateFilter {
     }
 }
 
+/// Hard daily exposure guard. Counters come from `FrequencyCapHydrator`; on a
+/// failed lookup the hydrator errors before this filter runs, so the feed
+/// fails open instead of silently over-serving.
+/// A cap of zero disables the guard (never filters everything).
+pub(crate) struct FrequencyCapFilter {
+    pub(crate) daily_cap: u32,
+}
+
+impl CandidateFilter for FrequencyCapFilter {
+    fn retain(&self, _query: &FeedQuery, candidate: &Candidate) -> bool {
+        self.daily_cap == 0 || candidate.daily_served_count < self.daily_cap
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -53,6 +67,8 @@ mod tests {
     use bookway_bbs_link_api::pb::{ContentStatus, GrowthDomain, PostSummary};
 
     use super::{CandidateFilter, FollowingOnlyFilter};
+    #[cfg(test)]
+    use super::FrequencyCapFilter;
     use crate::domain::pipeline::{Candidate, FeedQuery};
 
     fn query(surface: &str) -> FeedQuery {
@@ -101,6 +117,7 @@ mod tests {
             bookmarked: false,
             hidden: false,
             previously_served: false,
+            daily_served_count: 0,
         }
     }
 
@@ -113,5 +130,34 @@ mod tests {
     #[test]
     fn home_surface_is_not_restricted_to_followed_authors() {
         assert!(FollowingOnlyFilter.retain(&query("home"), &candidate(false)));
+    }
+
+    #[test]
+    fn frequency_cap_drops_items_at_or_over_the_daily_allowance() {
+        let filter = FrequencyCapFilter { daily_cap: 3 };
+        let mut fresh = candidate(true);
+        fresh.daily_served_count = 2;
+        let mut at_cap = candidate(true);
+        at_cap.daily_served_count = 3;
+        let mut over_cap = candidate(true);
+        over_cap.daily_served_count = 9;
+
+        assert!(filter.retain(&query("home"), &fresh));
+        assert!(!filter.retain(&query("home"), &at_cap));
+        assert!(!filter.retain(&query("home"), &over_cap));
+    }
+
+    #[test]
+    fn zero_frequency_cap_disables_the_guard() {
+        let filter = FrequencyCapFilter { daily_cap: 0 };
+        let mut exhausted = candidate(true);
+        exhausted.daily_served_count = u32::MAX;
+        assert!(filter.retain(&query("home"), &exhausted));
+    }
+
+    #[test]
+    fn frequency_counts_start_at_zero_when_unhydrated() {
+        let filter = FrequencyCapFilter { daily_cap: 1 };
+        assert!(filter.retain(&query("home"), &candidate(true)));
     }
 }

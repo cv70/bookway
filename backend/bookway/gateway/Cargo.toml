@@ -28,6 +28,7 @@ bookway-knowledge-catalog-api.workspace = true
 bookway-media-api.workspace = true
 bookway-recommend-main-api.workspace = true
 bookway-mall-api.workspace = true
+bookway-mall-inventory-api.workspace = true
 bookway-mall-order-api.workspace = true
 bookway-search-main-api.workspace = true
 bookway-bbs-search-api.workspace = true

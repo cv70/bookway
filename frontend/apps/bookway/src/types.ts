@@ -651,6 +651,16 @@ export type SocialContext = {
   muted_author_ids: string[];
 };
 
+export type SocialStats = {
+  followers: number;
+  following: number;
+};
+
+export type RoutePeerPage = {
+  items: { user_id: string; joined_at: string }[];
+  next_cursor?: string | null;
+};
+
 export type RouteParticipation = {
   route_id: string;
   private_journey_id?: string | null;

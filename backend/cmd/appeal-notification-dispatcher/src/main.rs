@@ -201,14 +201,14 @@ impl GrpcNotificationTarget {
         bbs_link_url: String,
         growth_url: String,
         service_auth_token: Option<MetadataValue<Ascii>>,
-    ) -> Result<Self, tonic::transport::Error> {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let bbs_link_channel = bookway_runtime::grpc_channel(&bbs_link_url).await?;
+        let growth_channel = bookway_runtime::grpc_channel(&growth_url).await?;
         Ok(Self {
-            bbs_link: bookway_bbs_link_api::pb::bbs_link_client::BbsLinkClient::connect(
-                bbs_link_url,
-            )
-            .await?,
-            growth: bookway_growth_api::pb::growth_client::GrowthClient::connect(growth_url)
-                .await?,
+            bbs_link: bookway_bbs_link_api::pb::bbs_link_client::BbsLinkClient::new(
+                bbs_link_channel,
+            ),
+            growth: bookway_growth_api::pb::growth_client::GrowthClient::new(growth_channel),
             service_auth_token,
         })
     }

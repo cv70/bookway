@@ -6,7 +6,7 @@ use std::{
 use crate::conf::Config;
 use crate::{
     api::pb,
-    datasource::{FeatureCache, FeatureDao},
+    datasource::{FeatureDao, UserFeatureCache, user_feature_cache},
 };
 
 const MAX_CANDIDATE_IDS: usize = 500;
@@ -18,7 +18,7 @@ use crate::datasource::CandidateFeatures;
 pub struct Domain {
     pub(crate) config: Config,
     dao: Arc<FeatureDao>,
-    cache: Arc<FeatureCache>,
+    cache: Arc<UserFeatureCache>,
     model_version: String,
 }
 impl Domain {
@@ -38,7 +38,7 @@ impl Domain {
         Ok(Self {
             config,
             dao: Arc::new(FeatureDao::new(pool, model_version.clone())),
-            cache: Arc::new(FeatureCache::new(redis)),
+            cache: Arc::new(user_feature_cache(redis)),
             model_version,
         })
     }

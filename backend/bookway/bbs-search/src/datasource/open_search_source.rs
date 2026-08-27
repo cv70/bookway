@@ -30,7 +30,9 @@ impl SearchSource for OpenSearchSource {
         query: bbs_link_pb::ListRequest,
         text: &str,
         excluded_author_ids: &[String],
+        entity_bias: Option<EntityBias>,
     ) -> Result<SearchSourceResult, SearchSourceError> {
+        let initial_query = query.cursor.is_none();
         if query
             .cursor
             .as_deref()
@@ -55,6 +57,19 @@ impl SearchSource for OpenSearchSource {
                 serde_json::json!({ "term": { "content_type": content_type_name(content_type) } }),
             );
         }
+        // Entity surfaces only make sense over content that actually owns
+        // route action nodes; the exists guard keeps stray docs out even when
+        // the type filter alone would.
+        let bias_fields: Option<&[&str]> = match entity_bias {
+            Some(EntityBias::ActionNode) => {
+                Some(&["route_action_titles^6", "route_action_details^3", "route_action_ids^4"])
+            }
+            Some(EntityBias::SceneEquipment) => Some(&["route_scene_equipment^5"]),
+            None => None,
+        };
+        if entity_bias.is_some() {
+            filters.push(serde_json::json!({ "exists": { "field": "route_action_ids" } }));
+        }
         if let Some(domain) = query.domain {
             filters.push(serde_json::json!({ "term": { "domain": domain_name(domain) } }));
         }
@@ -68,12 +83,33 @@ impl SearchSource for OpenSearchSource {
                 filters.push(serde_json::json!({ "terms": { "id.keyword": ids } }));
             }
         }
+        let general_match = serde_json::json!({
+            "multi_match": { "query": text, "fields": ["title^4", "summary^2", "route_action_titles^3", "route_scene_equipment^3", "route_action_details^2", "route_action_ids", "body", "tags", "topics", "author_name"], "type": "best_fields" }
+        });
+        // Biased matches are OR-ed in so a node-name hit or an equipment-term
+        // hit qualifies on its own while the general text keeps contributing
+        // relevance for ordinary queries sharing the same page.
+        let must = match bias_fields {
+            Some(fields) => vec![
+                serde_json::json!({ "multi_match": { "query": text, "fields": fields, "type": "best_fields" } }),
+                general_match,
+            ],
+            None => vec![general_match],
+        };
+        // Entity-biased queries additionally reward the strict field match so
+        // a node/equipment hit outranks documents whose body merely mentions it.
+        let mut bool_query = serde_json::json!({ "must": must });
+        if entity_bias.is_some() {
+            bool_query["should"] = serde_json::json!([
+                { "multi_match": { "query": text, "fields": ["route_action_titles", "route_scene_equipment"], "type": "best_fields", "boost": 3.0 } }
+            ]);
+        }
         let mut body = serde_json::json!({
             "size": query.limit.unwrap_or(100).clamp(1, 100),
             "track_total_hits": true,
             "pit": { "id": pit_cursor.id, "keep_alive": PIT_KEEP_ALIVE },
             "sort": [{ "_score": "desc" }, { "id.keyword": "asc" }],
-            "query": { "bool": { "must": [{ "multi_match": { "query": text, "fields": ["title^4", "summary^2", "route_action_titles^3", "route_scene_equipment^3", "route_action_details^2", "route_action_ids", "body", "tags", "topics", "author_name"], "type": "best_fields" }}], "filter": filters }},
+            "query": { "bool": bool_query, "filter": filters },
             "highlight": { "fields": { "title": {}, "summary": {}, "body": {} } }
         });
         if !excluded_author_ids.is_empty() {
@@ -137,7 +173,15 @@ impl SearchSource for OpenSearchSource {
             .and_then(|value| value.get("hits"))
             .and_then(serde_json::Value::as_array)
             .cloned()
-            .ok_or_else(|| SearchSourceError::Request("OpenSearch hits missing".to_string()))?;
+            .ok_or_else(|| SearchSourceError::Request("OpenSearch hits missing".to_string()));
+        let hits = match hits {
+            Ok(hits) => hits,
+            Err(_error) if initial_query => {
+                self.close_pit(&pit_cursor.id).await;
+                return Err(SearchSourceError::Fallback);
+            }
+            Err(error) => return Err(error),
+        };
         let hit_count = hits.len();
         let last_sort = hits
             .last()
@@ -157,7 +201,15 @@ impl SearchSource for OpenSearchSource {
                             .map_err(|error| SearchSourceError::Request(error.to_string()))
                     })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>();
+        let items = match items {
+            Ok(items) => items,
+            Err(_error) if initial_query => {
+                self.close_pit(&pit_cursor.id).await;
+                return Err(SearchSourceError::Fallback);
+            }
+            Err(error) => return Err(error),
+        };
         let total = payload
             .get("hits")
             .and_then(|value| value.get("total"))
@@ -172,15 +224,25 @@ impl SearchSource for OpenSearchSource {
         let next_cursor = if pit_cursor.seen_hits + hit_count < total {
             let Some(search_after) = last_sort else {
                 self.close_pit(&active_pit_id).await;
-                return Err(SearchSourceError::Request(
-                    "OpenSearch hit sort values missing".to_string(),
-                ));
+                return Err(if initial_query {
+                    SearchSourceError::Fallback
+                } else {
+                    SearchSourceError::Request("OpenSearch hit sort values missing".to_string())
+                });
             };
-            Some(encode_pit_cursor(&PitCursor {
+            let encoded = encode_pit_cursor(&PitCursor {
                 id: active_pit_id.clone(),
                 search_after: Some(search_after),
                 seen_hits: pit_cursor.seen_hits + hit_count,
-            })?)
+            });
+            match encoded {
+                Ok(cursor) => Some(cursor),
+                Err(_error) if initial_query => {
+                    self.close_pit(&active_pit_id).await;
+                    return Err(SearchSourceError::Fallback);
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             None
         };

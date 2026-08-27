@@ -24,8 +24,14 @@ export function campaignFromRemote(remote: AdCampaign): Campaign {
     color: "gray",
     binding: bindingFor(remote),
     creativeName: remote.title,
+    title: remote.title,
+    body: remote.body,
+    imageUrl: remote.image_url,
+    landingUrl: remote.landing_url,
     frequencyCap: remote.frequency_cap,
     bid: remote.bid_micros / 1_000_000,
+    geoRegions: remote.geo_regions,
+    deviceOs: remote.device_os,
     predictions: {
       pctr: remote.predicted_ctr,
       pcvr: remote.predicted_cvr,
@@ -44,11 +50,13 @@ export function createRemoteCampaign(campaign: Campaign): CreateAdCampaign {
     route_id: campaign.binding.routeId,
     action_node_id: campaign.binding.id,
     scene_equipment: campaign.binding.equipment,
-    title: campaign.creativeName,
-    body: campaign.goal,
-    image_url: "",
-    landing_url: "",
+    title: campaign.title,
+    body: campaign.body,
+    image_url: campaign.imageUrl,
+    landing_url: campaign.landingUrl,
     target_domains: [],
+    geo_regions: campaign.geoRegions,
+    device_os: campaign.deviceOs,
     pricing_model: campaign.goal === "落地页访问" ? 1 : 0,
     bid_micros: Math.round(campaign.bid * 1_000_000),
     daily_budget_micros: Math.round(
@@ -64,8 +72,10 @@ export function createRemoteCampaign(campaign: Campaign): CreateAdCampaign {
 export function updateRemoteCampaign(campaign: Campaign): UpdateAdCampaign {
   return {
     name: campaign.name,
-    title: campaign.creativeName,
-    body: campaign.goal,
+    title: campaign.title,
+    body: campaign.body,
+    image_url: campaign.imageUrl,
+    landing_url: campaign.landingUrl,
     status:
       campaign.state === "running" ? 1 : campaign.state === "paused" ? 2 : 0,
     bid_micros: Math.round(campaign.bid * 1_000_000),
@@ -76,5 +86,7 @@ export function updateRemoteCampaign(campaign: Campaign): UpdateAdCampaign {
     predicted_ctr: campaign.predictions.pctr,
     predicted_cvr: campaign.predictions.pcvr,
     global_frequency_cap: campaign.frequencyCap,
+    geo_regions: campaign.geoRegions,
+    device_os: campaign.deviceOs,
   };
 }

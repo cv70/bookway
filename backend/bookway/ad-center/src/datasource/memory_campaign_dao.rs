@@ -1,11 +1,26 @@
 use super::*;
+use std::collections::BTreeMap;
 
-#[derive(Default)]
 pub(crate) struct MemoryCampaignDao {
     campaigns: RwLock<HashMap<String, pb::AdCampaign>>,
     events: RwLock<HashMap<String, MemoryEvent>>,
     daily_spend: RwLock<HashMap<(String, String), i64>>,
     decisions: RwLock<HashMap<(String, String), MemoryDecision>>,
+    user_daily_total_cap: RwLock<u32>,
+}
+
+impl Default for MemoryCampaignDao {
+    fn default() -> Self {
+        Self {
+            campaigns: RwLock::default(),
+            events: RwLock::default(),
+            daily_spend: RwLock::default(),
+            decisions: RwLock::default(),
+            // Memory mode has no guardrail table; it starts at the seeded
+            // default and `set_user_daily_total_cap` may move it.
+            user_daily_total_cap: RwLock::new(DEFAULT_USER_DAILY_TOTAL_CAP),
+        }
+    }
 }
 
 impl MemoryCampaignDao {
@@ -19,6 +34,105 @@ impl MemoryCampaignDao {
         {
             decision.expires_at = OffsetDateTime::now_utc() - time::Duration::minutes(1);
         }
+    }
+
+    /// Shared auction-input filter. With `include_frequency_caps` the two
+    /// per-campaign impression caps are adjudicated here; without them this
+    /// yields targeting/schedule/budget candidates for the gate pre-filter
+    /// path, mirroring the split in the Postgres dao.
+    async fn eligible_inner(
+        &self,
+        query: EligibleQuery<'_>,
+        include_frequency_caps: bool,
+    ) -> Result<Vec<pb::AdCampaign>, DaoError> {
+        let now = OffsetDateTime::now_utc();
+        let day = date_key(now);
+        let campaigns = self.campaigns.read().await;
+        let events = self.events.read().await;
+        let daily_spend = self.daily_spend.read().await;
+        let mut values = campaigns
+            .values()
+            .filter(|campaign| campaign.status == pb::CampaignStatus::Active as i32)
+            .filter(|campaign| campaign.placement == query.placement)
+            .filter(|campaign| campaign.route_id == query.route_id)
+            .filter(|campaign| campaign.action_node_id == query.action_node_id)
+            .filter(|campaign| campaign.scene_equipment == query.scene_equipment)
+            .filter(|campaign| campaign_starts(campaign).is_none_or(|start| start <= now))
+            .filter(|campaign| campaign_ends(campaign).is_none_or(|end| end > now))
+            .filter(|campaign| {
+                query.domain.is_empty()
+                    || campaign.target_domains.is_empty()
+                    || campaign
+                        .target_domains
+                        .iter()
+                        .any(|value| value == query.domain)
+            })
+            // Same fail-closed contract as the SQL variant: an empty request
+            // region/os never matches restricted campaigns (only unrestricted
+            // ones serve without observable delivery context).
+            .filter(|campaign| {
+                campaign.geo_regions.is_empty()
+                    || (!query.geo_region.is_empty()
+                        && campaign
+                            .geo_regions
+                            .iter()
+                            .any(|value| value == query.geo_region))
+            })
+            .filter(|campaign| {
+                campaign.device_os.is_empty()
+                    || (!query.device_os.is_empty()
+                        && campaign.device_os.iter().any(|value| value == query.device_os))
+            })
+            .filter_map(|campaign| {
+                let mut campaign = campaign.clone();
+                campaign.spent_today_micros = *daily_spend
+                    .get(&(campaign.id.clone(), day.clone()))
+                    .unwrap_or(&0);
+                if campaign.daily_budget_micros > 0
+                    && campaign.spent_today_micros >= campaign.daily_budget_micros
+                {
+                    return None;
+                }
+                if include_frequency_caps {
+                    let impressions = events
+                        .values()
+                        .filter(|event| {
+                            event.user_id == query.user_id
+                                && event.campaign_id == campaign.id
+                                && event.event_type == pb::EventType::Impression as i32
+                                && date_key(event.occurred_at) == day
+                        })
+                        .count();
+                    if campaign.frequency_cap > 0
+                        && impressions >= campaign.frequency_cap as usize
+                    {
+                        return None;
+                    }
+                    let global_impressions = events
+                        .values()
+                        .filter(|event| {
+                            event.campaign_id == campaign.id
+                                && event.event_type == pb::EventType::Impression as i32
+                                && date_key(event.occurred_at) == day
+                        })
+                        .count();
+                    if campaign.global_frequency_cap > 0
+                        && global_impressions >= campaign.global_frequency_cap as usize
+                    {
+                        return None;
+                    }
+                }
+                Some(campaign)
+            })
+            .collect::<Vec<_>>();
+        values.sort_by(|left, right| {
+            right
+                .bid_micros
+                .cmp(&left.bid_micros)
+                .then(left.id.cmp(&right.id))
+        });
+        values.truncate(query.limit);
+        Ok(values)
     }
 }
 
@@ -82,74 +196,80 @@ impl CampaignDao for MemoryCampaignDao {
     }
 
     async fn eligible(&self, query: EligibleQuery<'_>) -> Result<Vec<pb::AdCampaign>, DaoError> {
-        let now = OffsetDateTime::now_utc();
-        let day = date_key(now);
+        // Full adjudication including both per-campaign impression caps: this
+        // is the fail-open path when no Redis gate is configured.
+        Self::eligible_inner(self, query, true).await
+    }
+
+    async fn eligible_candidates(
+        &self,
+        query: EligibleQuery<'_>,
+    ) -> Result<Vec<pb::AdCampaign>, DaoError> {
+        // Targeting/schedule/budget candidates only; frequency adjudication is
+        // delegated to the gate pre-filter plus RecordEvent.
+        Self::eligible_inner(self, query, false).await
+    }
+
+    async fn user_daily_total_cap(&self) -> Result<u32, DaoError> {
+        Ok(*self.user_daily_total_cap.read().await)
+    }
+
+    async fn set_user_daily_total_cap(&self, cap: u32) -> Result<u32, DaoError> {
+        *self.user_daily_total_cap.write().await = cap;
+        Ok(cap)
+    }
+
+    async fn delivery_report(
+        &self,
+        query: DeliveryReportQuery<'_>,
+    ) -> Result<Vec<DeliveryReportRow>, DaoError> {
         let campaigns = self.campaigns.read().await;
         let events = self.events.read().await;
         let daily_spend = self.daily_spend.read().await;
-        let mut values = campaigns
+        let mut rows: Vec<DeliveryReportRow> = Vec::new();
+        for campaign in campaigns
             .values()
-            .filter(|campaign| campaign.status == pb::CampaignStatus::Active as i32)
-            .filter(|campaign| campaign.placement == query.placement)
-            .filter(|campaign| campaign.route_id == query.route_id)
-            .filter(|campaign| campaign.action_node_id == query.action_node_id)
-            .filter(|campaign| campaign.scene_equipment == query.scene_equipment)
-            .filter(|campaign| campaign_starts(campaign).is_none_or(|start| start <= now))
-            .filter(|campaign| campaign_ends(campaign).is_none_or(|end| end > now))
-            .filter(|campaign| {
-                query.domain.is_empty()
-                    || campaign.target_domains.is_empty()
-                    || campaign
-                        .target_domains
-                        .iter()
-                        .any(|value| value == query.domain)
-            })
-            .filter_map(|campaign| {
-                let mut campaign = campaign.clone();
-                campaign.spent_today_micros = *daily_spend
-                    .get(&(campaign.id.clone(), day.clone()))
-                    .unwrap_or(&0);
-                if campaign.daily_budget_micros > 0
-                    && campaign.spent_today_micros >= campaign.daily_budget_micros
+            .filter(|campaign| campaign.advertiser_id == query.advertiser_id)
+        {
+            let mut by_day: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+            for event in events.values().filter(|event| event.campaign_id == campaign.id) {
+                let day = date_key(event.occurred_at);
+                if day.as_str() < query.from_date || day.as_str() > query.to_date {
+                    continue;
+                }
+                let entry = by_day.entry(day).or_default();
+                if event.event_type == pb::EventType::Impression as i32 {
+                    entry.0 += 1;
+                } else if event.event_type == pb::EventType::Click as i32 {
+                    entry.1 += 1;
+                }
+            }
+            for (campaign_id, day) in daily_spend.keys() {
+                if campaign_id != &campaign.id
+                    || day.as_str() < query.from_date
+                    || day.as_str() > query.to_date
                 {
-                    return None;
+                    continue;
                 }
-                let impressions = events
-                    .values()
-                    .filter(|event| {
-                        event.user_id == query.user_id
-                            && event.campaign_id == campaign.id
-                            && event.event_type == pb::EventType::Impression as i32
-                            && date_key(event.occurred_at) == day
-                    })
-                    .count();
-                if campaign.frequency_cap > 0 && impressions >= campaign.frequency_cap as usize {
-                    return None;
-                }
-                let global_impressions = events
-                    .values()
-                    .filter(|event| {
-                        event.campaign_id == campaign.id
-                            && event.event_type == pb::EventType::Impression as i32
-                            && date_key(event.occurred_at) == day
-                    })
-                    .count();
-                if campaign.global_frequency_cap > 0
-                    && global_impressions >= campaign.global_frequency_cap as usize
-                {
-                    return None;
-                }
-                Some(campaign)
-            })
-            .collect::<Vec<_>>();
-        values.sort_by(|left, right| {
+                by_day.entry(day.clone()).or_default();
+            }
+            for (day, (impressions, clicks)) in by_day {
+                rows.push(DeliveryReportRow {
+                    campaign_id: campaign.id.clone(),
+                    spent_micros: *daily_spend.get(&(campaign.id.clone(), day.clone())).unwrap_or(&0),
+                    stat_date: day,
+                    impressions,
+                    clicks,
+                });
+            }
+        }
+        rows.sort_by(|left, right| {
             right
-                .bid_micros
-                .cmp(&left.bid_micros)
-                .then(left.id.cmp(&right.id))
+                .stat_date
+                .cmp(&left.stat_date)
+                .then_with(|| left.campaign_id.cmp(&right.campaign_id))
         });
-        values.truncate(query.limit);
-        Ok(values)
+        Ok(rows)
     }
 
     async fn register_decisions(
@@ -370,7 +490,34 @@ impl CampaignDao for MemoryCampaignDao {
                 duplicate: false,
             });
         }
-        let cost = event_cost(campaign, request.event_type);
+        // Cross-campaign guardrail, mirroring the Postgres adjudication: even
+        // with per-campaign headroom left, a user's impressions today may not
+        // pass the platform-wide daily total.
+        if request.event_type == pb::EventType::Impression as i32 {
+            let total_cap = *self.user_daily_total_cap.read().await;
+            if total_cap > 0 {
+                let user_total = events
+                    .values()
+                    .filter(|event| {
+                        event.user_id == user_id
+                            && event.event_type == pb::EventType::Impression as i32
+                            && date_key(event.occurred_at) == day
+                    })
+                    .count();
+                if user_total >= total_cap as usize {
+                    return Ok(pb::EventReceipt {
+                        event_id: request.event_id,
+                        accepted: false,
+                        duplicate: false,
+                    });
+                }
+            }
+        }
+        let cost = event_cost(
+            campaign,
+            request.event_type,
+            i64::try_from(global_impressions).unwrap_or(i64::MAX),
+        );
         let mut daily_spend = self.daily_spend.write().await;
         let spent = daily_spend.entry((campaign.id.clone(), day)).or_default();
         if campaign.daily_budget_micros > 0

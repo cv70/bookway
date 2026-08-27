@@ -1,4 +1,7 @@
-use crate::api::pb;
+use crate::{
+    api::pb,
+    datasource::{format_timestamp, FollowedEdge, KeysetCursor, PeerEdge},
+};
 
 use crate::domain::{BbsError, Domain};
 
@@ -39,6 +42,108 @@ impl Domain {
                 request.active,
             )
             .await?)
+    }
+
+    pub(crate) async fn list_followers(
+        &self,
+        request: pb::ListFollowersRequest,
+    ) -> Result<pb::FollowerPage, BbsError> {
+        validate_user_id(&request.user_id)?;
+        let before = decode_keyset_cursor(&request.cursor)?;
+        let limit = if request.limit == 0 {
+            DEFAULT_FOLLOWER_PAGE_LIMIT
+        } else {
+            request.limit.min(MAX_FOLLOWER_PAGE_LIMIT)
+        };
+        let items = self
+            .dao
+            .list_followers(&request.user_id, before, limit)
+            .await?;
+        // A full page implies more may follow; the last row becomes the resume
+        // key. One extra empty page at the tail is the honest keyset cost.
+        let next_cursor = (items.len() as u32 == limit).then(|| {
+            items
+                .last()
+                .map(|edge| encode_keyset_cursor(&edge.follower_id, edge.followed_at))
+        });
+        let mut followers = Vec::with_capacity(items.len());
+        for FollowedEdge {
+            follower_id,
+            followed_at,
+        } in items
+        {
+            followers.push(pb::Follower {
+                user_id: follower_id,
+                followed_at: format_timestamp(followed_at)
+                    .map_err(|_| BbsError::Validation("时间戳格式化失败".to_string()))?,
+            });
+        }
+        Ok(pb::FollowerPage {
+            items: followers,
+            next_cursor: next_cursor.flatten(),
+        })
+    }
+
+    /// Co-walkers of one route, resolved from public participation facts and
+    /// filtered by the viewer's visibility context. That read is fail-closed:
+    /// when the visibility layer cannot prove freshness it errors out instead
+    /// of serving an unknown relationship as "visible".
+    pub(crate) async fn list_route_peers(
+        &self,
+        request: pb::ListRoutePeersRequest,
+    ) -> Result<pb::RoutePeerPage, BbsError> {
+        validate_user_id(&request.viewer_id)?;
+        validate_identifier("路线 ID", &request.route_id)?;
+        let before = decode_keyset_cursor(&request.cursor)?;
+        let limit = if request.limit == 0 {
+            DEFAULT_FOLLOWER_PAGE_LIMIT
+        } else {
+            request.limit.min(MAX_FOLLOWER_PAGE_LIMIT)
+        };
+        let excluded_user_ids = self
+            .dao
+            .visibility_context(&request.viewer_id)
+            .await?
+            .excluded_author_ids;
+        let items = self
+            .dao
+            .list_route_peers(
+                &request.route_id,
+                &request.viewer_id,
+                &excluded_user_ids,
+                before,
+                limit,
+            )
+            .await?;
+        let next_cursor = (items.len() as u32 == limit).then(|| {
+            items
+                .last()
+                .map(|peer| encode_keyset_cursor(&peer.user_id, peer.joined_at))
+        });
+        let mut peers = Vec::with_capacity(items.len());
+        for PeerEdge { user_id, joined_at } in items {
+            peers.push(pb::RoutePeer {
+                user_id,
+                joined_at: format_timestamp(joined_at)
+                    .map_err(|_| BbsError::Validation("时间戳格式化失败".to_string()))?,
+            });
+        }
+        Ok(pb::RoutePeerPage {
+            items: peers,
+            next_cursor: next_cursor.flatten(),
+        })
+    }
+
+    pub(crate) async fn get_social_stats(
+        &self,
+        request: pb::SocialStatsRequest,
+    ) -> Result<pb::SocialStats, BbsError> {
+        validate_user_id(&request.user_id)?;
+        let (followers, following) = self.dao.social_stats(&request.user_id).await?;
+        Ok(pb::SocialStats {
+            followers,
+            following,
+        })
     }
 
     pub(crate) async fn list_route_participations(
@@ -100,6 +205,45 @@ impl Domain {
 
 fn validate_user_id(user_id: &str) -> Result<(), BbsError> {
     validate_identifier("用户 ID", user_id)
+}
+
+const DEFAULT_FOLLOWER_PAGE_LIMIT: u32 = 50;
+const MAX_FOLLOWER_PAGE_LIMIT: u32 = 200;
+
+/// `{unix_nanos}.{user_id}` — resumable ordering by `(time, id)` descending.
+/// `split_once` keeps ids that themselves contain dots intact. Shared by the
+/// follower and co-walker pages, which use the same ordering discipline. The
+/// full-nanosecond stamp matters: truncating to milliseconds would swallow the
+/// rows sharing the truncated millisecond on the next page.
+fn encode_keyset_cursor(id: &str, at: time::OffsetDateTime) -> String {
+    // Nanoseconds since the epoch fit an i64 until year 2262.
+    let nanos = i64::try_from(at.unix_timestamp_nanos()).unwrap_or(i64::MAX);
+    format!("{nanos}.{id}")
+}
+
+fn decode_keyset_cursor(cursor: &str) -> Result<Option<KeysetCursor>, BbsError> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let Some((nanos, id)) = trimmed.split_once('.') else {
+        return Err(BbsError::Validation("列表游标无效".to_string()));
+    };
+    let nanos: i64 = nanos
+        .parse()
+        .map_err(|_| BbsError::Validation("列表游标无效".to_string()))?;
+    if nanos < 0 {
+        // Follow and join times are never before the epoch; reject rather than
+        // serve a cursor pointing into 1969.
+        return Err(BbsError::Validation("列表游标无效".to_string()));
+    }
+    let at = time::OffsetDateTime::from_unix_timestamp_nanos(nanos as i128)
+        .map_err(|_| BbsError::Validation("列表游标无效".to_string()))?;
+    validate_user_id(id)?;
+    Ok(Some(KeysetCursor {
+        at,
+        id: id.to_string(),
+    }))
 }
 
 fn validate_identifier(label: &str, value: &str) -> Result<(), BbsError> {
@@ -449,5 +593,272 @@ mod tests {
         assert!(rejoined.joined);
         assert_eq!(rejoined.participant_count, 1);
         assert_eq!(retry.participant_count, 1);
+    }
+
+    #[tokio::test]
+    async fn follower_pages_walk_newest_first_and_resume_without_duplicates() {
+        let domain = domain();
+        for follower in ["user-a", "user-b"] {
+            domain
+                .set_edge(pb::SetEdgeRequest {
+                    user_id: follower.to_string(),
+                    target_user_id: "author-changfeng".to_string(),
+                    edge: pb::SocialEdgeType::Follow as i32,
+                    active: true,
+                })
+                .await
+                .expect("follow");
+        }
+
+        let first = domain
+            .list_followers(pb::ListFollowersRequest {
+                user_id: "author-changfeng".to_string(),
+                cursor: String::new(),
+                limit: 2,
+            })
+            .await
+            .expect("first page");
+        let names: Vec<_> = first.items.iter().map(|f| f.user_id.as_str()).collect();
+        // Insertion order also settles follower-id ordering on clock ties.
+        assert_eq!(names, vec!["user-b", "user-a"]);
+        let resume = first.next_cursor.clone().expect("resume cursor");
+
+        let second = domain
+            .list_followers(pb::ListFollowersRequest {
+                user_id: "author-changfeng".to_string(),
+                cursor: resume.clone(),
+                limit: 2,
+            })
+            .await
+            .expect("second page");
+        let rest: Vec<_> = second.items.iter().map(|f| f.user_id.as_str()).collect();
+        assert_eq!(rest, vec!["demo-user"]);
+        assert!(second.next_cursor.is_none());
+
+        // Re-walking with the same cursor must produce the same page.
+        let repeat = domain
+            .list_followers(pb::ListFollowersRequest {
+                user_id: "author-changfeng".to_string(),
+                cursor: resume,
+                limit: 2,
+            })
+            .await
+            .expect("repeat page");
+        assert_eq!(
+            repeat
+                .items
+                .iter()
+                .map(|f| f.user_id.as_str())
+                .collect::<Vec<_>>(),
+            rest
+        );
+    }
+
+    #[tokio::test]
+    async fn social_stats_count_both_edge_directions() {
+        let domain = domain();
+        for (source, target) in [
+            ("user-a", "author-changfeng"),
+            ("author-changfeng", "creator-north"),
+        ] {
+            domain
+                .set_edge(pb::SetEdgeRequest {
+                    user_id: source.to_string(),
+                    target_user_id: target.to_string(),
+                    edge: pb::SocialEdgeType::Follow as i32,
+                    active: true,
+                })
+                .await
+                .expect("follow");
+        }
+
+        let stats = domain
+            .get_social_stats(pb::SocialStatsRequest {
+                user_id: "author-changfeng".to_string(),
+            })
+            .await
+            .expect("stats");
+        assert_eq!((stats.followers, stats.following), (2, 1));
+
+        // Unfollowing drops the count immediately.
+        domain
+            .set_edge(pb::SetEdgeRequest {
+                user_id: "user-a".to_string(),
+                target_user_id: "author-changfeng".to_string(),
+                edge: pb::SocialEdgeType::Follow as i32,
+                active: false,
+            })
+            .await
+            .expect("unfollow");
+        let stats = domain
+            .get_social_stats(pb::SocialStatsRequest {
+                user_id: "author-changfeng".to_string(),
+            })
+            .await
+            .expect("stats after unfollow");
+        assert_eq!((stats.followers, stats.following), (1, 1));
+    }
+
+    #[test]
+    fn follower_cursor_round_trips_ids_with_dots() {
+        let encoded = encode_keyset_cursor(
+            "user.dot",
+            time::OffsetDateTime::from_unix_timestamp_nanos(1_700_000_123_456_000_000)
+                .expect("timestamp"),
+        );
+        let decoded = decode_keyset_cursor(&encoded).expect("valid cursor");
+        assert_eq!(
+            decoded,
+            Some(KeysetCursor {
+                at: time::OffsetDateTime::from_unix_timestamp_nanos(1_700_000_123_456_000_000)
+                    .expect("timestamp"),
+                id: "user.dot".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn blank_or_malformed_follower_cursors_are_rejected() {
+        assert!(decode_keyset_cursor("")
+            .expect("blank cursor is just page one")
+            .is_none());
+        for bad in ["garbage", "-5.user", "notanumber.user"] {
+            assert!(decode_keyset_cursor(bad).is_err(), "cursor {bad:?} passes");
+        }
+    }
+
+    #[tokio::test]
+    async fn route_peers_exclude_the_viewer_and_visibility_blocks() {
+        let domain = domain();
+        for participant in ["user-a", "user-b"] {
+            domain
+                .set_route_participation(pb::RouteParticipationRequest {
+                    user_id: participant.to_string(),
+                    route_id: "route-hot".to_string(),
+                    active: true,
+                    private_journey_id: None,
+                    intent_version: None,
+                })
+                .await
+                .expect("join");
+        }
+
+        let page = domain
+            .list_route_peers(pb::ListRoutePeersRequest {
+                viewer_id: "viewer".to_string(),
+                route_id: "route-hot".to_string(),
+                cursor: String::new(),
+                limit: 10,
+            })
+            .await
+            .expect("peers");
+        let names: Vec<_> = page.items.iter().map(|peer| peer.user_id.as_str()).collect();
+        assert_eq!(names, vec!["user-b", "user-a"]);
+        assert!(page.next_cursor.is_none());
+
+        // The viewer never appears in their own co-walker list.
+        let own = domain
+            .list_route_peers(pb::ListRoutePeersRequest {
+                viewer_id: "user-a".to_string(),
+                route_id: "route-hot".to_string(),
+                cursor: String::new(),
+                limit: 10,
+            })
+            .await
+            .expect("own peers");
+        assert_eq!(
+            own.items.iter().map(|peer| peer.user_id.as_str()).collect::<Vec<_>>(),
+            vec!["user-b"]
+        );
+
+        // A block (either direction) hides the relationship fail-closed.
+        domain
+            .set_edge(pb::SetEdgeRequest {
+                user_id: "viewer".to_string(),
+                target_user_id: "user-a".to_string(),
+                edge: pb::SocialEdgeType::Block as i32,
+                active: true,
+            })
+            .await
+            .expect("block");
+        let filtered = domain
+            .list_route_peers(pb::ListRoutePeersRequest {
+                viewer_id: "viewer".to_string(),
+                route_id: "route-hot".to_string(),
+                cursor: String::new(),
+                limit: 10,
+            })
+            .await
+            .expect("filtered peers");
+        assert_eq!(
+            filtered
+                .items
+                .iter()
+                .map(|peer| peer.user_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-b"]
+        );
+    }
+
+    #[tokio::test]
+    async fn route_peers_keyset_paging_is_stable() {
+        let domain = domain();
+        for index in 0..3 {
+            domain
+                .set_route_participation(pb::RouteParticipationRequest {
+                    user_id: format!("user-{index}"),
+                    route_id: "route-paged".to_string(),
+                    active: true,
+                    private_journey_id: None,
+                    intent_version: None,
+                })
+                .await
+                .expect("join");
+        }
+        let first = domain
+            .list_route_peers(pb::ListRoutePeersRequest {
+                viewer_id: "viewer".to_string(),
+                route_id: "route-paged".to_string(),
+                cursor: String::new(),
+                limit: 2,
+            })
+            .await
+            .expect("first page");
+        assert_eq!(first.items.len(), 2);
+        let resume = first.next_cursor.expect("resume cursor");
+
+        let second = domain
+            .list_route_peers(pb::ListRoutePeersRequest {
+                viewer_id: "viewer".to_string(),
+                route_id: "route-paged".to_string(),
+                cursor: resume.clone(),
+                limit: 2,
+            })
+            .await
+            .expect("second page");
+        assert_eq!(second.items.len(), 1);
+        assert!(second.next_cursor.is_none());
+
+        let repeat = domain
+            .list_route_peers(pb::ListRoutePeersRequest {
+                viewer_id: "viewer".to_string(),
+                route_id: "route-paged".to_string(),
+                cursor: resume,
+                limit: 2,
+            })
+            .await
+            .expect("repeat page");
+        assert_eq!(
+            repeat
+                .items
+                .iter()
+                .map(|peer| peer.user_id.clone())
+                .collect::<Vec<_>>(),
+            second
+                .items
+                .iter()
+                .map(|peer| peer.user_id.clone())
+                .collect::<Vec<_>>()
+        );
     }
 }

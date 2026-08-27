@@ -9,6 +9,7 @@ rust-version.workspace = true
 bookway-feature-main-api.workspace = true
 axum.workspace = true
 bookway-api.workspace = true
+bookway-cache.workspace = true
 bookway-data.workspace = true
 bookway-runtime.workspace = true
 redis.workspace = true

@@ -14,19 +14,21 @@ use conf::Config;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bookway_runtime::init_tracing("search-main");
     let config = Config::from_env()?;
-    let bbs_search = BbsSearchClient::connect(config.bbs_search_url.clone()).await?;
-    let bbs_link = BbsLinkClient::connect(config.bbs_link_url.clone()).await?;
-    let knowledge_catalog =
-        KnowledgeCatalogClient::connect(config.knowledge_catalog_url.clone()).await?;
-    let feature_main = match FeatureMainClient::connect(config.feature_main_url.clone()).await {
-        Ok(client) => Some(client),
+    let bbs_search =
+        BbsSearchClient::new(bookway_runtime::grpc_channel(&config.bbs_search_url).await?);
+    let bbs_link = BbsLinkClient::new(bookway_runtime::grpc_channel(&config.bbs_link_url).await?);
+    let knowledge_catalog = KnowledgeCatalogClient::new(
+        bookway_runtime::grpc_channel(&config.knowledge_catalog_url).await?,
+    );
+    let feature_main = match bookway_runtime::grpc_channel(&config.feature_main_url).await {
+        Ok(channel) => Some(FeatureMainClient::new(channel)),
         Err(error) => {
             tracing::warn!(%error, "feature-main unavailable; search will use lexical ranking");
             None
         }
     };
-    let ad_main = match AdMainClient::connect(config.ad_main_url.clone()).await {
-        Ok(client) => Some(client),
+    let ad_main = match bookway_runtime::grpc_channel(&config.ad_main_url).await {
+        Ok(channel) => Some(AdMainClient::new(channel)),
         Err(error) => {
             tracing::warn!(%error, "ad-main unavailable; search will serve organic results");
             None

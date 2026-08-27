@@ -54,6 +54,18 @@ pub(crate) trait SearchSessionStore: Send + Sync {
 
 const SEARCH_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
 
+/// Field bias for entity-level search surfaces (route nodes, scene gear).
+/// The OpenSearch source narrows its match fields and requires route-action
+/// presence; the BBS Link fallback ignores it and domain-side extraction
+/// guarantees the same typed results from plain content reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntityBias {
+    /// Match inside route action node titles/details/ids.
+    ActionNode,
+    /// Match scene equipment terms referenced by route nodes.
+    SceneEquipment,
+}
+
 #[async_trait]
 pub(crate) trait SearchSource: Send + Sync {
     async fn contents(
@@ -66,6 +78,7 @@ pub(crate) trait SearchSource: Send + Sync {
         query: bbs_link_pb::ListRequest,
         _text: &str,
         _excluded_author_ids: &[String],
+        _entity_bias: Option<EntityBias>,
     ) -> Result<SearchSourceResult, SearchSourceError> {
         self.contents(query).await
     }
@@ -106,6 +119,8 @@ fn result_type(search_type: pb::SearchType) -> pb::SearchResultType {
         pb::SearchType::Users => pb::SearchResultType::User,
         pb::SearchType::Topics => pb::SearchResultType::Topic,
         pb::SearchType::Resources => pb::SearchResultType::Resource,
+        pb::SearchType::Nodes => pb::SearchResultType::ActionNode,
+        pb::SearchType::Equipment => pb::SearchResultType::SceneEquipment,
         pb::SearchType::All | pb::SearchType::Posts => pb::SearchResultType::Post,
     }
 }
@@ -116,6 +131,8 @@ fn result_type_from_name(value: &str) -> pb::SearchResultType {
         "users" => pb::SearchResultType::User,
         "topics" => pb::SearchResultType::Topic,
         "resources" => pb::SearchResultType::Resource,
+        "nodes" => pb::SearchResultType::ActionNode,
+        "equipment" => pb::SearchResultType::SceneEquipment,
         _ => pb::SearchResultType::Post,
     }
 }
@@ -128,6 +145,8 @@ pub(crate) fn search_type_name(value: pb::SearchType) -> &'static str {
         pb::SearchType::Users => "users",
         pb::SearchType::Topics => "topics",
         pb::SearchType::Resources => "resources",
+        pb::SearchType::Nodes => "nodes",
+        pb::SearchType::Equipment => "equipment",
     }
 }
 

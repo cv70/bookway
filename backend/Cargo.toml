@@ -48,11 +48,14 @@ members = [
   "cmd/route-participation-reconciler",
   "cmd/mall-order-expirer",
   "cmd/mall-inventory-sweeper",
+  "cmd/knowledge-embedding-builder",
   "bookway/bbs-search/bg/bbs-indexer",
   "infra/data",
   "infra/event",
   "infra/runtime",
   "pkg/api",
+  "pkg/cache",
+  "pkg/commercial-mix",
   "bookway/account/api",
   "bookway/ad-center/api",
   "bookway/ad-main/api",
@@ -121,6 +124,8 @@ uuid = { version = "1", features = ["serde", "v5", "v7"] }
 url = "2"
 
 bookway-api = { path = "pkg/api" }
+bookway-cache = { path = "pkg/cache" }
+bookway-commercial-mix = { path = "pkg/commercial-mix" }
 bookway-data = { path = "infra/data" }
 bookway-event = { path = "infra/event" }
 bookway-runtime = { path = "infra/runtime" }

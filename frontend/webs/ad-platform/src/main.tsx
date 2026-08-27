@@ -218,9 +218,8 @@ function App() {
                 current.filter((scene) => scene.id !== id),
               )
             }
-            onSaveGuardrails={(next) => {
-              platform.setGuardrails(next);
-              notify("全局投放护栏已保存，新的活动频控将立即按此校验。");
+            onSaveCap={(cap) => {
+              void platform.saveUserDailyCap(cap);
             }}
             notify={notify}
           />

@@ -1,8 +1,12 @@
 use std::{env, str::FromStr, time::Duration};
 
-use redis::aio::{ConnectionManager, ConnectionManagerConfig};
+use redis::aio::ConnectionManagerConfig;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use thiserror::Error;
+
+// Services obtain their Redis handle through bookway_data so the connection
+// policy (timeouts, manager config) stays in exactly one place.
+pub use redis::aio::ConnectionManager;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StorageMode {

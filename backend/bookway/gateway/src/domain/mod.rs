@@ -25,6 +25,7 @@ use bookway_growth_api::pb as growth_pb;
 use bookway_interaction_status_api::pb as like_pb;
 use bookway_knowledge_catalog_api::pb as catalog_pb;
 use bookway_mall_api::pb as mall_pb;
+use bookway_mall_inventory_api::pb as mall_inventory_pb;
 use bookway_mall_order_api::pb as mall_order_pb;
 use bookway_media_api::pb as media_pb;
 use bookway_recommend_main_api::pb as recommend_pb;
@@ -52,6 +53,7 @@ pub(crate) struct Domain {
     ad_center: ad_center_pb::ad_center_client::AdCenterClient<Channel>,
     ad_main: ad_main_pb::ad_main_client::AdMainClient<Channel>,
     mall: mall_pb::mall_client::MallClient<Channel>,
+    mall_inventory: mall_inventory_pb::mall_inventory_client::MallInventoryClient<Channel>,
     mall_order: mall_order_pb::mall_order_client::MallOrderClient<Channel>,
     community_notifications: CommunityNotificationSink,
 }
@@ -65,9 +67,19 @@ enum CommunityNotificationSink {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DomainInitError {
     #[error("could not connect to an upstream service: {0}")]
-    Transport(#[from] tonic::transport::Error),
+    Transport(#[from] bookway_runtime::ConnectFailure),
     #[error("could not initialize community notification storage: {0}")]
     Data(#[from] bookway_data::DataError),
+}
+
+/// Merchant-gated inventory access: upstream failures propagate unchanged,
+/// while a failed ownership proof never leaks whether the SKU exists.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StockAccessError {
+    #[error(transparent)]
+    Upstream(#[from] UpstreamError),
+    #[error("sku does not belong to this merchant")]
+    Forbidden,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -116,67 +128,66 @@ impl Domain {
             bookway_data::StorageMode::Memory => CommunityNotificationSink::Direct,
         };
         Ok(Self {
-            account: account_pb::account_client::AccountClient::connect(config.account_url.clone())
-                .await?,
-            growth: growth_pb::growth_client::GrowthClient::connect(config.growth_url.clone())
-                .await?,
-            knowledge_catalog:
-                catalog_pb::knowledge_catalog_client::KnowledgeCatalogClient::connect(
-                    config.knowledge_catalog_url.clone(),
-                )
-                .await?,
-            bbs_feed: bbs_feed_pb::bbs_feed_client::BbsFeedClient::connect(
-                config.bbs_feed_url.clone(),
-            )
-            .await?,
-            bbs_link: bbs_link_pb::bbs_link_client::BbsLinkClient::connect(
-                config.bbs_link_url.clone(),
-            )
-            .await?,
-            search_main: search_main_pb::search_main_client::SearchMainClient::connect(
-                config.search_main_url.clone(),
-            )
-            .await?,
-            bbs: bbs_pb::bbs_client::BbsClient::connect(config.bbs_url.clone()).await?,
-            bbs_creator: creator_pb::bbs_creator_client::BbsCreatorClient::connect(
-                config.bbs_creator_url.clone(),
-            )
-            .await?,
-            bbs_message: message_pb::bbs_message_client::BbsMessageClient::connect(
-                config.bbs_message_url.clone(),
-            )
-            .await?,
-            comment: comment_pb::comment_client::CommentClient::connect(config.comment_url.clone())
-                .await?,
-            interaction_status:
-                like_pb::interaction_status_client::InteractionStatusClient::connect(
-                    config.interaction_status_url.clone(),
-                )
-                .await?,
-            user_event: user_event_pb::user_event_client::UserEventClient::connect(
-                config.user_event_url.clone(),
-            )
-            .await?,
-            media: media_pb::media_client::MediaClient::connect(config.media_url.clone()).await?,
-            content_audit: audit_pb::content_audit_client::ContentAuditClient::connect(
-                config.content_audit_url.clone(),
-            )
-            .await?,
-            feedback: feedback_pb::feedback_client::FeedbackClient::connect(
-                config.feedback_url.clone(),
-            )
-            .await?,
-            ad_center: ad_center_pb::ad_center_client::AdCenterClient::connect(
-                config.ad_center_url.clone(),
-            )
-            .await?,
-            ad_main: ad_main_pb::ad_main_client::AdMainClient::connect(config.ad_main_url.clone())
-                .await?,
-            mall: mall_pb::mall_client::MallClient::connect(config.mall_url.clone()).await?,
-            mall_order: mall_order_pb::mall_order_client::MallOrderClient::connect(
-                config.mall_order_url.clone(),
-            )
-            .await?,
+            account: account_pb::account_client::AccountClient::new(
+                bookway_runtime::grpc_channel(&config.account_url).await?,
+            ),
+            growth: growth_pb::growth_client::GrowthClient::new(
+                bookway_runtime::grpc_channel(&config.growth_url).await?,
+            ),
+            knowledge_catalog: catalog_pb::knowledge_catalog_client::KnowledgeCatalogClient::new(
+                bookway_runtime::grpc_channel(&config.knowledge_catalog_url).await?,
+            ),
+            bbs_feed: bbs_feed_pb::bbs_feed_client::BbsFeedClient::new(
+                bookway_runtime::grpc_channel(&config.bbs_feed_url).await?,
+            ),
+            bbs_link: bbs_link_pb::bbs_link_client::BbsLinkClient::new(
+                bookway_runtime::grpc_channel(&config.bbs_link_url).await?,
+            ),
+            search_main: search_main_pb::search_main_client::SearchMainClient::new(
+                bookway_runtime::grpc_channel(&config.search_main_url).await?,
+            ),
+            bbs: bbs_pb::bbs_client::BbsClient::new(
+                bookway_runtime::grpc_channel(&config.bbs_url).await?,
+            ),
+            bbs_creator: creator_pb::bbs_creator_client::BbsCreatorClient::new(
+                bookway_runtime::grpc_channel(&config.bbs_creator_url).await?,
+            ),
+            bbs_message: message_pb::bbs_message_client::BbsMessageClient::new(
+                bookway_runtime::grpc_channel(&config.bbs_message_url).await?,
+            ),
+            comment: comment_pb::comment_client::CommentClient::new(
+                bookway_runtime::grpc_channel(&config.comment_url).await?,
+            ),
+            interaction_status: like_pb::interaction_status_client::InteractionStatusClient::new(
+                bookway_runtime::grpc_channel(&config.interaction_status_url).await?,
+            ),
+            user_event: user_event_pb::user_event_client::UserEventClient::new(
+                bookway_runtime::grpc_channel(&config.user_event_url).await?,
+            ),
+            media: media_pb::media_client::MediaClient::new(
+                bookway_runtime::grpc_channel(&config.media_url).await?,
+            ),
+            content_audit: audit_pb::content_audit_client::ContentAuditClient::new(
+                bookway_runtime::grpc_channel(&config.content_audit_url).await?,
+            ),
+            feedback: feedback_pb::feedback_client::FeedbackClient::new(
+                bookway_runtime::grpc_channel(&config.feedback_url).await?,
+            ),
+            ad_center: ad_center_pb::ad_center_client::AdCenterClient::new(
+                bookway_runtime::grpc_channel(&config.ad_center_url).await?,
+            ),
+            ad_main: ad_main_pb::ad_main_client::AdMainClient::new(
+                bookway_runtime::grpc_channel(&config.ad_main_url).await?,
+            ),
+            mall: mall_pb::mall_client::MallClient::new(
+                bookway_runtime::grpc_channel(&config.mall_url).await?,
+            ),
+            mall_inventory: mall_inventory_pb::mall_inventory_client::MallInventoryClient::new(
+                bookway_runtime::grpc_channel(&config.mall_inventory_url).await?,
+            ),
+            mall_order: mall_order_pb::mall_order_client::MallOrderClient::new(
+                bookway_runtime::grpc_channel(&config.mall_order_url).await?,
+            ),
             community_notifications,
             config,
         })
@@ -969,6 +980,33 @@ impl Domain {
         )
     }
 
+    pub(crate) async fn list_followers(
+        &self,
+        request: bbs_pb::ListFollowersRequest,
+    ) -> Result<bbs_pb::FollowerPage, UpstreamError> {
+        grpc_call!(self, bbs, "bbs", list_followers, request)
+    }
+
+    pub(crate) async fn list_route_peers(
+        &self,
+        request: bbs_pb::ListRoutePeersRequest,
+    ) -> Result<bbs_pb::RoutePeerPage, UpstreamError> {
+        grpc_call!(self, bbs, "bbs", list_route_peers, request)
+    }
+
+    pub(crate) async fn social_stats(
+        &self,
+        user_id: String,
+    ) -> Result<bbs_pb::SocialStats, UpstreamError> {
+        grpc_call!(
+            self,
+            bbs,
+            "bbs",
+            get_social_stats,
+            bbs_pb::SocialStatsRequest { user_id }
+        )
+    }
+
     pub(crate) async fn list_route_participations(
         &self,
         user_id: String,
@@ -1480,6 +1518,32 @@ impl Domain {
         grpc_call!(self, ad_center, "ad-center", update_campaign, request)
     }
 
+    pub(crate) async fn ad_delivery_guardrails(
+        &self,
+    ) -> Result<ad_center_pb::DeliveryGuardrails, UpstreamError> {
+        grpc_call!(
+            self,
+            ad_center,
+            "ad-center",
+            get_delivery_guardrails,
+            ad_center_pb::GetDeliveryGuardrailsRequest {}
+        )
+    }
+
+    pub(crate) async fn set_ad_user_daily_total_cap(
+        &self,
+        request: ad_center_pb::DeliveryGuardrails,
+    ) -> Result<ad_center_pb::DeliveryGuardrails, UpstreamError> {
+        grpc_call!(self, ad_center, "ad-center", set_user_daily_total_cap, request)
+    }
+
+    pub(crate) async fn advertiser_delivery_report(
+        &self,
+        request: ad_center_pb::AdDeliveryReportRequest,
+    ) -> Result<ad_center_pb::AdDeliveryReport, UpstreamError> {
+        grpc_call!(self, ad_center, "ad-center", delivery_report, request)
+    }
+
     pub(crate) async fn report_ad_event(
         &self,
         request: ad_center_pb::RecordEventRequest,
@@ -1520,6 +1584,41 @@ impl Domain {
         request: mall_pb::NodeOfferQueryRequest,
     ) -> Result<mall_pb::NodeOfferList, UpstreamError> {
         grpc_call!(self, mall, "mall", node_offers, request)
+    }
+
+    /// Merchant stock management. Mall owns the SKU→merchant fact, so the
+    /// ownership check runs against it before any inventory mutation; an
+    /// unowned SKU yields [`StockAccessError::Forbidden`] regardless of
+    /// whether it exists.
+    pub(crate) async fn set_mall_sku_stock(
+        &self,
+        merchant_id: String,
+        sku_id: String,
+        available: i64,
+    ) -> Result<mall_inventory_pb::InventoryItem, StockAccessError> {
+        let owned = grpc_call!(
+            self,
+            mall,
+            "mall",
+            verify_merchant_sku,
+            mall_pb::MerchantSkuRequest {
+                merchant_id,
+                sku_id: sku_id.clone()
+            }
+        )?
+        .owned;
+        if !owned {
+            return Err(StockAccessError::Forbidden);
+        }
+        let mut client = self.mall_inventory.clone();
+        Ok(client
+            .set_stock(service_request(
+                "mall-inventory",
+                mall_inventory_pb::SetStockRequest { sku_id, available },
+            )?)
+            .await
+            .map_err(|error| grpc_error("mall-inventory", error))?
+            .into_inner())
     }
 
     pub(crate) async fn create_mall_order(

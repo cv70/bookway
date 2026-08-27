@@ -108,6 +108,17 @@ impl Mall for GrpcServer {
                 .map_err(mall_error)?,
         ))
     }
+    async fn verify_merchant_sku(
+        &self,
+        request: Request<pb::MerchantSkuRequest>,
+    ) -> Result<Response<pb::MerchantSkuDecision>, Status> {
+        Ok(Response::new(
+            self.domain
+                .verify_merchant_sku(request.into_inner())
+                .await
+                .map_err(mall_error)?,
+        ))
+    }
 }
 pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();

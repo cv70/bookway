@@ -4,6 +4,13 @@ export type AuctionCandidate = Campaign & {
   ecpm: number;
   actionScore: number;
 };
+// Simulation-only defaults for the browser sandbox. The authoritative limits
+// live server-side: the user daily total in ad-center guardrails, per-campaign
+// impression caps on each campaign row and decision pacing in ad-main config.
+const SIM_COOLDOWN_MINUTES = 20;
+const SIM_SAME_ROUTE_LIMIT = 2;
+const SIM_EXPLORATION_SHARE = 30;
+
 export type DeliveryHistory = {
   evaluatedAt: number;
   totalImpressionsToday: number;
@@ -59,9 +66,9 @@ export function reRankAuctionCandidates(
   const lastCampaign = history.recentCampaignNames.at(-1);
   const lastRoute = history.recentRoutes.at(-1);
   const consecutiveSameRoute =
-    history.recentRoutes.length >= guardrails.sameRouteLimit &&
+    history.recentRoutes.length >= SIM_SAME_ROUTE_LIMIT &&
     history.recentRoutes
-      .slice(-guardrails.sameRouteLimit)
+      .slice(-SIM_SAME_ROUTE_LIMIT)
       .every((route) => route === lastRoute);
   const blocked: string[] = [];
   const eligible = base.filter((candidate) => {
@@ -76,7 +83,7 @@ export function reRankAuctionCandidates(
     if (
       candidate.name === lastCampaign &&
       lastShownAt !== undefined &&
-      history.evaluatedAt - lastShownAt < guardrails.cooldownMinutes * 60_000
+      history.evaluatedAt - lastShownAt < SIM_COOLDOWN_MINUTES * 60_000
     ) {
       blocked.push(`${candidate.name} 处于活动冷却期`);
       return false;
@@ -95,13 +102,13 @@ export function reRankAuctionCandidates(
         left.actionScore *
         (recentRoutes.has(left.binding.route)
           ? 1
-          : 1 + guardrails.explorationShare / 100);
+          : 1 + SIM_EXPLORATION_SHARE / 100);
       const rightScore =
         right.ecpm *
         right.actionScore *
         (recentRoutes.has(right.binding.route)
           ? 1
-          : 1 + guardrails.explorationShare / 100);
+          : 1 + SIM_EXPLORATION_SHARE / 100);
       return rightScore - leftScore;
     }),
     blocked,

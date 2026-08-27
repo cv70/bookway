@@ -339,8 +339,8 @@ cargo run -p bookway-gateway
 | recommend-rank | `RECOMMEND_RANK_ADDR` | `RECOMMEND_RANK_MODEL_VERSION` |
 | ad-center | `AD_CENTER_ADDR` | PostgreSQL；活动和投放账本 |
 | ad-recall | `AD_RECALL_ADDR` | `AD_CENTER_GRPC_URL` |
-| ad-rank | `AD_RANK_ADDR` | `AD_RANK_MODEL_VERSION` |
-| ad-main | `AD_MAIN_ADDR` | `AD_CENTER_GRPC_URL`、`AD_RECALL_GRPC_URL`、`AD_RANK_GRPC_URL` |
+| ad-rank | `AD_RANK_ADDR` | `AD_RANK_MODEL_VERSION`、`AD_RANK_CALIBRATION` |
+| ad-main | `AD_MAIN_ADDR` | `AD_CENTER_GRPC_URL`、`AD_RECALL_GRPC_URL`、`AD_RANK_GRPC_URL`、`AD_MAIN_IMPRESSION_COOLDOWN_MS`（可选用户级曝光间隔，Redis 故障自动失效） |
 | mall | `MALL_ADDR` | PostgreSQL 商品与 SKU 目录 |
 | mall-inventory | `MALL_INVENTORY_ADDR` | PostgreSQL；`MALL_RESERVATION_TTL_SECONDS` |
 | mall-order | `MALL_ORDER_ADDR` | `MALL_GRPC_URL`、`MALL_INVENTORY_GRPC_URL`、`MALL_PAYMENT_TTL_SECONDS` |
@@ -370,6 +370,13 @@ cargo run -p bookway-gateway
 - 服务端幂等路线加入编排；并发、超时或客户端重启后的重试会复用同一私人 Journey。
 - 路线参与 Saga 使用版本化期望状态、`SKIP LOCKED` 租约协调器和 BBS 原子版本门禁；同步双写失败、乱序完成及进程崩溃均可自动收敛。
 - 热门路线参与使用用户级并发控制和 64 分片事务计数，重复/乱序命令不重复计数，批量上下文不再扫描完整参与事实。
+- `infra/runtime` tonic 客户端容错层（连接超时、单调用期限、幂等重试预算与熔断半开），全部服务间 gRPC 客户端统一接入；`pkg/cache` 提供版本化缓存 + miss 锁 + 刷新租约公共库。
+- 推荐链路：服务端硬曝光频控（Redis 计数加速、Postgres 权威）、独立粗排打分、`MultiObjectivePredictor` 多目标精排接口（pCTR/pCVR/pWEGU，权重按实验桶版本化，远程模型未部署时启发式兜底并标记降级）、`pkg/commercial-mix` 密度驱动多槽 eCPM 混排（推荐与搜索共用）与冷启动匿名页短 TTL 防击穿缓存。
+- 搜索与知识库：Node/Gear 实体化语义搜索类型，`knowledge-catalog` 可插拔 embedding provider（OpenAI-compatible `/embeddings`）+ RAG 向量接线，provider 未配置时词法兜底行为不变；`embedding-builder` job 扫描待嵌入资源并经 `UpsertRagEmbedding` 写入。
+- 商城闭环：商品课程类目（`product_kind` + `course_resource_id` 校验链）、商家库存 `SetStock` 网关联通与缓存失效、结算打款前端接通、分账 `ReverseAffiliate` 幂等路径、购买归因事务 Outbox 化（退避 + 死信）。
+- 广告闭环：Redis 三键频控预过滤（campaign×user / campaign×global / 跨 campaign 用户日总，PG 行锁裁决权威不变）、geo/device 硬定向 fail-closed 过滤、ecpm-v3 Beta 后验校准（`AD_RANK_CALIBRATION=false` 一键回退静态合同）、可选用户级曝光间隔 pacing（fail-open）。
+- 广告平台真实数据面：每日账本 `DeliveryReport` 与交付护栏 API（上限写入仅限平台 admin，广告主只读透明），广告主后台报表/创意/护栏全部读写真实网关。
+- 社区补全：粉丝 keyset 分页列表与社交计数（`GET /v1/users/{id}/followers|social-stats`，0080 覆盖索引），同行者列表 `GET /v1/routes/{id}/peers` 经 fail-closed 可见性过滤双向拉黑/静音。
 - Gateway HS256 JWT、下游服务 token、全服务请求 ID、调用超时、Prometheus 指标、按服务依赖 readiness 与 SLO 文档。
 
 ## 下一阶段阻断项

@@ -43,12 +43,14 @@ impl Domain {
             )),
         };
         let content_audit = match config.content_audit_grpc_url.clone() {
-            Some(url) => Some(ContentAuditClient::connect(url).await.map_err(|error| {
-                bookway_data::DataError::InvalidPoolSetting {
-                    key: "CONTENT_AUDIT_GRPC_URL",
-                    value: error.to_string(),
-                }
-            })?),
+            Some(url) => Some(ContentAuditClient::new(
+                bookway_runtime::grpc_channel(&url).await.map_err(|error| {
+                    bookway_data::DataError::InvalidPoolSetting {
+                        key: "CONTENT_AUDIT_GRPC_URL",
+                        value: error.to_string(),
+                    }
+                })?,
+            )),
             None => None,
         };
         Ok(Self {

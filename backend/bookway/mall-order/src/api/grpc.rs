@@ -113,6 +113,17 @@ impl MallOrder for GrpcServer {
                 .map_err(order_error)?,
         ))
     }
+    async fn reverse_affiliate(
+        &self,
+        request: Request<pb::ReverseAffiliateRequest>,
+    ) -> Result<Response<pb::AffiliateSettlement>, Status> {
+        Ok(Response::new(
+            self.domain
+                .reverse_affiliate(request.into_inner())
+                .await
+                .map_err(order_error)?,
+        ))
+    }
 }
 pub async fn serve(domain: Domain) -> Result<(), tonic::transport::Error> {
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();

@@ -7,6 +7,14 @@ enum MallProductStatus {
   MALL_PRODUCT_STATUS_ARCHIVED = 2;
 }
 
+// Catalogue segmentation. Knowledge products bind a knowledge-catalog public
+// resource through `course_resource_id`; physical goods never carry one.
+enum MallProductKind {
+  MALL_PRODUCT_KIND_PHYSICAL = 0;
+  MALL_PRODUCT_KIND_COURSE = 1;
+  MALL_PRODUCT_KIND_RESOURCE_PACK = 2;
+}
+
 message MallSku {
   string id = 1;
   string product_id = 2;
@@ -26,6 +34,10 @@ message MallProduct {
   repeated MallSku skus = 6;
   string created_at = 7;
   string updated_at = 8;
+  MallProductKind product_kind = 9;
+  // Public knowledge-catalog resource bound to this product; required for
+  // course and resource-pack kinds and always empty for physical goods.
+  string course_resource_id = 10;
 }
 
 message CreateSkuRequest {
@@ -43,6 +55,8 @@ message CreateProductRequest {
   string image_url = 4;
   MallProductStatus status = 5;
   repeated CreateSkuRequest skus = 6;
+  MallProductKind product_kind = 7;
+  string course_resource_id = 8;
 }
 
 message Attributes {
@@ -66,6 +80,8 @@ message UpdateProductRequest {
   optional string image_url = 5;
   optional MallProductStatus status = 6;
   repeated UpdateSkuRequest sku_updates = 7;
+  optional MallProductKind product_kind = 8;
+  optional string course_resource_id = 9;
 }
 
 message ProductQueryRequest {
@@ -84,6 +100,15 @@ message ProductPage {
 message IdRequest { string id = 1; }
 message SkuIdsRequest { repeated string ids = 1; }
 message SkuListResponse { repeated MallSku items = 1; }
+
+// Service-to-service ownership check. Public catalog reads deliberately omit
+// merchant facts; inventory writes must still prove the caller's merchant owns
+// the SKU before mutating stock.
+message MerchantSkuRequest {
+  string merchant_id = 1;
+  string sku_id = 2;
+}
+message MerchantSkuDecision { bool owned = 1; }
 
 // A contextual offer is attached to a public route action node.  The mall
 // owns this association so content services never need to copy product facts.
@@ -140,4 +165,7 @@ service Mall {
   // equipment. Historical settlement reads use GetNodeOffer instead.
   rpc GetCheckoutNodeOffer(IdRequest) returns (NodeOffer);
   rpc GetNodeOffer(IdRequest) returns (NodeOffer);
+  // Lets gateways verify merchant ownership of a SKU before authorizing an
+  // inventory mutation without exposing merchant identity on public reads.
+  rpc VerifyMerchantSku(MerchantSkuRequest) returns (MerchantSkuDecision);
 }

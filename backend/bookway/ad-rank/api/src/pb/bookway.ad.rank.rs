@@ -4,8 +4,13 @@
 pub struct RankedCampaign {
     #[prost(message, optional, tag = "1")]
     pub campaign: ::core::option::Option<::bookway_ad_center_api::pb::AdCampaign>,
+    /// Expected value normalized to an impression-equivalent amount. This is
+    /// kept separate from score because score may include targeting and pacing
+    /// bonuses used only to break auction ties.
     #[prost(double, tag = "2")]
     pub score: f64,
+    #[prost(double, tag = "3")]
+    pub ecpm: f64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

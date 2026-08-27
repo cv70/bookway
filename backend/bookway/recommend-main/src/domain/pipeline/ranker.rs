@@ -285,6 +285,7 @@ mod tests {
             bookmarked: false,
             hidden: false,
             previously_served: false,
+            daily_served_count: 0,
         }
     }
 }

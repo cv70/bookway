@@ -211,10 +211,9 @@ function App() {
         )}
         {view === "finance" && (
           <Finance
-            settlements={merchant.settlements}
             affiliates={merchant.affiliateSettlements}
             affiliateRules={merchant.affiliateRules}
-            onExport={merchant.exportSettlements}
+            onPayAffiliate={merchant.payAffiliate}
             onExportAffiliates={merchant.exportAffiliates}
             onCreateAffiliateRule={merchant.addAffiliateRule}
             onToggleAffiliateRule={merchant.toggleAffiliateRule}

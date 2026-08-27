@@ -17,3 +17,20 @@ Only active products and saleable SKUs are returned by customer-facing reads,
 including the product projection nested in a node offer; merchant views may
 include drafts and withdrawn SKUs. Order lines retain their own immutable price
 snapshots.
+
+## Catalogue kinds and knowledge products
+
+Every product carries a `product_kind` — `physical`, `course` or
+`resource_pack` (migration 0076). Knowledge products bind a public
+knowledge-catalog resource through `course_resource_id`; physical goods never
+carry one. Binding rules are enforced fail-closed at write time against
+`KnowledgeCatalog.Get`: courses must reference a *published* resource of kind
+*course*, resource packs any published resource, and the mall rejects the write
+whenever the catalog cannot confirm the binding (missing, unpublished or
+unreachable). Updates must state the complete `(product_kind,
+course_resource_id)` pair so validation always judges the exact values that
+will persist. Node offers attach to knowledge-product SKUs through the same
+ownership/saleability chain as physical goods; checkout keeps validating only
+the route action context and SKU state, so an archived resource blocks new
+bindings but does not retroactively rewrite offers.
+

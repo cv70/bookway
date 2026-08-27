@@ -274,6 +274,91 @@ pub mod ad_center_client {
                 .insert(GrpcMethod::new("bookway.ad.center.AdCenter", "RecordEvent"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn get_delivery_guardrails(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                ::bookway_ad_center_api::pb::GetDeliveryGuardrailsRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_ad_center_api::pb::DeliveryGuardrails>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.ad.center.AdCenter/GetDeliveryGuardrails",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "bookway.ad.center.AdCenter",
+                        "GetDeliveryGuardrails",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_user_daily_total_cap(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                ::bookway_ad_center_api::pb::DeliveryGuardrails,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_ad_center_api::pb::DeliveryGuardrails>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.ad.center.AdCenter/SetUserDailyTotalCap",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.ad.center.AdCenter", "SetUserDailyTotalCap"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn delivery_report(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                ::bookway_ad_center_api::pb::AdDeliveryReportRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_ad_center_api::pb::AdDeliveryReport>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.ad.center.AdCenter/DeliveryReport",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("bookway.ad.center.AdCenter", "DeliveryReport"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -336,6 +421,29 @@ pub mod ad_center_server {
             request: tonic::Request<::bookway_ad_center_api::pb::RecordEventRequest>,
         ) -> std::result::Result<
             tonic::Response<::bookway_ad_center_api::pb::EventReceipt>,
+            tonic::Status,
+        >;
+        async fn get_delivery_guardrails(
+            &self,
+            request: tonic::Request<
+                ::bookway_ad_center_api::pb::GetDeliveryGuardrailsRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_ad_center_api::pb::DeliveryGuardrails>,
+            tonic::Status,
+        >;
+        async fn set_user_daily_total_cap(
+            &self,
+            request: tonic::Request<::bookway_ad_center_api::pb::DeliveryGuardrails>,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_ad_center_api::pb::DeliveryGuardrails>,
+            tonic::Status,
+        >;
+        async fn delivery_report(
+            &self,
+            request: tonic::Request<::bookway_ad_center_api::pb::AdDeliveryReportRequest>,
+        ) -> std::result::Result<
+            tonic::Response<::bookway_ad_center_api::pb::AdDeliveryReport>,
             tonic::Status,
         >;
     }
@@ -736,6 +844,152 @@ pub mod ad_center_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RecordEventSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.ad.center.AdCenter/GetDeliveryGuardrails" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetDeliveryGuardrailsSvc<T: AdCenter>(pub Arc<T>);
+                    impl<
+                        T: AdCenter,
+                    > tonic::server::UnaryService<
+                        ::bookway_ad_center_api::pb::GetDeliveryGuardrailsRequest,
+                    > for GetDeliveryGuardrailsSvc<T> {
+                        type Response = ::bookway_ad_center_api::pb::DeliveryGuardrails;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                ::bookway_ad_center_api::pb::GetDeliveryGuardrailsRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdCenter>::get_delivery_guardrails(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetDeliveryGuardrailsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.ad.center.AdCenter/SetUserDailyTotalCap" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetUserDailyTotalCapSvc<T: AdCenter>(pub Arc<T>);
+                    impl<
+                        T: AdCenter,
+                    > tonic::server::UnaryService<
+                        ::bookway_ad_center_api::pb::DeliveryGuardrails,
+                    > for SetUserDailyTotalCapSvc<T> {
+                        type Response = ::bookway_ad_center_api::pb::DeliveryGuardrails;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                ::bookway_ad_center_api::pb::DeliveryGuardrails,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdCenter>::set_user_daily_total_cap(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetUserDailyTotalCapSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.ad.center.AdCenter/DeliveryReport" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeliveryReportSvc<T: AdCenter>(pub Arc<T>);
+                    impl<
+                        T: AdCenter,
+                    > tonic::server::UnaryService<
+                        ::bookway_ad_center_api::pb::AdDeliveryReportRequest,
+                    > for DeliveryReportSvc<T> {
+                        type Response = ::bookway_ad_center_api::pb::AdDeliveryReport;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                ::bookway_ad_center_api::pb::AdDeliveryReportRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdCenter>::delivery_report(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeliveryReportSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

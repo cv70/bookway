@@ -5,7 +5,6 @@ use crate::{
 };
 use bookway_mall_api::pb as mall_pb;
 use bookway_mall_inventory_api::pb as inventory_pb;
-use bookway_user_event_api::pb as user_event_pb;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -14,6 +13,11 @@ use thiserror::Error;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tonic::transport::Channel;
 use uuid::Uuid;
+
+const MAX_IDENTIFIER_LENGTH: usize = 160;
+const MAX_IDEMPOTENCY_KEY_LENGTH: usize = 220;
+const MAX_PAYMENT_REFERENCE_LENGTH: usize = 220;
+const MAX_TRACKING_NUMBER_LENGTH: usize = 220;
 
 #[derive(Debug, Error)]
 pub(crate) enum OrderError {
@@ -37,7 +41,6 @@ pub struct Domain {
     dao: Arc<dyn OrderDao>,
     mall: mall_pb::mall_client::MallClient<Channel>,
     inventory: inventory_pb::mall_inventory_client::MallInventoryClient<Channel>,
-    user_event: user_event_pb::user_event_client::UserEventClient<Channel>,
 }
 
 impl Domain {
@@ -48,21 +51,17 @@ impl Domain {
                 Arc::new(PostgresOrderDao::new(bookway_data::postgres_pool().await?))
             }
         };
-        let mall = mall_pb::mall_client::MallClient::connect(config.mall_url.clone()).await?;
-        let inventory = inventory_pb::mall_inventory_client::MallInventoryClient::connect(
-            config.inventory_url.clone(),
-        )
-        .await?;
-        let user_event = user_event_pb::user_event_client::UserEventClient::connect(
-            config.user_event_url.clone(),
-        )
-        .await?;
+        let mall = mall_pb::mall_client::MallClient::new(
+            bookway_runtime::grpc_channel(&config.mall_url).await?,
+        );
+        let inventory = inventory_pb::mall_inventory_client::MallInventoryClient::new(
+            bookway_runtime::grpc_channel(&config.inventory_url).await?,
+        );
         Ok(Self {
             config,
             dao,
             mall,
             inventory,
-            user_event,
         })
     }
 
@@ -71,7 +70,17 @@ impl Domain {
     }
 
     pub(crate) async fn create(&self, request: pb::CreateRequest) -> Result<pb::Order, OrderError> {
-        if request.user_id.trim().is_empty() || request.idempotency_key.trim().is_empty() {
+        let mut request = request;
+        request.user_id = request.user_id.trim().to_string();
+        request.idempotency_key = request.idempotency_key.trim().to_string();
+        request.node_offer_id = request.node_offer_id.trim().to_string();
+        for item in &mut request.items {
+            item.sku_id = item.sku_id.trim().to_string();
+        }
+        if invalid_identifier(&request.user_id)
+            || request.idempotency_key.is_empty()
+            || request.idempotency_key.chars().count() > MAX_IDEMPOTENCY_KEY_LENGTH
+        {
             return Err(OrderError::Validation(
                 "user_id and Idempotency-Key are required".to_string(),
             ));
@@ -108,7 +117,7 @@ impl Domain {
                 "one or more SKUs are no longer saleable".to_string(),
             ));
         }
-        if request.node_offer_id.trim().is_empty() {
+        if invalid_identifier(&request.node_offer_id) {
             return Err(OrderError::Validation(
                 "node offer id is required for contextual checkout".to_string(),
             ));
@@ -155,8 +164,12 @@ impl Domain {
 
     pub(crate) async fn list(
         &self,
-        request: pb::UserRequest,
+        mut request: pb::UserRequest,
     ) -> Result<pb::OrderListResponse, OrderError> {
+        request.user_id = request.user_id.trim().to_string();
+        if invalid_identifier(&request.user_id) {
+            return Err(OrderError::Validation("user id is required".to_string()));
+        }
         let values = self.dao.list(&request.user_id).await.map_err(repo_error)?;
         let mut items = Vec::with_capacity(values.len());
         for value in values {
@@ -166,11 +179,22 @@ impl Domain {
     }
 
     pub(crate) async fn get(&self, request: pb::OrderRequest) -> Result<pb::Order, OrderError> {
+        let mut request = request;
+        request.user_id = request.user_id.trim().to_string();
+        request.order_id = request.order_id.trim().to_string();
+        validate_order_identity(&request.user_id, &request.order_id)?;
         self.get_by_id(&request.user_id, &request.order_id).await
     }
 
     pub(crate) async fn pay(&self, request: pb::PayRequest) -> Result<pb::Order, OrderError> {
-        if request.payment_reference.trim().is_empty() {
+        let mut request = request;
+        request.user_id = request.user_id.trim().to_string();
+        request.order_id = request.order_id.trim().to_string();
+        request.payment_reference = request.payment_reference.trim().to_string();
+        validate_order_identity(&request.user_id, &request.order_id)?;
+        if request.payment_reference.is_empty()
+            || request.payment_reference.chars().count() > MAX_PAYMENT_REFERENCE_LENGTH
+        {
             return Err(OrderError::Validation(
                 "payment reference is required".to_string(),
             ));
@@ -186,7 +210,6 @@ impl Domain {
                 .ensure_settlement(&order)
                 .await
                 .map_err(repo_error)?;
-            self.record_contextual_purchase(&order).await;
             return Ok(order);
         }
         if order.status == pb::MallOrderStatus::PaymentProcessing as i32 {
@@ -217,7 +240,6 @@ impl Domain {
                 .ensure_settlement(&paid)
                 .await
                 .map_err(repo_error)?;
-            self.record_contextual_purchase(&paid).await;
             return Ok(paid);
         }
         if order.status != pb::MallOrderStatus::PendingPayment as i32 {
@@ -246,15 +268,17 @@ impl Domain {
             .ensure_settlement(&paid)
             .await
             .map_err(repo_error)?;
-        self.record_contextual_purchase(&paid).await;
         Ok(paid)
     }
 
     pub(crate) async fn merchant_orders(
         &self,
-        request: pb::MerchantOrderRequest,
+        mut request: pb::MerchantOrderRequest,
     ) -> Result<pb::MerchantOrderListResponse, OrderError> {
+        request.merchant_id = request.merchant_id.trim().to_string();
+        request.cursor = request.cursor.take().map(|value| value.trim().to_string());
         validate_merchant_id(&request.merchant_id)?;
+        validate_cursor(request.cursor.as_deref())?;
         let limit = usize::try_from(request.limit.unwrap_or(50).clamp(1, 100)).unwrap_or(100);
         let items = self
             .dao
@@ -275,11 +299,19 @@ impl Domain {
 
     pub(crate) async fn update_fulfillment(
         &self,
-        request: pb::UpdateFulfillmentRequest,
+        mut request: pb::UpdateFulfillmentRequest,
     ) -> Result<pb::Order, OrderError> {
+        request.merchant_id = request.merchant_id.trim().to_string();
+        request.order_id = request.order_id.trim().to_string();
+        request.tracking_number = request.tracking_number.trim().to_string();
         validate_merchant_id(&request.merchant_id)?;
-        if request.order_id.trim().is_empty() {
+        if invalid_identifier(&request.order_id) {
             return Err(OrderError::Validation("order id is required".to_string()));
+        }
+        if request.tracking_number.chars().count() > MAX_TRACKING_NUMBER_LENGTH {
+            return Err(OrderError::Validation(
+                "tracking number is too long".to_string(),
+            ));
         }
         if pb::FulfillmentStatus::try_from(request.status).is_err() {
             return Err(OrderError::Validation(
@@ -299,9 +331,12 @@ impl Domain {
 
     pub(crate) async fn affiliate_settlements(
         &self,
-        request: pb::AffiliateSettlementRequest,
+        mut request: pb::AffiliateSettlementRequest,
     ) -> Result<pb::AffiliateSettlementListResponse, OrderError> {
+        request.merchant_id = request.merchant_id.trim().to_string();
+        request.cursor = request.cursor.take().map(|value| value.trim().to_string());
         validate_merchant_id(&request.merchant_id)?;
+        validate_cursor(request.cursor.as_deref())?;
         let limit = usize::try_from(request.limit.unwrap_or(50).clamp(1, 100)).unwrap_or(100);
         let items = self
             .dao
@@ -322,10 +357,12 @@ impl Domain {
 
     pub(crate) async fn settle_affiliate(
         &self,
-        request: pb::SettleAffiliateRequest,
+        mut request: pb::SettleAffiliateRequest,
     ) -> Result<pb::AffiliateSettlement, OrderError> {
+        request.merchant_id = request.merchant_id.trim().to_string();
+        request.settlement_id = request.settlement_id.trim().to_string();
         validate_merchant_id(&request.merchant_id)?;
-        if request.settlement_id.trim().is_empty() {
+        if invalid_identifier(&request.settlement_id) {
             return Err(OrderError::Validation(
                 "settlement id is required".to_string(),
             ));
@@ -336,7 +373,29 @@ impl Domain {
             .map_err(repo_error)
     }
 
+    /// Refund-path hook: reverses an order's affiliate share. The money
+    /// movement itself belongs to the (future) refund channel; until it ships,
+    /// this RPC stands ready as the idempotent ledger entry point and never
+    /// appears on merchant-facing routes.
+    pub(crate) async fn reverse_affiliate(
+        &self,
+        mut request: pb::ReverseAffiliateRequest,
+    ) -> Result<pb::AffiliateSettlement, OrderError> {
+        request.order_id = request.order_id.trim().to_string();
+        if invalid_identifier(&request.order_id) {
+            return Err(OrderError::Validation("order id is required".to_string()));
+        }
+        self.dao
+            .reverse_affiliate(&request.order_id)
+            .await
+            .map_err(repo_error)
+    }
+
     pub(crate) async fn cancel(&self, request: pb::OrderRequest) -> Result<pb::Order, OrderError> {
+        let mut request = request;
+        request.user_id = request.user_id.trim().to_string();
+        request.order_id = request.order_id.trim().to_string();
+        validate_order_identity(&request.user_id, &request.order_id)?;
         let order = self.get_by_id(&request.user_id, &request.order_id).await?;
         if order.status == pb::MallOrderStatus::Cancelled as i32
             || order.status == pb::MallOrderStatus::Expired as i32
@@ -519,50 +578,6 @@ impl Domain {
             .map(|response| response.into_inner())
     }
 
-    async fn record_contextual_purchase(&self, order: &pb::Order) {
-        let offer = match self.settlement_node_offer(&order.node_offer_id).await {
-            Ok(offer) => offer,
-            Err(error) => {
-                tracing::warn!(%error, order_id = %order.id, "contextual offer lookup degraded after payment");
-                return;
-            }
-        };
-        let Some(event) = contextual_purchase_event(&order.user_id, &order.id, &offer.route_id)
-        else {
-            tracing::warn!(order_id = %order.id, "contextual purchase timestamp formatting failed");
-            return;
-        };
-        let mut client = self.user_event.clone();
-        let request = match service_request(
-            "user-event",
-            user_event_pb::IngestRequest {
-                user_id: order.user_id.clone(),
-                events: vec![event],
-            },
-        ) {
-            Ok(request) => request,
-            Err(error) => {
-                tracing::warn!(%error, order_id = %order.id, "contextual purchase request setup failed");
-                return;
-            }
-        };
-        if let Err(error) = client.ingest(request).await {
-            tracing::warn!(%error, order_id = %order.id, "contextual purchase attribution degraded");
-        }
-    }
-
-    async fn settlement_node_offer(&self, id: &str) -> Result<mall_pb::NodeOffer, OrderError> {
-        let mut client = self.mall.clone();
-        client
-            .get_node_offer(service_request(
-                "mall",
-                mall_pb::IdRequest { id: id.to_string() },
-            )?)
-            .await
-            .map_err(|error| upstream_status("mall", error))
-            .map(|response| response.into_inner())
-    }
-
     async fn reserve_inventory(
         &self,
         reservation_id: &str,
@@ -625,7 +640,7 @@ fn validate_items(items: &[pb::OrderItemRequest]) -> Result<(), OrderError> {
         || items.len() > 100
         || items
             .iter()
-            .any(|item| item.sku_id.trim().is_empty() || item.quantity == 0)
+            .any(|item| invalid_identifier(&item.sku_id) || item.quantity == 0)
     {
         return Err(OrderError::Validation(
             "1-100 positive SKU quantities are required".to_string(),
@@ -646,13 +661,34 @@ fn validate_items(items: &[pb::OrderItemRequest]) -> Result<(), OrderError> {
 }
 
 fn validate_merchant_id(value: &str) -> Result<(), OrderError> {
-    if value.trim().is_empty() {
+    if invalid_identifier(value) {
         Err(OrderError::Validation(
             "merchant id is required".to_string(),
         ))
     } else {
         Ok(())
     }
+}
+
+fn validate_order_identity(user_id: &str, order_id: &str) -> Result<(), OrderError> {
+    if invalid_identifier(user_id) || invalid_identifier(order_id) {
+        return Err(OrderError::Validation(
+            "user id and order id are required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cursor(cursor: Option<&str>) -> Result<(), OrderError> {
+    if cursor.is_some_and(|value| value.chars().count() > MAX_IDENTIFIER_LENGTH) {
+        return Err(OrderError::Validation("cursor is too long".to_string()));
+    }
+    Ok(())
+}
+
+fn invalid_identifier(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value.chars().count() > MAX_IDENTIFIER_LENGTH
 }
 
 fn contextual_order_item<'a>(
@@ -789,28 +825,6 @@ fn expired(value: &str) -> bool {
 
 fn timestamp(value: OffsetDateTime) -> String {
     value.format(&Rfc3339).unwrap_or_default()
-}
-
-fn contextual_purchase_event(
-    user_id: &str,
-    order_id: &str,
-    route_id: &str,
-) -> Option<user_event_pb::Event> {
-    let occurred_at = OffsetDateTime::now_utc().format(&Rfc3339).ok()?;
-    let stable_key = format!("bookway:contextual-purchase:{user_id}:{order_id}");
-    Some(user_event_pb::Event {
-        event_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, stable_key.as_bytes()).to_string(),
-        event_type: "purchase".to_string(),
-        session_id: "server".to_string(),
-        request_id: None,
-        component_id: "contextual-commerce".to_string(),
-        content_id: Some(route_id.to_string()),
-        position: None,
-        occurred_at,
-        source: "mall-order".to_string(),
-        attribution_source: user_event_pb::AttributionSource::Unspecified as i32,
-        negative_feedback_reason: None,
-    })
 }
 
 fn service_request<T>(service: &'static str, value: T) -> Result<tonic::Request<T>, OrderError> {

@@ -6,7 +6,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct EligibleQuery<'a> {
     pub(crate) user_id: &'a str,
     pub(crate) placement: &'a str,
@@ -14,8 +14,17 @@ pub(crate) struct EligibleQuery<'a> {
     pub(crate) route_id: &'a str,
     pub(crate) action_node_id: &'a str,
     pub(crate) scene_equipment: &'a str,
+    /// Delivery-context region and operating system. Empty means the platform
+    /// could not observe it; only campaigns without restrictions match.
+    pub(crate) geo_region: &'a str,
+    pub(crate) device_os: &'a str,
     pub(crate) limit: usize,
 }
+
+// Seeded by 0078 and mirrored in the delivery-lab demo data. Readers fall
+// back to this default when the row is missing so an operator deletion can
+// never silently disable the cross-campaign cap.
+pub(crate) const DEFAULT_USER_DAILY_TOTAL_CAP: u32 = 8;
 
 // A delivery receipt is valuable only if it can be traced back to the exact
 // action-node placement that selected the campaign. Keep that context in the
@@ -55,6 +64,24 @@ pub(crate) trait CampaignDao: Send + Sync {
         limit: usize,
     ) -> Result<Vec<pb::AdCampaign>, DaoError>;
     async fn eligible(&self, query: EligibleQuery<'_>) -> Result<Vec<pb::AdCampaign>, DaoError>;
+    /// Targeting, schedule, budget and domain candidates only — no frequency
+    /// adjudication. Postgres pairs this with the Redis pre-filter; callers
+    /// without a gate must use `eligible`, which is SQL-authoritative.
+    async fn eligible_candidates(
+        &self,
+        query: EligibleQuery<'_>,
+    ) -> Result<Vec<pb::AdCampaign>, DaoError>;
+    /// Current `user_daily_total` guardrail from 0078 (seeded default when
+    /// the row is missing).
+    async fn user_daily_total_cap(&self) -> Result<u32, DaoError>;
+    /// Persist a new `user_daily_total` cap and return the effective value.
+    async fn set_user_daily_total_cap(&self, cap: u32) -> Result<u32, DaoError>;
+    /// Aggregated daily ledger rows (`ad_campaign_daily_stats`) for every
+    /// campaign owned by the advertiser inside `[from_date, to_date]`.
+    async fn delivery_report(
+        &self,
+        query: DeliveryReportQuery<'_>,
+    ) -> Result<Vec<DeliveryReportRow>, DaoError>;
     async fn register_decisions(
         &self,
         registration: DecisionRegistration<'_>,
@@ -64,6 +91,21 @@ pub(crate) trait CampaignDao: Send + Sync {
         user_id: &str,
         request: pb::RecordEventRequest,
     ) -> Result<pb::EventReceipt, DaoError>;
+}
+
+/// Day-window report filter; both dates are canonical `YYYY-MM-DD`.
+pub(crate) struct DeliveryReportQuery<'a> {
+    pub(crate) advertiser_id: &'a str,
+    pub(crate) from_date: &'a str,
+    pub(crate) to_date: &'a str,
+}
+
+pub(crate) struct DeliveryReportRow {
+    pub(crate) campaign_id: String,
+    pub(crate) stat_date: String,
+    pub(crate) impressions: i64,
+    pub(crate) clicks: i64,
+    pub(crate) spent_micros: i64,
 }
 
 #[derive(Clone)]
@@ -146,6 +188,8 @@ fn new_campaign(request: pb::CreateCampaignRequest) -> pb::AdCampaign {
         image_url: request.image_url,
         landing_url: request.landing_url,
         target_domains: request.target_domains,
+        geo_regions: request.geo_regions,
+        device_os: request.device_os,
         status: pb::CampaignStatus::Draft as i32,
         pricing_model: request.pricing_model,
         bid_micros: request.bid_micros,
@@ -186,6 +230,12 @@ fn apply_update(campaign: &mut pb::AdCampaign, request: pb::UpdateCampaignReques
     if let Some(value) = request.target_domains {
         campaign.target_domains = value.values;
     }
+    if let Some(value) = request.geo_regions {
+        campaign.geo_regions = value.values;
+    }
+    if let Some(value) = request.device_os {
+        campaign.device_os = value.values;
+    }
     if let Some(value) = request.bid_micros {
         campaign.bid_micros = value;
     }
@@ -216,18 +266,28 @@ fn apply_update(campaign: &mut pb::AdCampaign, request: pb::UpdateCampaignReques
     campaign.updated_at = timestamp(OffsetDateTime::now_utc());
 }
 
-fn event_cost(campaign: &pb::AdCampaign, event_type: i32) -> i64 {
+/// Returns the incremental charge for an event. CPM bids are expressed in
+/// micro-units per thousand impressions, so rounding the whole daily total
+/// avoids charging the rounding remainder once per impression.
+fn event_cost(campaign: &pb::AdCampaign, event_type: i32, daily_impressions: i64) -> i64 {
     match (campaign.pricing_model, event_type) {
         (pricing, event)
             if pricing == pb::PricingModel::Cpm as i32
                 && event == pb::EventType::Impression as i32 =>
         {
-            (campaign.bid_micros.saturating_add(999)) / 1_000
+            let bid = i128::from(campaign.bid_micros.max(0));
+            let before = i128::from(daily_impressions.max(0));
+            let before_total = (bid.saturating_mul(before).saturating_add(999)) / 1_000;
+            let after_total = (bid
+                .saturating_mul(before.saturating_add(1))
+                .saturating_add(999))
+                / 1_000;
+            i64::try_from(after_total.saturating_sub(before_total)).unwrap_or(i64::MAX)
         }
         (pricing, event)
             if pricing == pb::PricingModel::Cpc as i32 && event == pb::EventType::Click as i32 =>
         {
-            campaign.bid_micros
+            campaign.bid_micros.max(0)
         }
         _ => 0,
     }
@@ -301,8 +361,12 @@ fn parse_pricing(value: &str) -> Result<pb::PricingModel, DaoError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CampaignDao, DaoError, DecisionRegistration, MemoryCampaignDao};
+    use super::{
+        CampaignDao, DaoError, DecisionRegistration, DEFAULT_USER_DAILY_TOTAL_CAP,
+        DeliveryReportQuery, EligibleQuery, MemoryCampaignDao, date_key, event_cost,
+    };
     use crate::api::pb;
+    use time::OffsetDateTime;
 
     fn campaign_request() -> pb::CreateCampaignRequest {
         pb::CreateCampaignRequest {
@@ -317,6 +381,8 @@ mod tests {
             image_url: String::new(),
             landing_url: "https://example.com".to_string(),
             target_domains: Vec::new(),
+            geo_regions: Vec::new(),
+            device_os: Vec::new(),
             pricing_model: pb::PricingModel::Cpm as i32,
             bid_micros: 1_000,
             daily_budget_micros: 10_000,
@@ -327,6 +393,18 @@ mod tests {
             predicted_cvr: 0.2,
             global_frequency_cap: 0,
         }
+    }
+
+    #[test]
+    fn cpm_rounding_is_applied_to_the_daily_total() {
+        let mut request = campaign_request();
+        request.bid_micros = 1_001;
+        let campaign = super::new_campaign(request);
+        let first = event_cost(&campaign, pb::EventType::Impression as i32, 0);
+        let second = event_cost(&campaign, pb::EventType::Impression as i32, 1);
+        assert_eq!(first, 2);
+        assert_eq!(second, 1);
+        assert_eq!(first + second, 3);
     }
 
     fn registration<'a>(
@@ -656,6 +734,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn candidates_keep_capped_campaigns_that_eligible_adjudicates_out() {
+        let dao = MemoryCampaignDao::default();
+        let campaign = dao
+            .create(campaign_request())
+            .await
+            .expect("campaign should be created");
+        dao.update(
+            &campaign.id,
+            pb::UpdateCampaignRequest {
+                advertiser_id: campaign.advertiser_id.clone(),
+                status: Some(pb::CampaignStatus::Active as i32),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("campaign should be activated");
+        dao.register_decisions(registration(
+            "user-1",
+            "request-1",
+            vec![campaign.id.clone()],
+        ))
+        .await
+        .expect("decision should be tracked");
+        // campaign_request() seeds frequency_cap=1; this first impression is
+        // accepted and exhausts it for today.
+        assert!(
+            dao.record_event(
+                "user-1",
+                pb::RecordEventRequest {
+                    user_id: "user-1".to_string(),
+                    event_id: "impression-1".to_string(),
+                    request_id: "request-1".to_string(),
+                    campaign_id: campaign.id.clone(),
+                    event_type: pb::EventType::Impression as i32,
+                },
+            )
+            .await
+            .expect("first impression should be accepted")
+            .accepted
+        );
+
+        let query = EligibleQuery {
+            user_id: "user-1",
+            placement: "feed",
+            domain: "",
+            route_id: "route-1",
+            action_node_id: "node-1",
+            scene_equipment: "轻量背包",
+            geo_region: "cn-bj",
+            device_os: "ios",
+            limit: 10,
+        };
+        let candidates = dao
+            .eligible_candidates(query)
+            .await
+            .expect("candidates should list without frequency adjudication");
+        assert_eq!(candidates.len(), 1, "gate pre-filter decides later");
+        let adjudicated = dao
+            .eligible(query)
+            .await
+            .expect("eligible should apply the caps");
+        assert!(adjudicated.is_empty(), "cap must remove the campaign");
+        assert_eq!(
+            dao.user_daily_total_cap().await.expect("guardrail cap"),
+            DEFAULT_USER_DAILY_TOTAL_CAP
+        );
+    }
+
+    #[tokio::test]
+    async fn unobserved_delivery_context_cannot_serve_targeted_campaigns() {
+        let dao = MemoryCampaignDao::default();
+        let mut targeted = campaign_request();
+        targeted.geo_regions = vec!["cn-bj".to_string()];
+        let targeted = dao
+            .create(targeted)
+            .await
+            .expect("targeted campaign should be created");
+        let unrestricted = dao
+            .create(campaign_request())
+            .await
+            .expect("unrestricted campaign should be created");
+        for campaign in [&targeted, &unrestricted] {
+            dao.update(
+                &campaign.id,
+                pb::UpdateCampaignRequest {
+                    advertiser_id: campaign.advertiser_id.clone(),
+                    status: Some(pb::CampaignStatus::Active as i32),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("campaign should be activated");
+        }
+
+        let query = |geo_region: &'static str| EligibleQuery {
+            user_id: "user-1",
+            placement: "feed",
+            domain: "",
+            route_id: "route-1",
+            action_node_id: "node-1",
+            scene_equipment: "轻量背包",
+            geo_region,
+            device_os: "",
+            limit: 10,
+        };
+        let ids_for = async |query: EligibleQuery<'_>| {
+            dao.eligible(query)
+                .await
+                .expect("eligibility should evaluate")
+                .into_iter()
+                .map(|campaign| campaign.id)
+                .collect::<Vec<_>>()
+        };
+        // Unknown context: only unrestricted stock serves.
+        assert!(ids_for(query("")).await.contains(&unrestricted.id));
+        assert!(!ids_for(query("")).await.contains(&targeted.id));
+        // Matching context: both serve.
+        assert!(ids_for(query("cn-bj")).await.contains(&targeted.id));
+        assert!(ids_for(query("cn-bj")).await.contains(&unrestricted.id));
+        // Different region: restricted stock stays out.
+        assert!(!ids_for(query("cn-sh")).await.contains(&targeted.id));
+        assert!(ids_for(query("cn-sh")).await.contains(&unrestricted.id));
+    }
+
+    #[tokio::test]
     async fn event_id_cannot_be_reused_across_delivery_contexts() {
         let dao = MemoryCampaignDao::default();
         let campaign = dao
@@ -823,8 +1026,185 @@ mod tests {
             Err(DaoError::NotFound(_))
         ));
     }
+
+    async fn activated_campaign(dao: &MemoryCampaignDao) -> pb::AdCampaign {
+        let mut request = campaign_request();
+        request.pricing_model = pb::PricingModel::Cpc as i32;
+        request.frequency_cap = 0;
+        let campaign = dao.create(request).await.expect("campaign should be created");
+        dao.update(
+            &campaign.id,
+            pb::UpdateCampaignRequest {
+                advertiser_id: campaign.advertiser_id.clone(),
+                status: Some(pb::CampaignStatus::Active as i32),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("campaign should be activated");
+        dao.get_for_advertiser(&campaign.id, &campaign.advertiser_id)
+            .await
+            .expect("campaign should be readable")
+    }
+
+    #[tokio::test]
+    async fn user_daily_total_cap_override_steers_receipt_adjudication() {
+        let dao = MemoryCampaignDao::default();
+        assert_eq!(
+            dao.user_daily_total_cap()
+                .await
+                .expect("guardrails should read"),
+            DEFAULT_USER_DAILY_TOTAL_CAP
+        );
+        let campaign = activated_campaign(&dao).await;
+        dao.register_decisions(registration(
+            "user-1",
+            "request-1",
+            vec![campaign.id.clone()],
+        ))
+        .await
+        .expect("first decision should be tracked");
+        let impression = |event_id: &'static str, request_id: &'static str| {
+            dao.record_event(
+                "user-1",
+                pb::RecordEventRequest {
+                    user_id: "user-1".to_string(),
+                    event_id: event_id.to_string(),
+                    request_id: request_id.to_string(),
+                    campaign_id: campaign.id.clone(),
+                    event_type: pb::EventType::Impression as i32,
+                },
+            )
+        };
+        let first = impression("impression-1", "request-1")
+            .await
+            .expect("first impression should answer");
+        assert!(first.accepted && !first.duplicate);
+        // A fresh transport event id on the same decision is the documented
+        // business duplicate and must never touch the guardrail counters.
+        let retry = impression("impression-retry", "request-1")
+            .await
+            .expect("duplicate retry should answer");
+        assert!(retry.accepted && retry.duplicate);
+        // Tightening the platform-wide cap to 1 rejects the next brand-new
+        // decision even though the campaign itself has no per-campaign caps.
+        assert_eq!(
+            dao.set_user_daily_total_cap(1)
+                .await
+                .expect("cap should update"),
+            1
+        );
+        dao.register_decisions(registration(
+            "user-1",
+            "request-2",
+            vec![campaign.id.clone()],
+        ))
+        .await
+        .expect("second decision should be tracked");
+        let blocked = impression("impression-2", "request-2")
+            .await
+            .expect("capped impression should answer");
+        assert!(!blocked.accepted && !blocked.duplicate);
+        // Restoring headroom lets another fresh decision through again.
+        dao.set_user_daily_total_cap(DEFAULT_USER_DAILY_TOTAL_CAP)
+            .await
+            .expect("cap should reset");
+        dao.register_decisions(registration(
+            "user-1",
+            "request-3",
+            vec![campaign.id.clone()],
+        ))
+        .await
+        .expect("third decision should be tracked");
+        let allowed = impression("impression-3", "request-3")
+            .await
+            .expect("restored impression should answer");
+        assert!(allowed.accepted && !allowed.duplicate);
+        let updated = dao
+            .get_for_advertiser(&campaign.id, &campaign.advertiser_id)
+            .await
+            .expect("campaign should stay readable");
+        assert_eq!(updated.impressions, 2);
+    }
+
+    #[tokio::test]
+    async fn delivery_report_aggregates_the_daily_ledger_window() {
+        let dao = MemoryCampaignDao::default();
+        let campaign = activated_campaign(&dao).await;
+        dao.register_decisions(registration(
+            "user-1",
+            "request-1",
+            vec![campaign.id.clone()],
+        ))
+        .await
+        .expect("first decision should be tracked");
+        dao.register_decisions(registration(
+            "user-1",
+            "request-2",
+            vec![campaign.id.clone()],
+        ))
+        .await
+        .expect("second decision should be tracked");
+        // Each accepted business impression lives on its own decision.
+        for (event_id, request_id) in [("impression-1", "request-1"), ("impression-2", "request-2")]
+        {
+            assert!(
+                dao.record_event(
+                    "user-1",
+                    pb::RecordEventRequest {
+                        user_id: "user-1".to_string(),
+                        event_id: event_id.to_string(),
+                        request_id: request_id.to_string(),
+                        campaign_id: campaign.id.clone(),
+                        event_type: pb::EventType::Impression as i32,
+                    },
+                )
+                .await
+                .expect("impression should be recorded")
+                .accepted
+            );
+        }
+        let today = date_key(OffsetDateTime::now_utc());
+        let rows = dao
+            .delivery_report(DeliveryReportQuery {
+                advertiser_id: "advertiser-1",
+                from_date: &today,
+                to_date: &today,
+            })
+            .await
+            .expect("report should load");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].campaign_id, campaign.id);
+        assert_eq!(rows[0].stat_date, today);
+        assert_eq!(rows[0].impressions, 2);
+        assert_eq!(rows[0].clicks, 0);
+        // CPC impressions carry no charge.
+        assert_eq!(rows[0].spent_micros, 0);
+
+        let outside = dao
+            .delivery_report(DeliveryReportQuery {
+                advertiser_id: "advertiser-1",
+                from_date: "2026-01-01",
+                to_date: "2026-01-02",
+            })
+            .await
+            .expect("outside-window report should load");
+        assert!(outside.is_empty());
+        let other_advertiser = dao
+            .delivery_report(DeliveryReportQuery {
+                advertiser_id: "advertiser-2",
+                from_date: &today,
+                to_date: &today,
+            })
+            .await
+            .expect("other-advertiser report should load");
+        assert!(other_advertiser.is_empty());
+    }
 }
 
+#[path = "frequency_gate.rs"]
+mod frequency_gate;
+pub(crate) use frequency_gate::FrequencyGate;
 #[path = "memory_campaign_dao.rs"]
 mod memory_campaign_dao;
 pub(crate) use memory_campaign_dao::MemoryCampaignDao;

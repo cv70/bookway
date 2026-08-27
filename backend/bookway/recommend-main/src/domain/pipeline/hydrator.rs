@@ -5,8 +5,10 @@ use bookway_interaction_status_api::pb::{
 };
 use tonic::transport::Channel;
 
+use std::sync::Arc;
+
 use super::{Candidate, CandidateHydrator, FeedQuery, HydratorFailurePolicy, PipelineError};
-use crate::datasource::SharedExposureDataSource;
+use crate::datasource::{FrequencyCapDataSource, SharedExposureDataSource};
 
 const SERVED_HISTORY_LIMIT: usize = 500;
 
@@ -33,6 +35,45 @@ impl CandidateHydrator for ServedHistoryHydrator {
             .await;
         for candidate in candidates {
             candidate.previously_served = served.contains(&candidate.post.id);
+        }
+        Ok(())
+    }
+}
+
+/// Loads today's served counters in one batch so the frequency filter can run
+/// synchronously afterwards. Deliberately best-effort: a failed counter lookup
+/// fails OPEN (items stay eligible) because skipping hydration entirely is
+/// better UX than an empty feed — the exposure write side still records truth.
+pub(crate) struct FrequencyCapHydrator {
+    caps: Arc<dyn FrequencyCapDataSource>,
+}
+
+impl FrequencyCapHydrator {
+    pub(crate) fn new(caps: Arc<dyn FrequencyCapDataSource>) -> Self {
+        Self { caps }
+    }
+}
+
+#[async_trait]
+impl CandidateHydrator for FrequencyCapHydrator {
+    async fn hydrate(
+        &self,
+        query: &FeedQuery,
+        candidates: &mut [Candidate],
+    ) -> Result<(), PipelineError> {
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let content_ids = candidates
+            .iter()
+            .map(|candidate| candidate.post.id.clone())
+            .collect::<Vec<_>>();
+        let counts = self
+            .caps
+            .served_counts(&query.user_id, &content_ids)
+            .await?;
+        for (candidate, count) in candidates.iter_mut().zip(counts) {
+            candidate.daily_served_count = count;
         }
         Ok(())
     }

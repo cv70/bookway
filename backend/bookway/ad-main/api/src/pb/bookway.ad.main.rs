@@ -16,6 +16,10 @@ pub struct DecisionRequest {
     pub action_node_id: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "7")]
     pub scene_equipment: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag = "8")]
+    pub geo_region: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub device_os: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

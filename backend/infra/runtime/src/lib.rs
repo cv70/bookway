@@ -14,6 +14,9 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+pub mod grpc_client;
+pub use grpc_client::{CircuitBreaker, ConnectFailure, grpc_channel};
+
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("invalid listen address in {key}: {value}")]

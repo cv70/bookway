@@ -17,6 +17,7 @@ import {
   createKnowledge,
   getAccountProfile,
   getAuthorPosts,
+getSocialStats,
   getCompanion,
   getComments,
   getFeed,
@@ -106,6 +107,7 @@ import {
   ReadingBookmark,
   RecommendationEventContext,
   ReportReason,
+  SocialStats,
   ReviewAdjustmentSuggestion,
   RouteTemplateAction,
   RouteNodeResourceAttachment,
@@ -205,6 +207,7 @@ export default function App() {
   const [selectedPostRecommendationContext, setSelectedPostRecommendationContext] = useState<RecommendationEventContext>();
   const [hideFeedback, setHideFeedback] = useState<{ postId: string; context?: RecommendationEventContext }>();
   const [selectedAuthor, setSelectedAuthor] = useState<PublicAuthor>();
+const [authorStats, setAuthorStats] = useState<SocialStats>();
   const [authorContents, setAuthorContents] = useState<ContentDetail[]>([]);
   const [authorContentsNextCursor, setAuthorContentsNextCursor] = useState<string>();
   const [authorContentsLoading, setAuthorContentsLoading] = useState(false);
@@ -465,10 +468,18 @@ export default function App() {
     if (!author.id.trim()) return;
     const requestId = ++authorContentRequestRef.current;
     setSelectedAuthor(author);
+    setAuthorStats(undefined);
     setAuthorContents([]);
     setAuthorContentsNextCursor(undefined);
     setAuthorContentsError(undefined);
     setAuthorContentsLoading(true);
+    getSocialStats(author.id)
+      .then((stats) => {
+        if (requestId === authorContentRequestRef.current) setAuthorStats(stats);
+      })
+      .catch(() => {
+        // Counts stay hidden rather than showing a stale guess.
+      });
     getAuthorPosts(author.id)
       .then((page) => {
         if (requestId !== authorContentRequestRef.current) return;
@@ -493,6 +504,7 @@ export default function App() {
     authorContentRequestRef.current += 1;
     authorContentLoadingMoreRef.current = false;
     setSelectedAuthor(undefined);
+    setAuthorStats(undefined);
     setAuthorContents([]);
     setAuthorContentsNextCursor(undefined);
     setAuthorContentsError(undefined);
@@ -1368,7 +1380,7 @@ export default function App() {
       <CreateEntryModal actionId={entryContext?.actionId} initialDurationMinutes={entryContext?.durationMinutes} journeyId={entryContext?.journeyId} journeys={journeys} onClose={() => setEntryContext(null)} onSubmit={handleSaveEntry} visible={entryContext !== null} />
       <ActionDetailModal action={selectedAction} journeyTitle={journeys.find((journey) => journey.id === selectedAction?.journey_id)?.title} onClose={() => setSelectedActionId(undefined)} onComplete={handleComplete} onCreateEntry={(action, elapsedSeconds) => { setSelectedActionId(undefined); setEntryContext({ actionId: action.id, journeyId: action.journey_id, durationMinutes: elapsedSeconds > 0 ? Math.max(1, Math.round(elapsedSeconds / 60)) : undefined }); }} onUpdate={handleUpdateAction} visible={Boolean(selectedAction)} />
       <JourneyDetailModal actions={selectedJourneyActions} journey={selectedJourney} onAddAction={handleAddAction} onClose={() => setSelectedJourneyId(undefined)} onOpenAction={openAction} onPublish={handlePublishJourney} onUpdateJourney={handleUpdateJourney} visible={Boolean(selectedJourney)} />
-      <AuthorProfileModal author={selectedAuthor} blocked={Boolean(selectedAuthor && blockedAuthorIds.has(selectedAuthor.id))} contents={authorContents} error={authorContentsError} following={Boolean(selectedAuthor && followingAuthorIds.has(selectedAuthor.id))} loading={authorContentsLoading} loadingMore={authorContentsLoadingMore} muted={Boolean(selectedAuthor && mutedAuthorIds.has(selectedAuthor.id))} nextCursor={authorContentsNextCursor} onClose={closeAuthorProfile} onFollow={handleFollowAuthor} onLoadMore={loadMoreAuthorContents} onMessage={(authorId) => { closeAuthorProfile(); openMessages(authorId); }} onOpenContent={(content) => { if (!content.post) return; closeAuthorProfile(); openPostDetail(content.post, content.author_id, content); }} onSetRelationship={handleCreatorRelationship} />
+      <AuthorProfileModal author={selectedAuthor} blocked={Boolean(selectedAuthor && blockedAuthorIds.has(selectedAuthor.id))} contents={authorContents} error={authorContentsError} following={Boolean(selectedAuthor && followingAuthorIds.has(selectedAuthor.id))} loading={authorContentsLoading} loadingMore={authorContentsLoadingMore} muted={Boolean(selectedAuthor && mutedAuthorIds.has(selectedAuthor.id))} nextCursor={authorContentsNextCursor} onClose={closeAuthorProfile} onFollow={handleFollowAuthor} onLoadMore={loadMoreAuthorContents} onMessage={(authorId) => { closeAuthorProfile(); openMessages(authorId); }} onOpenContent={(content) => { if (!content.post) return; closeAuthorProfile(); openPostDetail(content.post, content.author_id, content); }} onSetRelationship={handleCreatorRelationship} stats={authorStats} />
       <PostDetailModal bookmarked={Boolean(selectedPost && bookmarkedPostIds.has(selectedPost.id))} canForkRoute={Boolean(selectedPost && selectedPostAuthorId && selectedPostAuthorId !== currentUserId)} capturedKnowledge={Boolean(selectedPost && knowledgeResources.some((resource) => resource.source_content_id === selectedPost.id))} comments={selectedPost ? commentsByPost[selectedPost.id] ?? [] : []} content={selectedContent} currentUserId={currentUserId} following={Boolean(selectedPostAuthorId && followingAuthorIds.has(selectedPostAuthorId))} hasMoreComments={Boolean(selectedPost && commentNextCursorByPost[selectedPost.id])} joinCount={selectedPost ? routeParticipantCounts[selectedPost.id] : undefined} joined={Boolean(selectedPost && joinedRouteIds.has(selectedPost.id))} joining={Boolean(selectedPost && joiningRouteIds.has(selectedPost.id))} liked={Boolean(selectedPost && likedPostIds.has(selectedPost.id))} loadingMoreComments={Boolean(selectedPost && loadingCommentPostIds.has(selectedPost.id))} onAcceptAnswer={handleAcceptQuestionAnswer} onBookmark={(postId) => handleBookmark(postId, selectedPostRecommendationContext)} onCaptureKnowledge={(postId) => handleCapturePostAsKnowledge(postId, selectedPostRecommendationContext)} onClose={closePostDetail} onComment={handleComment} onDeleteComment={handleDeleteComment} onFollow={handleFollow} onForkRoute={openForkRoute} onHide={(postId) => requestHide(postId, selectedPostRecommendationContext)} onJoin={(post) => handleJoinRoute(post, selectedPostRecommendationContext)} onLike={(postId) => handleLike(postId, selectedPostRecommendationContext)} onLoadMoreComments={handleLoadMoreComments} onOpenActionContext={openActionContext} onOpenAuthor={openPostAuthorProfile} onReport={handleReport} post={selectedPost} visible={Boolean(selectedPost)} />
       <ForkRouteModal onClose={() => setForkSourcePost(undefined)} onSubmit={handleForkRoute} sourceTitle={forkSourcePost?.route_title || forkSourcePost?.title || ''} visible={Boolean(forkSourcePost)} />
       <RouteDraftModal content={selectedRouteDraft} onClose={() => setSelectedRouteDraft(undefined)} onPublish={publishRouteDraft} onSave={saveRouteDraft} visible={Boolean(selectedRouteDraft)} />

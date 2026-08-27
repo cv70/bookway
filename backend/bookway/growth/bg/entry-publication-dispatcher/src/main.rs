@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = bookway_data::postgres_pool().await?;
     let content_url =
         env::var("BBS_LINK_GRPC_URL").unwrap_or_else(|_| "http://127.0.0.1:18004".to_string());
-    let client = BbsLinkClient::connect(content_url).await?;
+    let client = BbsLinkClient::new(bookway_runtime::grpc_channel(&content_url).await?);
 
     loop {
         let jobs = match claim_jobs(&pool).await {
@@ -266,6 +266,11 @@ async fn schedule_retry(
     Ok(true)
 }
 
+// A Growth entry is a personal check-in note, so its public twin is always a
+// Note. Milestone posts (route progress) and questions each have their own
+// explicit creation paths upstream — this dispatcher must never fabricate
+// them from a payload field; the None branches below are a deliberate shape,
+// not missing wiring.
 fn content_request(job: &PublicationJob) -> Result<content_pb::CreateRequest, String> {
     let user_id = required_string(&job.payload, "user_id")?;
     if user_id != job.user_id {
@@ -402,6 +407,14 @@ mod tests {
             Some("entry-publication:entry-1")
         );
         assert_eq!(request.body, "The public body");
+        // The check-in publishes as a plain Note; milestone/question shaping
+        // belongs to their own creation flows, never to this dispatcher.
+        assert_eq!(request.content_type, content_pb::ContentType::Note as i32);
+        assert!(request.milestone.is_none());
+        assert!(request.question_context.is_none());
+        assert!(request.route_template.is_none());
+        assert!(request.tags.is_empty());
+        assert!(request.topics.is_empty());
         assert!(request.route_title.is_none());
         assert_eq!(
             request.media_asset_ids,

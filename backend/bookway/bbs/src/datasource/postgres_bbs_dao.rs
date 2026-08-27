@@ -117,6 +117,102 @@ impl BbsDao for PostgresBbsDao {
         self.context(user_id).await
     }
 
+    async fn list_followers(
+        &self,
+        user_id: &str,
+        before: Option<KeysetCursor>,
+        limit: u32,
+    ) -> Result<Vec<FollowedEdge>, DaoError> {
+        // The row-wise resume comparison pairs with the migration-0080
+        // covering index (target_user_id, created_at DESC, source_user_id
+        // DESC), so each page is one ordered index scan.
+        let rows = match before {
+            Some(cursor) => {
+                sqlx::query_as::<_, (String, time::OffsetDateTime)>(
+                    "SELECT source_user_id, created_at FROM social_edges WHERE target_user_id = $1 AND edge_type = 'follow' AND deleted_at IS NULL AND (created_at, source_user_id) < ($2, $3) ORDER BY created_at DESC, source_user_id DESC LIMIT $4",
+                )
+                .bind(user_id)
+                .bind(cursor.at)
+                .bind(cursor.id)
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query_as::<_, (String, time::OffsetDateTime)>(
+                    "SELECT source_user_id, created_at FROM social_edges WHERE target_user_id = $1 AND edge_type = 'follow' AND deleted_at IS NULL ORDER BY created_at DESC, source_user_id DESC LIMIT $2",
+                )
+                .bind(user_id)
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(DaoError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|(follower_id, followed_at)| FollowedEdge {
+                follower_id,
+                followed_at,
+            })
+            .collect())
+    }
+
+    async fn list_route_peers(
+        &self,
+        route_id: &str,
+        viewer_id: &str,
+        excluded_user_ids: &[String],
+        before: Option<KeysetCursor>,
+        limit: u32,
+    ) -> Result<Vec<PeerEdge>, DaoError> {
+        let rows = match before {
+            Some(cursor) => {
+                sqlx::query_as::<_, (String, time::OffsetDateTime)>(
+                    "SELECT user_id, joined_at FROM route_participations WHERE route_id = $1 AND left_at IS NULL AND user_id <> $2 AND NOT (user_id = ANY($3)) AND (joined_at, user_id) < ($4, $5) ORDER BY joined_at DESC, user_id DESC LIMIT $6",
+                )
+                .bind(route_id)
+                .bind(viewer_id)
+                .bind(excluded_user_ids)
+                .bind(cursor.at)
+                .bind(cursor.id)
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query_as::<_, (String, time::OffsetDateTime)>(
+                    "SELECT user_id, joined_at FROM route_participations WHERE route_id = $1 AND left_at IS NULL AND user_id <> $2 AND NOT (user_id = ANY($3)) ORDER BY joined_at DESC, user_id DESC LIMIT $4",
+                )
+                .bind(route_id)
+                .bind(viewer_id)
+                .bind(excluded_user_ids)
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(DaoError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|(user_id, joined_at)| PeerEdge { user_id, joined_at })
+            .collect())
+    }
+
+    async fn social_stats(&self, user_id: &str) -> Result<(u64, u64), DaoError> {
+        let (followers, following) = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT (SELECT COUNT(*) FROM social_edges WHERE target_user_id = $1 AND edge_type = 'follow' AND deleted_at IS NULL), (SELECT COUNT(*) FROM social_edges WHERE source_user_id = $1 AND edge_type = 'follow' AND deleted_at IS NULL)",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DaoError::Database)?;
+        Ok((
+            u64::try_from(followers).unwrap_or(u64::MAX),
+            u64::try_from(following).unwrap_or(u64::MAX),
+        ))
+    }
+
     async fn list_route_participations(
         &self,
         user_id: &str,

@@ -4,23 +4,30 @@ import {
   AffiliateRule,
   AffiliateSettlement,
   formatActionNode,
-  Settlement,
 } from "../domain";
 
+const payableCents = (payable: string) => {
+  const amount = Number(payable.replace(/[¥,]/g, ""));
+  return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+};
+
+const sumPayable = (items: AffiliateSettlement[]) =>
+  `¥${(
+    items.reduce((sum, item) => sum + payableCents(item.payable), 0) / 100
+  ).toFixed(2)}`;
+
 export function Finance({
-  settlements,
   affiliates,
   affiliateRules,
-  onExport,
+  onPayAffiliate,
   onExportAffiliates,
   onCreateAffiliateRule,
   onToggleAffiliateRule,
   onRemoveAffiliateRule,
 }: {
-  settlements: Settlement[];
   affiliates: AffiliateSettlement[];
   affiliateRules: AffiliateRule[];
-  onExport: () => void;
+  onPayAffiliate: (settlementId: string) => void;
   onExportAffiliates: () => void;
   onCreateAffiliateRule: (rule: Omit<AffiliateRule, "id">) => string | null;
   onToggleAffiliateRule: (id: string) => string | null;
@@ -30,8 +37,13 @@ export function Finance({
   const [showRuleForm, setShowRuleForm] = useState(false);
   const [ruleError, setRuleError] = useState("");
   const [removingRule, setRemovingRule] = useState<AffiliateRule | null>(null);
-  const rows = settlements.filter(
-    (item) => filter === "全部" || item.status === filter,
+  // Statuses other than the tabs below (待生效 / 已冲正) surface under 全部.
+  const rows = affiliates.filter(
+    (item) =>
+      filter === "全部" ||
+      (filter === "待结算"
+        ? item.status === "待生效" || item.status === "待结算"
+        : item.status === "已结算"),
   );
   const submitRule = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -71,31 +83,37 @@ export function Finance({
           <p className="eyebrow">账务与对账</p>
           <h1>财务结算</h1>
           <p className="muted">
-            订单收入、平台服务费与创作者分账按结算周期对账。
+            创作者分账来自订单支付成功后的分账台账，可对待结算分账单执行打款。
           </p>
         </div>
-        <button className="button secondary" onClick={onExport}>
-          ⇩ 导出明细
+        <button className="button secondary" onClick={onExportAffiliates}>
+          ⇩ 导出分账
         </button>
       </div>
       <div className="metric-grid">
         <Metric
-          label="待结算金额"
-          value="¥16,578.00"
-          change="本期"
-          note="预计 8 月 25 日"
+          label="待打款分账"
+          value={sumPayable(
+            affiliates.filter((item) => item.status === "待结算"),
+          )}
+          change={`${affiliates.filter((item) => item.status === "待结算").length} 笔`}
+          note="已到期，等待商家打款"
         />
         <Metric
           label="累计已结算"
-          value="¥85,420.00"
-          change="↑ 12.4%"
-          note="较上季度"
+          value={sumPayable(
+            affiliates.filter((item) => item.status === "已结算"),
+          )}
+          change={`${affiliates.filter((item) => item.status === "已结算").length} 笔`}
+          note="已完成打款"
         />
         <Metric
-          label="创作者分账"
-          value="¥4,328.00"
-          change="18 笔"
-          note="路线贡献佣金"
+          label="已冲正分账"
+          value={sumPayable(
+            affiliates.filter((item) => item.status === "已冲正"),
+          )}
+          change={`${affiliates.filter((item) => item.status === "已冲正").length} 笔`}
+          note="关联订单退款后作废"
           tone="neutral"
         />
       </div>
@@ -113,7 +131,7 @@ export function Finance({
             ))}
           </div>
           <span className="report-note">
-            结算周期：半月 · 到账账户：尾号 4821
+            每笔订单一条分账 · 打款后状态变为已结算
           </span>
         </div>
         <div className="responsive-table">
@@ -121,15 +139,15 @@ export function Finance({
             <thead>
               <tr>
                 {[
-                  "结算单",
-                  "周期",
-                  "订单成交",
-                  "平台与分账",
+                  "分账单",
+                  "订单",
+                  "创作者",
                   "应付金额",
                   "状态",
-                  "到账时间",
+                  "时间",
+                  "",
                 ].map((label) => (
-                  <th key={label}>{label}</th>
+                  <th key={label || "actions"}>{label}</th>
                 ))}
               </tr>
             </thead>
@@ -139,9 +157,8 @@ export function Finance({
                   <td>
                     <strong>{item.id}</strong>
                   </td>
-                  <td>{item.period}</td>
-                  <td>{item.gross}</td>
-                  <td>{item.commission}</td>
+                  <td>{item.order_id}</td>
+                  <td>{item.creator}</td>
                   <td>
                     <strong>{item.payable}</strong>
                   </td>
@@ -149,59 +166,15 @@ export function Finance({
                     <Status value={item.status} />
                   </td>
                   <td>{item.date}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <div className="panel table-panel affiliate-panel">
-        <div className="panel-header">
-          <div>
-            <h2>创作者分账明细</h2>
-            <p>仅归因于已挂载的路线行动节点</p>
-          </div>
-          <button className="button secondary" onClick={onExportAffiliates}>
-            ⇩ 导出分账
-          </button>
-        </div>
-        <div className="responsive-table">
-          <table>
-            <thead>
-              <tr>
-                {[
-                  "分账单",
-                  "创作者",
-                  "路线 / 节点",
-                  "成交订单",
-                  "分账比例",
-                  "应付金额",
-                  "状态",
-                ].map((label) => (
-                  <th key={label}>{label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {affiliates.map((item) => (
-                <tr key={item.id}>
                   <td>
-                    <strong>{item.id}</strong>
-                  </td>
-                  <td>{item.creator}</td>
-                  <td>
-                    <strong>{item.route}</strong>
-                    <small>
-                      {item.node} · {item.equipment}
-                    </small>
-                  </td>
-                  <td>{item.orders}</td>
-                  <td>{item.rate}</td>
-                  <td>
-                    <strong>{item.payable}</strong>
-                  </td>
-                  <td>
-                    <Status value={item.status} />
+                    {item.status === "待结算" && (
+                      <button
+                        className="table-action"
+                        onClick={() => onPayAffiliate(item.id)}
+                      >
+                        打款
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -385,12 +358,16 @@ function Metric({
     </article>
   );
 }
-function Status({ value }: { value: string }) {
-  return (
-    <span className={`status ${value === "已结算" ? "success" : "warning"}`}>
-      {value}
-    </span>
-  );
+function Status({ value }: { value: AffiliateSettlement["status"] }) {
+  const tone =
+    value === "已结算"
+      ? "success"
+      : value === "待结算"
+        ? "warning"
+        : value === "已冲正"
+          ? "danger-status"
+          : "neutral";
+  return <span className={`status ${tone}`}>{value}</span>;
 }
 
 function RemoveAffiliateRuleDialog({

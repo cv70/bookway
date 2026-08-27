@@ -204,6 +204,15 @@ pub struct SettleAffiliateRequest {
     #[prost(string, tag = "2")]
     pub settlement_id: ::prost::alloc::string::String,
 }
+/// Refund-path entry point: reverses the affiliate share of an order whose
+/// payment is being returned. Idempotent — replaying a reversal returns the
+/// already reversed settlement.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReverseAffiliateRequest {
+    #[prost(string, tag = "1")]
+    pub order_id: ::prost::alloc::string::String,
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -638,6 +647,34 @@ pub mod mall_order_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Service-to-service hook for the future refund money channel. Reversing is
+        /// an internal ledger fact, not a merchant dashboard action.
+        pub async fn reverse_affiliate(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReverseAffiliateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AffiliateSettlement>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.mall.order.MallOrder/ReverseAffiliate",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.mall.order.MallOrder", "ReverseAffiliate"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -704,6 +741,15 @@ pub mod mall_order_server {
         async fn settle_affiliate(
             &self,
             request: tonic::Request<super::SettleAffiliateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AffiliateSettlement>,
+            tonic::Status,
+        >;
+        /// Service-to-service hook for the future refund money channel. Reversing is
+        /// an internal ledger fact, not a merchant dashboard action.
+        async fn reverse_affiliate(
+            &self,
+            request: tonic::Request<super::ReverseAffiliateRequest>,
         ) -> std::result::Result<
             tonic::Response<super::AffiliateSettlement>,
             tonic::Status,
@@ -1209,6 +1255,51 @@ pub mod mall_order_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SettleAffiliateSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.mall.order.MallOrder/ReverseAffiliate" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReverseAffiliateSvc<T: MallOrder>(pub Arc<T>);
+                    impl<
+                        T: MallOrder,
+                    > tonic::server::UnaryService<super::ReverseAffiliateRequest>
+                    for ReverseAffiliateSvc<T> {
+                        type Response = super::AffiliateSettlement;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReverseAffiliateRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MallOrder>::reverse_affiliate(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReverseAffiliateSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

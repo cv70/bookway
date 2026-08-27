@@ -10,6 +10,11 @@ enum SearchType {
   SEARCH_TYPE_USERS = 3;
   SEARCH_TYPE_TOPICS = 4;
   SEARCH_TYPE_RESOURCES = 5;
+  // Entity-level search over public route action nodes. Hits are typed as
+  // ACTION_NODE results that still carry their enclosing route card.
+  SEARCH_TYPE_NODES = 6;
+  // Entity-level search over scene equipment referenced by route nodes.
+  SEARCH_TYPE_EQUIPMENT = 7;
 }
 
 enum SearchResultType {
@@ -19,6 +24,12 @@ enum SearchResultType {
   SEARCH_RESULT_TYPE_TOPIC = 3;
   SEARCH_RESULT_TYPE_RESOURCE = 4;
   SEARCH_RESULT_TYPE_AD = 5;
+  // One route action node matched by title/detail/id. The Journey card stays
+  // available through the post field for scene-aware commerce linking.
+  SEARCH_RESULT_TYPE_ACTION_NODE = 6;
+  // One (route node, equipment) match. Equipment has no standalone identity,
+  // so the result ID is "<content-id>/<action-id>/equipment/<name>".
+  SEARCH_RESULT_TYPE_SCENE_EQUIPMENT = 7;
 }
 
 enum GrowthDomain {

@@ -9,7 +9,7 @@ export function Audiences({
   toggle,
   onAdd,
   onRemove,
-  onSaveGuardrails,
+  onSaveCap,
   notify,
 }: {
   scenes: Scene[];
@@ -18,10 +18,10 @@ export function Audiences({
   toggle: (id: string) => void;
   onAdd: (scene: Scene) => void;
   onRemove: (id: string) => void;
-  onSaveGuardrails: (guardrails: DeliveryGuardrails) => void;
+  onSaveCap: (cap: number) => void;
   notify: (message: string) => void;
 }) {
-  const [policy, setPolicy] = useState<"frequency" | "diversity" | null>(null);
+  const [policy, setPolicy] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [removing, setRemoving] = useState<Scene | null>(null);
   const [error, setError] = useState("");
@@ -158,24 +158,17 @@ export function Audiences({
       )}
       <div className="lower-grid">
         <Policy
-          title="频控与打散"
+          title="频控与护栏"
           icon="⌁"
-          text={`单用户每日最多展示 ${guardrails.userDailyCap} 次，同一活动连续展示间隔 ${guardrails.cooldownMinutes} 分钟。`}
-          onClick={() => setPolicy("frequency")}
-        />
-        <Policy
-          title="防茧房策略"
-          icon="◌"
-          text={`广告混排保留 ${guardrails.explorationShare}% 探索流量，连续同路线最多 ${guardrails.sameRouteLimit} 次。`}
-          onClick={() => setPolicy("diversity")}
+          text={`单用户每日最多展示 ${guardrails.userDailyCap} 次（跨所有活动，服务端强制）。单活动频控在各活动的投放设置中配置。`}
+          onClick={() => setPolicy(true)}
         />
       </div>
       {policy && (
-        <PolicyDialog
-          policy={policy}
-          guardrails={guardrails}
-          onSave={onSaveGuardrails}
-          close={() => setPolicy(null)}
+        <CapDialog
+          cap={guardrails.userDailyCap}
+          onSave={onSaveCap}
+          close={() => setPolicy(false)}
         />
       )}
       <DeliveryLab
@@ -332,39 +325,24 @@ function RemoveScene({
     </div>
   );
 }
-function PolicyDialog({
-  policy,
-  guardrails,
+function CapDialog({
+  cap,
   onSave,
   close,
 }: {
-  policy: "frequency" | "diversity";
-  guardrails: DeliveryGuardrails;
-  onSave: (guardrails: DeliveryGuardrails) => void;
+  cap: number;
+  onSave: (cap: number) => void;
   close: () => void;
 }) {
+  const [error, setError] = useState("");
   const save = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const next = {
-      userDailyCap: Number(data.get("userDailyCap")),
-      campaignDailyCap: Number(data.get("campaignDailyCap")),
-      cooldownMinutes: Number(data.get("cooldownMinutes")),
-      explorationShare: Number(data.get("explorationShare")),
-      sameRouteLimit: Number(data.get("sameRouteLimit")),
-    };
-    if (
-      !Object.values(next).every(Number.isInteger) ||
-      next.userDailyCap < next.campaignDailyCap ||
-      next.campaignDailyCap < 1 ||
-      next.cooldownMinutes < 1 ||
-      next.explorationShare < 10 ||
-      next.explorationShare > 50 ||
-      next.sameRouteLimit < 1
-    ) {
+    const value = Number(new FormData(event.currentTarget).get("userDailyCap"));
+    if (!Number.isInteger(value) || value < 1 || value > 30) {
+      setError("请输入 1 到 30 的整数。");
       return;
     }
-    onSave(next);
+    onSave(value);
     close();
   };
   return (
@@ -377,104 +355,40 @@ function PolicyDialog({
         <div className="dialog-header">
           <div>
             <p className="eyebrow">投放护栏</p>
-            <h2>{policy === "frequency" ? "频控与打散" : "防茧房规则"}</h2>
+            <h2>单用户全局日曝光上限</h2>
           </div>
           <button className="icon-button" onClick={close}>
             ×
           </button>
         </div>
-        {policy === "frequency" ? (
-          <>
-            <label>
-              单用户全局日曝光上限
-              <input
-                name="userDailyCap"
-                type="number"
-                min="1"
-                max="30"
-                required
-                defaultValue={guardrails.userDailyCap}
-              />
-            </label>
-            <label>
-              单活动日曝光上限
-              <input
-                name="campaignDailyCap"
-                type="number"
-                min="1"
-                max="10"
-                required
-                defaultValue={guardrails.campaignDailyCap}
-              />
-            </label>
-            <label>
-              同活动冷却时间（分钟）
-              <input
-                name="cooldownMinutes"
-                type="number"
-                min="1"
-                max="240"
-                required
-                defaultValue={guardrails.cooldownMinutes}
-              />
-            </label>
-            <input
-              type="hidden"
-              name="explorationShare"
-              value={guardrails.explorationShare}
-            />
-            <input
-              type="hidden"
-              name="sameRouteLimit"
-              value={guardrails.sameRouteLimit}
-            />
-          </>
-        ) : (
-          <>
-            <label>
-              探索流量占比（%）
-              <input
-                name="explorationShare"
-                type="number"
-                min="10"
-                max="50"
-                required
-                defaultValue={guardrails.explorationShare}
-              />
-            </label>
-            <label>
-              连续同路线展示上限
-              <input
-                name="sameRouteLimit"
-                type="number"
-                min="1"
-                max="5"
-                required
-                defaultValue={guardrails.sameRouteLimit}
-              />
-            </label>
-            <input
-              type="hidden"
-              name="userDailyCap"
-              value={guardrails.userDailyCap}
-            />
-            <input
-              type="hidden"
-              name="campaignDailyCap"
-              value={guardrails.campaignDailyCap}
-            />
-            <input
-              type="hidden"
-              name="cooldownMinutes"
-              value={guardrails.cooldownMinutes}
-            />
-          </>
+        {error && (
+          <p className="form-error" role="alert">
+            {error}
+          </p>
         )}
+        <label>
+          每位用户每日跨活动曝光上限（次）
+          <input
+            name="userDailyCap"
+            type="number"
+            min="1"
+            max="30"
+            required
+            defaultValue={cap}
+          />
+        </label>
+        <div className="frequency">
+          <strong>生效范围</strong>
+          <p>
+            该上限由服务端在每次曝光受理时强制执行，删除配置也不会静默关闭；
+            仅平台管理员可以修改。
+          </p>
+        </div>
         <div className="dialog-actions">
           <button type="button" className="button secondary" onClick={close}>
             取消
           </button>
-          <button className="button primary">保存策略</button>
+          <button className="button primary">保存护栏</button>
         </div>
       </form>
     </div>

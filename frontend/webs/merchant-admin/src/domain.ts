@@ -51,25 +51,15 @@ export type RouteOffer = {
   routeCompletion: number;
   enabled: boolean;
 };
-export type Settlement = {
-  id: string;
-  period: string;
-  gross: string;
-  commission: string;
-  payable: string;
-  status: "待结算" | "已结算";
-  date: string;
-};
+// Mirrors the mall-order affiliate settlement ledger: one row per order,
+// shaped by the AffiliateSettlement proto (id/order/creator/amount/status).
 export type AffiliateSettlement = {
   id: string;
+  order_id: string;
   creator: string;
-  route: string;
-  node: string;
-  equipment: string;
-  orders: number;
-  rate: string;
   payable: string;
-  status: "待结算" | "已结算";
+  status: "待生效" | "待结算" | "已结算" | "已冲正";
+  date: string;
 };
 export type AffiliateRule = {
   id: string;
@@ -314,24 +304,32 @@ export const initialOffers: RouteOffer[] = [
     enabled: true,
   },
 ];
-export const initialSettlements: Settlement[] = [
+// Sandbox seeds for the local (gateway-unconfigured) mode only. Remote mode
+// replaces these with the mall-order affiliate ledger via affiliateFromMall.
+export const affiliateSettlements: AffiliateSettlement[] = [
   {
-    id: "ST20260801",
-    period: "2026 年 8 月上半月",
-    gross: "¥18,420.00",
-    commission: "¥1,842.00",
-    payable: "¥16,578.00",
+    id: "AF20260801",
+    order_id: "order-8f2a",
+    creator: "creator-1",
+    payable: "¥438.00",
     status: "待结算",
-    date: "预计 8 月 25 日",
+    date: "2026-08-20T09:30:00Z",
   },
   {
-    id: "ST20260702",
-    period: "2026 年 7 月下半月",
-    gross: "¥24,860.00",
-    commission: "¥2,486.00",
-    payable: "¥22,374.00",
+    id: "AF20260802",
+    order_id: "order-91cc",
+    creator: "creator-2",
+    payable: "¥216.00",
+    status: "待结算",
+    date: "2026-08-21T14:05:00Z",
+  },
+  {
+    id: "AF20260711",
+    order_id: "order-77be",
+    creator: "creator-3",
+    payable: "¥172.50",
     status: "已结算",
-    date: "8 月 10 日到账",
+    date: "2026-08-01T10:00:00Z",
   },
 ];
 
@@ -353,41 +351,6 @@ export const initialAffiliateRules: AffiliateRule[] = [
     equipment: "头盔、手套与骑行补给",
     rate: 10,
     enabled: true,
-  },
-];
-export const affiliateSettlements: AffiliateSettlement[] = [
-  {
-    id: "AF20260801",
-    creator: "林野向导",
-    route: "周末轻徒步入门",
-    node: "装备准备",
-    equipment: "轻量背包与防磨徒步袜",
-    orders: 12,
-    rate: "12%",
-    payable: "¥438.00",
-    status: "待结算",
-  },
-  {
-    id: "AF20260802",
-    creator: "骑行阿南",
-    route: "城市骑行第一课",
-    node: "出发前检查",
-    equipment: "头盔、手套与骑行补给",
-    orders: 8,
-    rate: "10%",
-    payable: "¥216.00",
-    status: "待结算",
-  },
-  {
-    id: "AF20260711",
-    creator: "山海露营社",
-    route: "夏日露营清单",
-    node: "夜间照明",
-    equipment: "营地灯与备用电源",
-    orders: 5,
-    rate: "15%",
-    payable: "¥172.50",
-    status: "已结算",
   },
 ];
 export const nav: { view: View; label: string; icon: string }[] = [

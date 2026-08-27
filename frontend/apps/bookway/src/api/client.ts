@@ -46,6 +46,8 @@ import {
   SearchResponse,
   SuggestionResponse,
   SocialContext,
+  SocialStats,
+  RoutePeerPage,
   Today,
   UserFeedback,
   UserNotification,
@@ -519,6 +521,20 @@ export function getCompanion(): Promise<CompanionBrief> {
 
 export function getSocialContext(): Promise<SocialContext> {
   return request('/v1/social/context');
+}
+
+export function getSocialStats(authorId: string): Promise<SocialStats> {
+  return request(`/v1/users/${encodeURIComponent(authorId)}/social-stats`);
+}
+
+/// Co-walkers of a route: active participants minus the viewer's blocks and
+/// mutes, filtered fail-closed server-side. Route posts use their content id
+/// as the route id.
+export function getRoutePeers(routeId: string, cursor?: string): Promise<RoutePeerPage> {
+  const query = new URLSearchParams();
+  if (cursor) query.set('cursor', cursor);
+  const suffix = query.size ? `?${query.toString()}` : '';
+  return request(`/v1/routes/${encodeURIComponent(routeId)}/peers${suffix}`);
 }
 
 export function getRouteParticipations(): Promise<RouteParticipation[]> {

@@ -11,6 +11,13 @@ pub struct Config {
     pub(crate) recommend_rank_url: String,
     pub(crate) recommend_recall_url: String,
     pub(crate) ad_main_url: String,
+    /// Hard daily cap on how often one content item may be served to one user
+    /// (server-side guard, Redis-backed). 0 disables the guard.
+    pub(crate) frequency_cap_daily: u32,
+    /// TTL for the shared cold-start (anonymous, first-page) feed snapshot.
+    /// Deliberately tiny: it only absorbs launch stampedes. Personalized
+    /// pages are never cached regardless of this value. 0 disables it.
+    pub(crate) anon_page_ttl_secs: u64,
 }
 
 impl Config {
@@ -28,8 +35,17 @@ impl Config {
             recommend_recall_url: env::var("RECOMMEND_RECALL_GRPC_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8095".to_string()),
             ad_main_url: grpc_url("AD_MAIN_GRPC_URL", "http://127.0.0.1:8100"),
+            frequency_cap_daily: env_u32("FEED_FREQUENCY_CAP_DAILY", 3),
+            anon_page_ttl_secs: env_u32("FEED_ANON_PAGE_TTL_SECS", 3) as u64,
         })
     }
+}
+
+fn env_u32(key: &str, default: u32) -> u32 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 fn grpc_url(key: &str, default: &str) -> String {

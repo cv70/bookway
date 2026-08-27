@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{datasource::UpstreamError, domain::Domain};
+use crate::{datasource::UpstreamError, domain::Domain, domain::StockAccessError};
 use bookway_account_api::pb as account_pb;
 use bookway_ad_center_api::pb as ad_center_pb;
 use bookway_ad_main_api::pb as ad_main_pb;
@@ -23,6 +23,7 @@ use bookway_feedback_api::pb as feedback_pb;
 use bookway_growth_api::pb as growth_pb;
 use bookway_knowledge_catalog_api::pb as catalog_pb;
 use bookway_mall_api::pb as mall_pb;
+use bookway_mall_inventory_api::pb as mall_inventory_pb;
 use bookway_mall_order_api::pb as mall_order_pb;
 use bookway_media_api::pb as media_pb;
 use bookway_user_event_api::pb as user_event_pb;
@@ -182,12 +183,21 @@ pub(crate) fn router(state: AppState) -> Router {
             get(admin_ad_campaign).patch(admin_update_ad_campaign),
         )
         .route(
+            "/v1/admin/ads/guardrails",
+            get(admin_ad_guardrails).patch(admin_set_ad_guardrails),
+        )
+        .route("/v1/admin/ads/reports", get(admin_ad_delivery_report))
+        .route(
             "/v1/admin/mall/products",
             get(admin_mall_products).post(admin_create_mall_product),
         )
         .route(
             "/v1/admin/mall/products/{product_id}",
             patch(admin_update_mall_product),
+        )
+        .route(
+            "/v1/admin/mall/skus/{sku_id}/stock",
+            post(admin_set_mall_sku_stock),
         )
         .route(
             "/v1/admin/routes/{route_id}/nodes/{action_node_id}/offers",
@@ -320,12 +330,12 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/me/comment-appeals", get(list_own_comment_appeals))
         .route("/v1/users/{user_id}/follow", put(set_follow))
         .route("/v1/users/{user_id}/relationship", put(set_relationship))
+        .route("/v1/users/{user_id}/followers", get(list_followers))
+        .route("/v1/users/{user_id}/social-stats", get(social_stats))
         .route("/v1/social/context", get(social_context))
         .route("/v1/route-participations", get(list_route_participations))
-        .route(
-            "/v1/routes/{route_id}/participation",
-            put(set_route_participation),
-        )
+        .route("/v1/routes/{route_id}/participation", put(set_route_participation))
+        .route("/v1/routes/{route_id}/peers", get(list_route_peers))
         .route("/v1/routes/{route_id}/join", post(join_route))
         .with_state(state)
         .layer(cors)
@@ -964,9 +974,36 @@ async fn ad_decisions(
                 route_id: query.route_id,
                 action_node_id: query.action_node_id,
                 scene_equipment: Some(query.scene_equipment),
+                // The client's user agent is the one delivery dimension a
+                // browser reliably exposes today; region stays empty until a
+                // trustworthy source exists, which keeps geo-targeted stock
+                // out of these requests by design (fail-closed).
+                geo_region: String::new(),
+                device_os: device_os_from_user_agent(&headers),
             })
             .await?,
     )))
+}
+
+/// Classifies the request user agent into the documented targeting slug
+/// ("ios", "android", "web"); an unreadable agent means unknown, so the
+/// decision can only match unrestricted campaigns.
+fn device_os_from_user_agent(headers: &HeaderMap) -> String {
+    let agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_lowercase();
+    if agent.is_empty() {
+        return String::new();
+    }
+    if agent.contains("iphone") || agent.contains("ipad") || agent.contains("ios") {
+        "ios".to_string()
+    } else if agent.contains("android") {
+        "android".to_string()
+    } else {
+        "web".to_string()
+    }
 }
 
 async fn report_ad_event(
@@ -1034,6 +1071,41 @@ async fn admin_update_ad_campaign(
     )))
 }
 
+async fn admin_ad_guardrails(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<ad_center_pb::DeliveryGuardrails>>, HttpError> {
+    // Advertisers may observe the cap that bounds their delivery; only the
+    // platform can change it.
+    advertiser_admin_id(&headers)?;
+    Ok(Json(ApiResponse::new(
+        state.domain.ad_delivery_guardrails().await?,
+    )))
+}
+
+async fn admin_set_ad_guardrails(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ad_center_pb::DeliveryGuardrails>,
+) -> Result<Json<ApiResponse<ad_center_pb::DeliveryGuardrails>>, HttpError> {
+    // A cap an advertiser could loosen would not be a guardrail.
+    platform_admin_id(&headers)?;
+    Ok(Json(ApiResponse::new(
+        state.domain.set_ad_user_daily_total_cap(request).await?,
+    )))
+}
+
+async fn admin_ad_delivery_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut request): Query<ad_center_pb::AdDeliveryReportRequest>,
+) -> Result<Json<ApiResponse<ad_center_pb::AdDeliveryReport>>, HttpError> {
+    request.advertiser_id = advertiser_admin_id(&headers)?;
+    Ok(Json(ApiResponse::new(
+        state.domain.advertiser_delivery_report(request).await?,
+    )))
+}
+
 async fn admin_mall_products(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1069,8 +1141,35 @@ async fn admin_update_mall_product(
     )))
 }
 
-async fn admin_attach_mall_node_offer(
+#[derive(Deserialize)]
+struct SetMallSkuStockBody {
+    available: i64,
+}
+
+/// Merchant stock adjustment. The gateway proves SKU ownership through mall
+/// before mall-inventory applies the absolute count; inventory still rejects
+/// reductions below the reserved quantity.
+async fn admin_set_mall_sku_stock(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(sku_id): Path<String>,
+    Json(body): Json<SetMallSkuStockBody>,
+) -> Result<Json<ApiResponse<mall_inventory_pb::InventoryItem>>, HttpError> {
+    let merchant_id = merchant_admin_id(&headers)?;
+    match state
+        .domain
+        .set_mall_sku_stock(merchant_id, sku_id, body.available)
+        .await
+    {
+        Ok(item) => Ok(Json(ApiResponse::new(item))),
+        Err(StockAccessError::Forbidden) => Err(HttpError::Forbidden(
+            "sku does not belong to this merchant".to_string(),
+        )),
+        Err(StockAccessError::Upstream(upstream)) => Err(HttpError::from(upstream)),
+    }
+}
+
+async fn admin_attach_mall_node_offer(    State(state): State<AppState>,
     headers: HeaderMap,
     Path((route_id, action_node_id)): Path<(String, String)>,
     Json(mut request): Json<mall_pb::AttachNodeOfferRequest>,
@@ -2028,6 +2127,46 @@ async fn social_context(
     )))
 }
 
+/// Follower lists are public profile facts: any signed-in reader may page
+/// through them, so the path user is the list owner, not the caller.
+async fn list_followers(
+    State(state): State<AppState>,
+    Path(target_user_id): Path<String>,
+    Query(query): Query<rest::FollowerPageQuery>,
+) -> Result<Json<ApiResponse<bbs_pb::FollowerPage>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .list_followers(query.into_pb(target_user_id))
+            .await?,
+    )))
+}
+
+async fn social_stats(
+    State(state): State<AppState>,
+    Path(target_user_id): Path<String>,
+) -> Result<Json<ApiResponse<bbs_pb::SocialStats>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state.domain.social_stats(target_user_id).await?,
+    )))
+}
+
+/// Co-walkers are read per viewer: the viewer identity drives the fail-closed
+/// visibility filter, while the path route selects the shared facts.
+async fn list_route_peers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(route_id): Path<String>,
+    Query(query): Query<rest::RoutePeersQuery>,
+) -> Result<Json<ApiResponse<bbs_pb::RoutePeerPage>>, HttpError> {
+    Ok(Json(ApiResponse::new(
+        state
+            .domain
+            .list_route_peers(query.into_pb(user_id(&headers), route_id))
+            .await?,
+    )))
+}
+
 async fn list_route_participations(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2169,6 +2308,33 @@ fn has_advertiser_admin_role(roles: &str) -> bool {
         .split(',')
         .map(str::trim)
         .any(|role| matches!(role, "admin" | "advertiser_admin"))
+}
+
+/// Delivery guardrail writes are a platform safety control, not merchant or
+/// advertiser console functionality.
+fn platform_admin_id(headers: &HeaderMap) -> Result<String, HttpError> {
+    if !std::env::var("AUTH_REQUIRED").is_ok_and(|value| value == "true") {
+        return Err(HttpError::Forbidden(
+            "admin endpoints require AUTH_REQUIRED=true".to_string(),
+        ));
+    }
+    let authorized = headers
+        .get("x-user-roles")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|roles| {
+            roles.split(',').map(str::trim).any(|role| role == "admin")
+        });
+    if !authorized {
+        return Err(HttpError::Forbidden(
+            "platform admin role is required".to_string(),
+        ));
+    }
+    headers
+        .get("x-user-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| HttpError::Forbidden("authenticated user is required".to_string()))
 }
 
 fn idempotency_key(headers: &HeaderMap) -> Option<String> {

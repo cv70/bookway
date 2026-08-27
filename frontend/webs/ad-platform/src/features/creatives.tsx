@@ -29,7 +29,7 @@ export function Creatives({
           <p className="eyebrow">创意资产</p>
           <h1>广告素材</h1>
           <p className="muted">
-            素材必须绑定路线行动节点，审核通过后才会参与 eCPM 竞价。
+            本页是浏览器本地的素材评审沙盘；活动实际投放的创意标题、正文、图片与落地页在“广告活动”中编辑并同步服务端。
           </p>
         </div>
         <button

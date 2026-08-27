@@ -8,9 +8,15 @@ rust-version.workspace = true
 [dependencies]
 bookway-data.workspace = true
 bookway-event.workspace = true
+bookway-mall-api.workspace = true
 bookway-runtime.workspace = true
+bookway-user-event-api.workspace = true
+sqlx.workspace = true
+time.workspace = true
 tokio.workspace = true
+tonic.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

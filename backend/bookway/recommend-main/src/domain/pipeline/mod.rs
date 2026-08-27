@@ -23,10 +23,12 @@ use bookway_bbs_link_api::pb as bbs_link_pb;
 use crate::api::pb;
 
 pub(crate) use coarse::CoarseRanker;
-pub(crate) use filter::{DuplicateFilter, FollowingOnlyFilter, SafetyFilter, SeenFilter};
+pub(crate) use filter::{
+    DuplicateFilter, FollowingOnlyFilter, FrequencyCapFilter, SafetyFilter, SeenFilter,
+};
 pub(crate) use hydrator::{
-    ReactionContextHydrator, RouteContextHydrator, ServedHistoryHydrator, SocialContextHydrator,
-    SocialProofHydrator,
+    FrequencyCapHydrator, ReactionContextHydrator, RouteContextHydrator, ServedHistoryHydrator,
+    SocialContextHydrator, SocialProofHydrator,
 };
 pub(crate) use query_hydrator::DefaultQueryHydrator;
 pub(crate) use ranker::RecommendRanker;
@@ -67,6 +69,9 @@ pub(crate) struct Candidate {
     pub(crate) bookmarked: bool,
     pub(crate) hidden: bool,
     pub(crate) previously_served: bool,
+    // Today's hard-capped served count (frequency guard). Zero until the
+    // FrequencyCapHydrator runs; the filter compares it against the allowance.
+    pub(crate) daily_served_count: u32,
 }
 
 pub(crate) struct SourceResult {
@@ -91,6 +96,8 @@ pub(crate) enum PipelineError {
     Bbs(String),
     #[error("interaction-status request failed: {0}")]
     InteractionStatus(String),
+    #[error("frequency-cap store failed: {0}")]
+    FrequencyCap(#[from] crate::datasource::FrequencyCapError),
     #[error("recommend-rank request failed: {0}")]
     Model(String),
 }
@@ -430,6 +437,7 @@ mod tests {
                     bookmarked: false,
                     hidden: false,
                     previously_served: false,
+            daily_served_count: 0,
                 }],
                 next_cursor: Some("page-2".to_string()),
                 degraded: false,
@@ -617,6 +625,7 @@ mod tests {
             bookmarked: false,
             hidden: false,
             previously_served: false,
+            daily_served_count: 0,
         }
     }
 }
