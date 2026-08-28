@@ -35,12 +35,12 @@ impl RecommendRecallSource {
         let mut interests = query.interests.iter().copied().collect::<BTreeSet<_>>();
         let mut client = self.feature_client.clone();
         let request = match bookway_runtime::grpc_service_request(feature::FeaturesRequest {
-            user_id: query.user_id.clone(),
+            user_id: query.user_id_or_empty().to_string(),
             content_ids: Vec::new(),
         }) {
             Ok(request) => request,
             Err(error) => {
-                tracing::warn!(%error, user_id = %query.user_id, "profile feature request authentication degraded");
+                tracing::warn!(%error, user_id = query.user_id_or_empty(), "profile feature request authentication degraded");
                 return (interests.into_iter().collect(), true);
             }
         };
@@ -51,11 +51,11 @@ impl RecommendRecallSource {
                 false
             }
             Ok(Err(error)) => {
-                tracing::warn!(%error, user_id = %query.user_id, "profile feature lookup degraded");
+                tracing::warn!(%error, user_id = query.user_id_or_empty(), "profile feature lookup degraded");
                 true
             }
             Err(_) => {
-                tracing::warn!(user_id = %query.user_id, "profile feature lookup timed out");
+                tracing::warn!(user_id = query.user_id_or_empty(), "profile feature lookup timed out");
                 true
             }
         };
@@ -70,7 +70,7 @@ impl RecommendRecallSource {
         let context = client
             .context(
                 bookway_runtime::grpc_service_request(bbs_pb::ContextRequest {
-                    user_id: query.user_id.clone(),
+                    user_id: query.user_id_or_empty().to_string(),
                     post_ids: Vec::new(),
                 })
                 .map_err(|error| PipelineError::Bbs(error.to_string()))?,
@@ -97,7 +97,7 @@ impl CandidateSource for RecommendRecallSource {
         let response = client
             .recall(
                 bookway_runtime::grpc_service_request(recall::RecallRequest {
-                    user_id: query.user_id.clone(),
+                    user_id: query.user_id_or_empty().to_string(),
                     interests: interests.into_iter().map(|domain| domain as i32).collect(),
                     seen: query.seen.iter().cloned().collect(),
                     cursor: query.cursor.clone().unwrap_or_default(),
@@ -160,6 +160,14 @@ fn candidate_to_domain(candidate: recall::Candidate) -> Option<Candidate> {
         quality_score: candidate.quality_score,
         recall_score: candidate.recall_score,
         score: candidate.recall_score,
+        // Recall sources carry no objective estimates yet; recommend-rank
+        // fills them in during ranking.
+        p_ctr: 0.0,
+        p_cvr: 0.0,
+        p_wegu: 0.0,
+        // Recall sources carry no model features; recommend-rank fills the
+        // snapshot during ranking.
+        feature_snapshot: std::collections::HashMap::new(),
         source: candidate.source,
         reasons: candidate.reasons,
         followed_author: false,
@@ -169,7 +177,7 @@ fn candidate_to_domain(candidate: recall::Candidate) -> Option<Candidate> {
         bookmarked: false,
         hidden: false,
         previously_served: false,
-            daily_served_count: 0,
+        daily_served_count: 0,
     })
 }
 

@@ -16,6 +16,8 @@ use bookway_feedback_api::pb as feedback_pb;
 use bookway_growth_api::pb as growth_pb;
 use bookway_interaction_status_api::pb as like_pb;
 use bookway_knowledge_catalog_api::pb as catalog_pb;
+use bookway_mall_api::pb as mall_pb;
+use bookway_mall_order_api::pb as mall_order_pb;
 use bookway_media_api::pb as media_pb;
 use bookway_recommend_main_api::pb as recommend_pb;
 use bookway_user_event_api::pb as user_event_pb;
@@ -634,6 +636,176 @@ impl TryFrom<bbs_link_pb::Content> for Content {
     }
 }
 
+/// Merchant-facing order projection for `/v1/admin/mall/orders`. The buyer's
+/// platform identity (`user_id`) and their payment reference are intentionally
+/// absent: fulfilment needs neither, and minimal disclosure keeps buyer
+/// accounts out of merchant reach.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct MerchantOrderView {
+    pub(crate) id: String,
+    pub(crate) status: i32,
+    pub(crate) currency: String,
+    pub(crate) total_cents: i64,
+    pub(crate) items: Vec<MerchantOrderItemView>,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) node_offer_id: String,
+    pub(crate) affiliate_creator_id: String,
+    pub(crate) commission_cents: i64,
+    pub(crate) fulfillment_status: i32,
+    pub(crate) tracking_number: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct MerchantOrderItemView {
+    pub(crate) title: String,
+    pub(crate) quantity: u32,
+    pub(crate) line_total_cents: i64,
+}
+
+impl TryFrom<mall_order_pb::Order> for MerchantOrderView {
+    type Error = String;
+
+    fn try_from(value: mall_order_pb::Order) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            status: value.status,
+            currency: value.currency,
+            total_cents: value.total_cents,
+            items: value
+                .items
+                .into_iter()
+                .map(|item| MerchantOrderItemView {
+                    title: item.title,
+                    quantity: item.quantity,
+                    line_total_cents: item.line_total_cents,
+                })
+                .collect(),
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            node_offer_id: value.node_offer_id,
+            affiliate_creator_id: value.affiliate_creator_id,
+            commission_cents: value.commission_cents,
+            fulfillment_status: value.fulfillment_status,
+            tracking_number: value.tracking_number,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct MerchantOrderPage {
+    pub(crate) items: Vec<MerchantOrderView>,
+    pub(crate) next_cursor: Option<String>,
+}
+
+impl TryFrom<mall_order_pb::MerchantOrderListResponse> for MerchantOrderPage {
+    type Error = String;
+
+    fn try_from(value: mall_order_pb::MerchantOrderListResponse) -> Result<Self, Self::Error> {
+        Ok(Self {
+            items: value
+                .items
+                .into_iter()
+                .map(MerchantOrderView::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            next_cursor: value.next_cursor,
+        })
+    }
+}
+
+/// Public storefront projection of a contextual node offer. `commission_bps`
+/// is the creator's commercial rate and `merchant_id` the internal shop
+/// identity — both exist for checkout snapshots and settlement only, so the
+/// unauthenticated route surface never prices the relationship. The admin
+/// surface keeps the full internal message.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct PublicNodeOffer {
+    pub(crate) id: String,
+    pub(crate) product_id: String,
+    pub(crate) sku_id: String,
+    pub(crate) route_id: String,
+    pub(crate) action_node_id: String,
+    pub(crate) scene_equipment: String,
+    pub(crate) created_at: String,
+    pub(crate) product: Option<PublicNodeOfferProduct>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct PublicNodeOfferProduct {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) image_url: String,
+    pub(crate) product_kind: i32,
+    pub(crate) course_resource_id: String,
+    pub(crate) skus: Vec<PublicNodeOfferSku>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct PublicNodeOfferSku {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) price_cents: i64,
+    pub(crate) currency: String,
+    pub(crate) attributes: std::collections::HashMap<String, String>,
+    pub(crate) saleable: bool,
+}
+
+impl TryFrom<mall_pb::NodeOffer> for PublicNodeOffer {
+    type Error = String;
+
+    fn try_from(value: mall_pb::NodeOffer) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            product_id: value.product_id,
+            sku_id: value.sku_id,
+            route_id: value.route_id,
+            action_node_id: value.action_node_id,
+            scene_equipment: value.scene_equipment,
+            created_at: value.created_at,
+            product: value.product.map(|product| PublicNodeOfferProduct {
+                id: product.id,
+                title: product.title,
+                description: product.description,
+                image_url: product.image_url,
+                product_kind: product.product_kind,
+                course_resource_id: product.course_resource_id,
+                skus: product
+                    .skus
+                    .into_iter()
+                    .map(|sku| PublicNodeOfferSku {
+                        id: sku.id,
+                        title: sku.title,
+                        price_cents: sku.price_cents,
+                        currency: sku.currency,
+                        attributes: sku.attributes,
+                        saleable: sku.saleable,
+                    })
+                    .collect(),
+            }),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct PublicNodeOfferList {
+    pub(crate) items: Vec<PublicNodeOffer>,
+}
+
+impl TryFrom<mall_pb::NodeOfferList> for PublicNodeOfferList {
+    type Error = String;
+
+    fn try_from(value: mall_pb::NodeOfferList) -> Result<Self, Self::Error> {
+        Ok(Self {
+            items: value
+                .items
+                .into_iter()
+                .map(PublicNodeOffer::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub(crate) struct ContentPage {
     items: Vec<Content>,
@@ -704,6 +876,9 @@ impl FeedQuery {
             surface,
             cursor: self.cursor,
             action_context,
+            // Delivery context is stamped by the handlers from edge headers.
+            geo_region: String::new(),
+            device_os: String::new(),
         })
     }
 }
@@ -862,6 +1037,9 @@ impl SearchQuery {
             action_node_id: self.action_node_id,
             scene_equipment: self.scene_equipment,
             ad_placement: self.ad_placement,
+            // Delivery context is stamped by the handlers from edge headers.
+            geo_region: None,
+            device_os: None,
         }
     }
 }
@@ -1059,6 +1237,68 @@ impl TryFrom<catalog_pb::SearchResponse> for PublicResourcePage {
                 .map(TryInto::try_into)
                 .collect::<Result<_, _>>()?,
             next_cursor: value.next_cursor,
+        })
+    }
+}
+
+/// Admin catalog write. An absent `resource_id` (PATCH path fills it from the
+/// URL) creates a new entry; the catalog treats a duplicate canonical URL as
+/// an update of the entry that already owns it.
+#[derive(Clone, Debug, Deserialize, Default)]
+pub(crate) struct UpsertResourceRequest {
+    pub(crate) title: String,
+    pub(crate) kind: String,
+    pub(crate) provider: String,
+    #[serde(default)]
+    pub(crate) summary: String,
+    pub(crate) url: String,
+    pub(crate) license: String,
+    pub(crate) version: String,
+    pub(crate) citation: String,
+    #[serde(default)]
+    pub(crate) topics: Vec<String>,
+    pub(crate) status: Option<String>,
+}
+
+impl UpsertResourceRequest {
+    pub(crate) fn into_pb(
+        self,
+        resource_id: String,
+        operator_id: String,
+    ) -> Result<catalog_pb::UpsertPublicResourceRequest, String> {
+        let kind = match self.kind.trim() {
+            "book" => catalog_pb::ResourceKind::Book,
+            "course" => catalog_pb::ResourceKind::Course,
+            "tool" => catalog_pb::ResourceKind::Tool,
+            "article" => catalog_pb::ResourceKind::Article,
+            "podcast" => catalog_pb::ResourceKind::Podcast,
+            _ => {
+                return Err(
+                    "kind must be book, course, tool, article or podcast".to_string(),
+                );
+            }
+        };
+        let status = match self.status.as_deref().map(str::trim) {
+            None | Some("") => catalog_pb::ResourceStatus::Unspecified,
+            Some("published") => catalog_pb::ResourceStatus::Published,
+            Some("archived") => catalog_pb::ResourceStatus::Archived,
+            Some(other) => {
+                return Err(format!("status must be published or archived, got {other}"));
+            }
+        };
+        Ok(catalog_pb::UpsertPublicResourceRequest {
+            resource_id,
+            title: self.title,
+            kind: kind as i32,
+            provider: self.provider,
+            summary: self.summary,
+            url: self.url,
+            license: self.license,
+            version: self.version,
+            citation: self.citation,
+            topics: self.topics,
+            status: status as i32,
+            operator_id,
         })
     }
 }
@@ -4932,6 +5172,8 @@ impl CreateMediaUploadRequest {
 
 #[cfg(test)]
 mod tests {
+    use bookway_mall_order_api::pb as mall_order_pb;
+
     use super::{
         Action, AttachRouteNodeResourceRequest, CommentReportReceipt, Content, ContentAppeal,
         ContentType, CreateActionRequest, CreateCommentAppealRequest, CreateCommentReportRequest,
@@ -4939,12 +5181,13 @@ mod tests {
         CreateEntryRequest, CreateJourneyRequest, CreateMediaUploadRequest,
         DirectMessageReportReceipt, FeedQuery, FeedbackItem, FollowRequest, ForkRouteRequest,
         GrowthDomain, IngestEventsRequest, KnowledgeResource, ModerationCommentQuery,
-        NotificationPage, OwnCommentAppealQuery, PublicResource, Reaction, ResourceSearchQuery,
-        ReviewCommentReportRequest, ReviewCommentRequest, ReviewDirectMessageReportRequest,
-        RouteNodeRagContextRequest, RouteNodeResourceAttachment, RouteParticipationRequest,
-        RouteTemplate, RouteTemplateKind, SaveWeeklyReviewRequest, SearchQuery, SetReactionRequest,
-        SetRelationshipRequest, StartKnowledgeJourneyRequest, UpdateAccountProfileRequest,
-        UpdateReminderPreferencesRequest,
+        NotificationPage, OwnCommentAppealQuery, PublicNodeOfferList, PublicResource, Reaction,
+        ResourceSearchQuery, MerchantOrderView, ReviewCommentReportRequest, ReviewCommentRequest,
+        ReviewDirectMessageReportRequest, RouteNodeRagContextRequest,
+        RouteNodeResourceAttachment, RouteParticipationRequest, RouteTemplate, RouteTemplateKind,
+        SaveWeeklyReviewRequest, SearchQuery, SetReactionRequest, SetRelationshipRequest,
+        StartKnowledgeJourneyRequest, UpdateAccountProfileRequest,
+        UpdateReminderPreferencesRequest, UpsertResourceRequest,
     };
     use bookway_bbs_link_api::pb as bbs_link_pb;
     use bookway_bbs_message_api::pb as message_pb;
@@ -4954,6 +5197,7 @@ mod tests {
     use bookway_growth_api::pb as growth_pb;
     use bookway_interaction_status_api::pb as like_pb;
     use bookway_knowledge_catalog_api::pb as catalog_pb;
+    use bookway_mall_api::pb as mall_pb;
 
     #[test]
     fn content_creation_accepts_mobile_string_enums() {
@@ -5033,6 +5277,7 @@ mod tests {
                 title: "第一周的阅读成果".to_string(),
                 domain: bbs_link_pb::GrowthDomain::Learning as i32,
                 is_milestone: true,
+                fork_count: 0,
                 ..Default::default()
             }),
             content_type: bbs_link_pb::ContentType::Milestone as i32,
@@ -5112,6 +5357,7 @@ mod tests {
                 source_route_id: "public-route-1".to_string(),
                 source_route_version: 4,
                 source_route_title: "四周主题阅读".to_string(),
+                source_route_author_id: "author-1".to_string(),
                 forked_at: "2026-08-18T00:00:00Z".to_string(),
             }),
             ..Default::default()
@@ -5121,6 +5367,103 @@ mod tests {
         assert_eq!(json["route_fork"]["source_route_id"], "public-route-1");
         assert_eq!(json["route_fork"]["source_route_version"], 4);
         assert_eq!(json["route_fork"]["source_route_title"], "四周主题阅读");
+    }
+
+    #[test]
+    fn merchant_order_view_never_carries_buyer_identity() {
+        let order = mall_order_pb::Order {
+            id: "order-1".to_string(),
+            user_id: "buyer-secret".to_string(),
+            payment_reference: Some("pay-secret".to_string()),
+            affiliate_creator_id: "creator-1".to_string(),
+            items: vec![mall_order_pb::OrderLine {
+                title: "轻量背包".to_string(),
+                quantity: 1,
+                line_total_cents: 32_900,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let view = serde_json::to_value(
+            MerchantOrderView::try_from(order).expect("merchant projection"),
+        )
+        .expect("serializable view");
+        assert!(
+            view.get("user_id").is_none() && view.get("payment_reference").is_none(),
+            "buyer identity fields must not leak into merchant payloads"
+        );
+        assert_eq!(view["items"][0]["title"], "轻量背包");
+        assert_eq!(view["affiliate_creator_id"], "creator-1");
+    }
+
+    #[test]
+    fn public_node_offers_never_leak_commission_or_merchant_identity() {
+        let offers = PublicNodeOfferList::try_from(mall_pb::NodeOfferList {
+            items: vec![mall_pb::NodeOffer {
+                id: "offer-1".to_string(),
+                product_id: "product-1".to_string(),
+                sku_id: "sku-1".to_string(),
+                route_id: "route-1".to_string(),
+                action_node_id: "node-1".to_string(),
+                creator_id: "creator-secret".to_string(),
+                commission_bps: 800,
+                merchant_id: "merchant-secret".to_string(),
+                scene_equipment: "trail".to_string(),
+                created_at: "2026-08-16T00:00:00Z".to_string(),
+                product: Some(mall_pb::MallProduct {
+                    id: "product-1".to_string(),
+                    title: "轻量背包".to_string(),
+                    description: "适合周末徒步".to_string(),
+                    image_url: "https://cdn.example/backpack.jpg".to_string(),
+                    product_kind: mall_pb::MallProductKind::Physical as i32,
+                    skus: vec![mall_pb::MallSku {
+                        id: "sku-1".to_string(),
+                        title: "标准款".to_string(),
+                        price_cents: 32_900,
+                        currency: "CNY".to_string(),
+                        ..Default::default()
+                    }],
+                    course_resource_id: String::new(),
+                    ..Default::default()
+                }),
+            }],
+        })
+        .expect("public offer projection");
+
+        let json = serde_json::to_value(offers).expect("serializable offers");
+        let offer = &json["items"][0];
+        for secret_field in ["creator_id", "merchant_id", "commission_bps"] {
+            assert!(
+                offer.get(secret_field).is_none(),
+                "public offers must not leak {secret_field}"
+            );
+        }
+        // The storefront keeps the facts it needs to sell.
+        assert_eq!(offer["sku_id"], "sku-1");
+        assert_eq!(offer["scene_equipment"], "trail");
+        assert_eq!(offer["product"]["title"], "轻量背包");
+        assert_eq!(offer["product"]["skus"][0]["price_cents"], 32_900);
+        assert_eq!(offer["product"]["skus"][0]["currency"], "CNY");
+    }
+
+    #[test]
+    fn creator_settlement_queries_take_filters_but_never_the_identity() {
+        let query: mall_order_pb::CreatorSettlementRequest =
+            serde_json::from_value(serde_json::json!({
+                "creator_id": "spoofed-creator",
+                "status": 1,
+                "cursor": "settle-10",
+                "limit": 20
+            }))
+            .expect("creator settlement query");
+        // Filters travel through the query string; the handler overwrites
+        // creator_id from the authenticated identity, so a spoofed value in
+        // the request is dead on arrival.
+        assert_eq!(query.creator_id, "spoofed-creator");
+        assert_eq!(query.status, Some(1));
+        assert_eq!(query.cursor.as_deref(), Some("settle-10"));
+        assert_eq!(query.limit, Some(20));
     }
 
     #[test]
@@ -5144,6 +5487,7 @@ mod tests {
                 is_route: true,
                 is_milestone: false,
                 is_question: false,
+                fork_count: 2,
             }),
             author_id: "user-1".to_string(),
             content_type: bbs_link_pb::ContentType::Route as i32,
@@ -6074,5 +6418,80 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn admin_resource_upsert_maps_named_kind_and_optional_status() {
+        let request: UpsertResourceRequest = serde_json::from_value(serde_json::json!({
+            "title": "开放工具目录",
+            "kind": "tool",
+            "provider": "Open Tools",
+            "summary": "工具简介",
+            "url": "https://tools.example/catalog",
+            "license": "MIT",
+            "version": "2.0",
+            "citation": "Open Tools. 2026.",
+            "topics": ["工具", "学习"],
+            "status": "archived"
+        }))
+        .expect("admin upsert JSON should deserialize");
+        let request = request
+            .into_pb("resource-1".to_string(), "admin-1".to_string())
+            .expect("admin upsert should map");
+        assert_eq!(request.resource_id, "resource-1");
+        assert_eq!(request.operator_id, "admin-1");
+        assert_eq!(request.kind, catalog_pb::ResourceKind::Tool as i32);
+        assert_eq!(request.status, catalog_pb::ResourceStatus::Archived as i32);
+        assert_eq!(request.topics.len(), 2);
+
+        // Create path: no id, absent status defaults to UNSPECIFIED so the
+        // catalog decides the publish default.
+        let create: UpsertResourceRequest = serde_json::from_value(serde_json::json!({
+            "title": "开放课程",
+            "kind": "course",
+            "provider": "Open Course",
+            "url": "https://course.example",
+            "license": "CC BY 4.0",
+            "version": "1.0",
+            "citation": "Open Course. 2026."
+        }))
+        .expect("create JSON should deserialize");
+        let create = create
+            .into_pb(String::new(), "admin-1".to_string())
+            .expect("create should map");
+        assert!(create.resource_id.is_empty());
+        assert_eq!(create.status, catalog_pb::ResourceStatus::Unspecified as i32);
+    }
+
+    #[test]
+    fn admin_resource_upsert_rejects_unknown_kind_and_status() {
+        let bad_kind: UpsertResourceRequest = serde_json::from_value(serde_json::json!({
+            "title": "开放资源",
+            "kind": "dataset",
+            "provider": "Open",
+            "url": "https://open.example",
+            "license": "MIT",
+            "version": "1",
+            "citation": "Open. 2026."
+        }))
+        .expect("JSON should deserialize");
+        assert!(bad_kind
+            .into_pb(String::new(), "admin-1".to_string())
+            .is_err());
+
+        let bad_status: UpsertResourceRequest = serde_json::from_value(serde_json::json!({
+            "title": "开放资源",
+            "kind": "book",
+            "provider": "Open",
+            "url": "https://open.example",
+            "license": "MIT",
+            "version": "1",
+            "citation": "Open. 2026.",
+            "status": "draft"
+        }))
+        .expect("JSON should deserialize");
+        assert!(bad_status
+            .into_pb(String::new(), "admin-1".to_string())
+            .is_err());
     }
 }

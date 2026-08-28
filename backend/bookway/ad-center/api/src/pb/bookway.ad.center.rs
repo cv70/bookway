@@ -42,6 +42,8 @@ pub struct AdCampaign {
     pub impressions: u64,
     #[prost(uint64, tag = "17")]
     pub clicks: u64,
+    #[prost(uint64, tag = "30")]
+    pub conversions: u64,
     #[prost(string, optional, tag = "18")]
     pub starts_at: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "19")]
@@ -284,6 +286,8 @@ pub struct AdDeliveryReportRow {
     pub clicks: i64,
     #[prost(int64, tag = "5")]
     pub spent_micros: i64,
+    #[prost(int64, tag = "6")]
+    pub conversions: i64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -351,12 +355,15 @@ impl PricingModel {
         }
     }
 }
+/// Conversions are attributed post-impression facts (e.g. an offer purchase
+/// after the ad served). They carry no charge: billing is CPM/CPC only.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum EventType {
     Impression = 0,
     Click = 1,
+    Conversion = 2,
 }
 impl EventType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -367,6 +374,7 @@ impl EventType {
         match self {
             Self::Impression => "EVENT_TYPE_IMPRESSION",
             Self::Click => "EVENT_TYPE_CLICK",
+            Self::Conversion => "EVENT_TYPE_CONVERSION",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -374,6 +382,7 @@ impl EventType {
         match value {
             "EVENT_TYPE_IMPRESSION" => Some(Self::Impression),
             "EVENT_TYPE_CLICK" => Some(Self::Click),
+            "EVENT_TYPE_CONVERSION" => Some(Self::Conversion),
             _ => None,
         }
     }

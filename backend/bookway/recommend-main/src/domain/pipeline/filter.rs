@@ -75,11 +75,13 @@ mod tests {
         FeedQuery {
             interests: HashSet::new(),
             seen: HashSet::new(),
-            user_id: "user-1".to_string(),
-            session_id: "session-1".to_string(),
+            user_id: Some("user-1".to_string()),
+            session_id: Some("session-1".to_string()),
             surface: surface.to_string(),
             cursor: None,
             limit: 10,
+            geo_region: String::new(),
+            device_os: String::new(),
         }
     }
 
@@ -102,12 +104,17 @@ mod tests {
                 is_route: false,
                 is_milestone: false,
                 is_question: false,
+                fork_count: 0,
             },
             author_id: "author-1".to_string(),
             status: ContentStatus::Published as i32,
             quality_score: 1.0,
             recall_score: 1.0,
             score: 1.0,
+            p_ctr: 0.0,
+            p_cvr: 0.0,
+            p_wegu: 0.0,
+            feature_snapshot: Default::default(),
             source: "test".to_string(),
             reasons: Vec::new(),
             followed_author,

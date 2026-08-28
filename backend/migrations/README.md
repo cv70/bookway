@@ -62,7 +62,7 @@
 | `0060_questions.sql` | bbs-link | 问题内容类型和采纳回答事实约束 |
 | `0061_search_query_history.sql` | bbs-search | 登录用户的 90 天搜索历史建议和按用户最近时间索引 |
 | `0062_feature_snapshots.sql` | feature-main | 可回放的用户行为特征快照、时间窗口、版本、TTL 和来源血缘 |
-| `0063_public_resources.sql` | knowledge-catalog | 公开书籍、课程、工具、文章和播客目录及许可/版本/引用元数据 |
+| `0063_public_resources.sql` | knowledge-catalog | 公开书籍、课程、工具、文章和播客目录及许可/版本/引用元数据；URL 唯一（管理员 UpsertPublicResource 写入，无种子数据） |
 | `0064_contextual_commerce.sql` | mall / mall-order | 路线行动节点 Offer、创作者佣金与订单归因快照 |
 | `0065_ad_auction_frequency.sql` | ad-center / ad-rank | pCTR/pCVR 预估、eCPM 竞价输入与全局曝光频控 |
 | `0066_unified_resource_search.sql` | knowledge-catalog / search-main | 公共资源统一搜索投影、触发刷新与目录检索索引 |
@@ -71,7 +71,7 @@
 | `0069_ad_scene_equipment.sql` | ad-center | 广告路线节点绑定的场景装备字段与投放索引 |
 | `0070_ad_decision_scene_equipment.sql` | ad-center | 广告决策与曝光回执的场景装备上下文绑定 |
 | `0071_merchant_order_settlement.sql` | mall-order | 商家订单履约与创作者分账结算 |
-| `0072_route_node_resource_embeddings.sql` | knowledge-catalog | 节点作用域 RAG 向量索引及模型边界 |
+| `0072_route_node_resource_embeddings.sql` | knowledge-catalog | 节点作用域 RAG 向量索引及模型边界（已移除原 `WHERE FALSE` 的死种子语句，仅保留建表与索引） |
 | `0073_route_completion_event_index.sql` | feature-main | 路线完成度同用户加入事实校验的事件索引 |
 | `0074_order_payment_processing.sql` | mall-order | 支付处理中间状态与取消/过期竞态保护 |
 | `0075_rag_embedding_builder_state.sql` | knowledge-catalog | RAG 嵌入构建器的重试簿记列（是否待嵌入以向量行缺席为准） |
@@ -80,6 +80,13 @@
 | `0078_ad_delivery_guardrails.sql` | ad-center | 跨 campaign 用户日曝光上限等投放护栏配置（缺行回退代码默认值） |
 | `0079_ad_campaign_geo_device.sql` | ad-center | 活动地域/设备定向数组（空=不限，fail-closed 匹配）与 GIN 索引 |
 | `0080_bbs_follower_pages.sql` | bbs | 粉丝 keyset 分页的部分覆盖索引（follow+未删按时间/ID 降序） |
+| `0081_feed_exposure_item_objectives.sql` | recommend-main | `feed_exposure_items` 增加 `p_ctr`/`p_cvr`/`p_wegu` 列：记录排序服务对本次曝光的三目标预估，供校准与实验评估使用 |
+| `0082_user_event_route_fork.sql` | user-event | `user_events` 事件类型约束增加 `route_fork`（Gateway 在 fork 公开路线后写入，稳定键=每个 fork 实例） |
+| `0083_ad_conversion_events.sql` | ad-center | `ad_campaigns`/`ad_campaign_daily_stats` 增加 `conversions` 列：转化事件记账（要求已受理曝光回执，不计费），供 ad-rank CVR 校准 |
+| `0084_affiliate_settlement_hold.sql` | mall-order | 分账冷静期部分索引：`pending` 行按 `eligible_at` 供 expirer 晋级扫描；窗口内退款直接作废分账 |
+| `0085_feed_exposure_feature_snapshot.sql` | recommend-main | `feed_exposure_items` 增加 `feature_snapshot` JSONB：记录排序时刻的命名特征，作为唯一无泄漏训练输入 |
+| `0086_mall_order_paid_after_expiry.sql` | mall-order | 订单状态约束增加 `paid_after_expiry`：TTL 过期后 provider 回调确认的收款如实落为独立终态，不自动履约、不生成分账 |
+| `0087_mall_order_ad_attribution.sql` | mall-order | `mall_orders`/`purchase_event_outbox` 增加可空 `ad_request_id`/`ad_campaign_id`：下单携带广告决策上下文，支付成交后由 outbox-relay 服务端回投 ad-center 转化（客户端信标路径已拒绝 conversion 类型） |
 
 `STORAGE_MODE=postgres` 时服务使用 SQLx PostgreSQL Dao；`STORAGE_MODE=memory` 仅用于无依赖本地演示。生产部署必须先运行 `cargo run -p bookway-db-migrate`，再启动业务服务并确认连接池、Outbox/Worker 和迁移版本健康。`0016` 在持有参与事实表 DDL 锁的同一事务中安装计数触发器并回填，因此旧 BBS 实例的后续写入也会维护分片，可先迁移再滚动升级服务。`0019` 不为旧行动编造精确时间；旧数据保留原有本地日期行为，只有新建或显式改期的行动会写入精确安排瞬间和时区。`0020` 为精确安排引入版本号；改期或完成会取消旧的排队投递，而提醒调度器以 `(action_id, schedule_revision, channel, device_id)` 去重创建通知命令。`0021` 使用 `(kind, source_id)` 将生产端重试折叠为唯一收件箱项，并提供按用户的稳定游标和未读索引。`0026` 让终态申诉、恢复公开命令和作者收件箱任务原子落库；`0027` 将接受举报后的下架任务与决议同事务提交，两个调度器都由租约负责重试，`dead` 状态必须纳入运营告警与人工补偿。`0032` 在启用支付回调前要求确认历史数据不存在重复的 provider 流水号；迁移后同一流水号只能结算一个订单。`0034` 会把既有内容回填为待投影任务；上线后应启动 `bookway-search-indexer`，并由 `bookway-search-index-outbox-recovery` 报告死信；只有明确操作者和原因的 `requeue_dead` 运行才能将死信安全重排。`0035` 保持旧客户端的已发布标记而不重复创建未知原帖；新记录的 `entry_publication_jobs.status = 'dead'` 也必须进入告警，并由用户显式重试或运营补偿处理。`0036` 将 `complete_upload` 后的资产放入处理队列，只有 `bookway-media-processor` 验证完成的 `ready` 资产能进入 BBS Link；必须对 `media_processing_jobs.status = 'dead'` 告警。`0039` 会将每次已持久化曝光对应的模型版本与实验桶保留下来，并建立只含请求归因事件的读取索引；`bookway-recommendation-evaluator` 必须使用已完成标签窗口的固定时间范围，它的快照是观察性评估记录，不得用作未经验证的训练或自动发布依据。`0040` 为 Search Main 增加受限、版本化的查询改写词典和原子活动指针；词典切换前必须完成离线检查，调用 `activate_search_query_rewrite` 后各实例会热刷新，旧分页会话保持创建时的改写版本。`0041` 为 `bookway-search-evaluator` 保存按改写版本和结果类型聚合的观察性指标；每次运行都必须使用完整标签窗口，样本不足的快照不能作为词典升级依据。`0043` 持久化搜索索引对账的受限检查点、聚合差异、Outbox 未投递数量和最终健康结论；同一未完成运行由租约串行恢复，只有完成、全量且 Outbox 已清空的运行才可能标记为健康。检查点包含内部内容 ID，必须仅向受控运维数据库访问者开放。`0044` 将提醒 Provider 投递从收件箱创建中分离为可租约领取的 Worker：发送前必须复核行动版本和设备，Provider 以 delivery ID 幂等，超时退避、失效设备撤销、终态失败均可审计。`0045` 让 Gateway 在互动后将已解析接收者和固定来源键写入可靠的社区通知任务，Worker 以租约投递 Growth；它不能跨服务消除互动已提交但 Gateway 尚未入队的窗口，且 `dead` 与入队失败日志必须由运营监控处理。`0046` 为知识资源增加可选社区内容来源标识和用户级唯一索引；它不回填正文或媒体，收集公开内容只保存受控元数据与原内容引用，内容可见性始终由 BBS Link 决定。`0047` 为关注时间流提供 `(author_id, created_at DESC, id DESC)` 的已公开内容读取索引；推荐召回只能使用 BBS 派生的关注作者集合，空关注集合必须返回空流而非回退到全局推荐。`0048` 为显式创建行动增加用户级幂等键；同一键配合相同动作返回已有行动，键与动作内容不匹配则返回冲突，重复计划自动物化的后继行动不使用该键。`0049` 使 PostgreSQL 的 `user_events` 枚举约束接受 Gateway 产生的 `save_knowledge` 事件；应用、特征和离线评估的高意图语义由此在生产存储中保持一致。`0050` 以用户级幂等键折叠复盘/行记创建的弱网重试；公开行记只会产生一条持久发布任务，而已发布后的同键重试仍会返回原始记录。
 
@@ -95,5 +102,17 @@
 `0078` 将广告平台此前仅存在于浏览器演示态的“单用户全局日曝光上限”落为服务端护栏表 `ad_delivery_guardrails`（种子 8）。ad-center 的 `RecordEvent` 在每次曝光受理时读取该值并在跨所有 campaign 的用户日总达标后拒绝；Redis 预过滤（`FrequencyGate`）仅为加速器，计数漂移或 Redis 不可用时自动退回 SQL 权威裁决，删除护栏行不会静默关闭上限。
 
 `0079` 为广告活动增加 `geo_regions`/`device_os` 定向数组。语义是硬过滤且 fail-closed：空数组不限，非空数组要求请求投送上下文携带匹配值；平台观察不到上下文时只有未限定活动可参与。GIN 索引支撑数组过滤；定向 slug 全链路小写归一（如 `cn-bj`、`ios`），网关当前从 User-Agent 派生设备维度，地域维度留待可靠来源接入。
+
+`0086` 让 TTL 过期后到达的支付确认不再永久失败：provider 回调（或重试支付）命中已 `expired` 且带有已声明支付号的订单时，订单如实进入独立的 `paid_after_expiry` 终态。该状态不自动履约、不生成分账、不入购买归因 Outbox——库存已在过期时释放，运营按单决定退款或补履约；幂等重放停留在同一状态。
+
+`0085` 打通训练闭环的输入侧：recommend-rank 对每个候选记录其排序所用特征集（与 predictor 契约同集合），离线训练（`backend/bookway-py/cronjob/rank_training`，PyTorch）直接以该快照拟合，禁止回读当前聚合（防时间泄漏）；时间切分 holdout 输出 logloss/AUC，正样本不足拒绝出产物。
+
+`0084` 为创作者分账引入退款冷静期：已支付订单的分账以 `pending` 写入（`MALL_AFFILIATE_HOLD_DAYS`，默认 7 天），`mall-order-expirer` 每轮调用 `PromoteAffiliateSettlements` 将到期行晋级为 `eligible`；冷静期内退款会把 pending 分账直接置为 `reversed`，不再出现先打款后追讨。`MALL_AFFILIATE_HOLD_DAYS=0` 保留旧的立即 eligible 行为。
+
+`0083` 打通广告转化回流：`EVENT_TYPE_CONVERSION` 事件在已登记决策与已受理曝光的前提下入账（幂等、不计费），campaign 行与日统计各维护 `conversions`；`ad-rank` 的校准模型（`ecpm-v3`）据此对 pCVR 做与 pCTR 对称的 Beta 后验校准，静态口径不变。
+
+`0082` 为行为事实增加 `route_fork`：fork 一条公开路线是强采用信号（含路线改写意图），事件 ID 按 fork 实例稳定可重放，`content_id` 归因到被 fork 的源路线；推荐特征与评估可直接消费该类型。
+
+`0081` 把 recommend-rank 输出后即被丢弃的三目标预估（pCTR/pCVR/pWEGU）持久化到每条曝光明细；推荐评估与未来训练因此能按目标分组对比"当时预测"与"实际行为"，而不是只看融合分。旧数据按默认 0 回填，评估作业应过滤全零行或按迁移时间切分。
 
 `0080` 为粉丝分页建立部分覆盖索引 `(target_user_id, created_at DESC, source_user_id DESC) WHERE edge_type='follow' AND deleted_at IS NULL`。`ListFollowers` 的 keyset 游标（`(created_at, source_user_id)` 行值比较）依赖该索引把每页收敛为一次有序索引扫描；0002 的通用目标索引保留给可见性上下文读取。

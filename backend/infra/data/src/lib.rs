@@ -29,6 +29,8 @@ impl FromStr for StorageMode {
 
 #[derive(Debug, Error)]
 pub enum DataError {
+    #[error("STORAGE_MODE is required; set it explicitly to memory or postgres")]
+    MissingStorageMode,
     #[error("invalid STORAGE_MODE: {0}; expected memory or postgres")]
     InvalidStorageMode(String),
     #[error("DATABASE_URL is required when STORAGE_MODE=postgres")]
@@ -44,9 +46,12 @@ pub enum DataError {
 }
 
 pub fn storage_mode() -> Result<StorageMode, DataError> {
-    env::var("STORAGE_MODE")
-        .unwrap_or_else(|_| "memory".to_string())
-        .parse()
+    // Fail-closed: an unset STORAGE_MODE must never boot the seeded
+    // in-memory DAOs by default — a missing env var in a production deploy
+    // would otherwise look exactly like a healthy service quietly serving
+    // fabricated engagement data. Memory mode is a deliberate dev choice.
+    let value = env::var("STORAGE_MODE").map_err(|_| DataError::MissingStorageMode)?;
+    value.parse()
 }
 
 pub async fn postgres_pool() -> Result<PgPool, DataError> {

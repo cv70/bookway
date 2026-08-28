@@ -6,8 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bookway-data.workspace = true
+bookway-knowledge-catalog-api.workspace = true
 bookway-runtime.workspace = true
+tonic.workspace = true
+
+bookway-data.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

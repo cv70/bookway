@@ -53,6 +53,10 @@ pub struct RankRequest {
     pub candidates: ::prost::alloc::vec::Vec<
         ::bookway_recommend_recall_api::pb::Candidate,
     >,
+    /// Human-readable serving context for the LLM scorer (interests, surface,
+    /// social proof). Composed by recommend-main from hydrated facts only.
+    #[prost(string, tag = "4")]
+    pub user_context: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

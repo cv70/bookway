@@ -228,15 +228,6 @@ export function TrackingDialog({
   order: Order;
   onClose: () => void;
 }) {
-  const events =
-    order.status === "已完成"
-      ? [
-          "已签收 · 收件人已完成签收",
-          "派送中 · 快递员正在派送",
-          "运输中 · 已到达目的地分拨中心",
-          "已揽收 · 包裹离开发货仓",
-        ]
-      : ["运输中 · 包裹正在运输", "已揽收 · 包裹离开发货仓"];
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(event) => event.stopPropagation()}>
@@ -250,15 +241,12 @@ export function TrackingDialog({
             {order.carrier || "物流"} · {order.tracking || "暂无单号"}
           </span>
         </div>
-        <ol className="tracking-timeline">
-          {events.map((event, index) => (
-            <li className={index === 0 ? "current" : ""} key={event}>
-              <i />
-              <span>{event}</span>
-              <small>{index === 0 ? "刚刚" : `${index * 2 + 1} 小时前`}</small>
-            </li>
-          ))}
-        </ol>
+        {/* 网关暂未提供物流轨迹接口；只展示订单台账中的承运商与单号，
+            不编造物流事件时间线。 */}
+        <p className="modal-copy">
+          物流轨迹暂未由网关提供，请以承运商（{order.carrier || "承运方"}
+          ）官方渠道的查询结果为准。
+        </p>
         <div className="dialog-actions">
           <button className="button secondary" onClick={onClose}>
             关闭

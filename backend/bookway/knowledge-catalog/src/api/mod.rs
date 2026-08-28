@@ -12,6 +12,17 @@ struct GrpcServer {
 
 #[tonic::async_trait]
 impl KnowledgeCatalog for GrpcServer {
+    async fn embed_texts(
+        &self,
+        request: Request<pb::EmbedTextsRequest>,
+    ) -> Result<Response<pb::EmbedTextsResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .embed_texts(request.into_inner())
+                .await
+                .map_err(status)?,
+        ))
+    }
     async fn search(
         &self,
         request: Request<pb::SearchRequest>,
@@ -30,6 +41,18 @@ impl KnowledgeCatalog for GrpcServer {
         Ok(Response::new(
             self.domain
                 .get(request.into_inner())
+                .await
+                .map_err(status)?,
+        ))
+    }
+
+    async fn upsert_public_resource(
+        &self,
+        request: Request<pb::UpsertPublicResourceRequest>,
+    ) -> Result<Response<pb::Resource>, Status> {
+        Ok(Response::new(
+            self.domain
+                .upsert_public_resource(request.into_inner())
                 .await
                 .map_err(status)?,
         ))

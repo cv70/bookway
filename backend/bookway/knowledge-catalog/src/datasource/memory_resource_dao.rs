@@ -127,6 +127,60 @@ impl ResourceDao for MemoryResourceDao {
             .ok_or_else(|| DaoError::NotFound(resource_id.to_string()))
     }
 
+    async fn upsert_public_resource(
+        &self,
+        request: NewPublicResource,
+    ) -> Result<pb::Resource, DaoError> {
+        let mut resources = self.resources.write().await;
+        // Mirror the Postgres identity rules: an existing caller-addressed id
+        // wins; otherwise an entry that already owns the URL is updated in
+        // place instead of duplicated.
+        let target = match request.resource_id.as_deref() {
+            Some(id) => resources
+                .iter()
+                .position(|resource| resource.id == id)
+                .or_else(|| resources.iter().position(|resource| resource.url == request.url)),
+            None => resources.iter().position(|resource| resource.url == request.url),
+        };
+        let now = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+        if let Some(position) = target {
+            let resource = &mut resources[position];
+            resource.title = request.title;
+            resource.kind = request.kind as i32;
+            resource.provider = request.provider;
+            resource.summary = request.summary;
+            resource.url = request.url;
+            resource.license = request.license;
+            resource.version = request.version;
+            resource.citation = request.citation;
+            resource.topics = request.topics;
+            resource.status = request.status as i32;
+            resource.updated_at = now;
+            return Ok(resource.clone());
+        }
+        let resource = pb::Resource {
+            id: request
+                .resource_id
+                .unwrap_or_else(|| Uuid::now_v7().to_string()),
+            title: request.title,
+            kind: request.kind as i32,
+            provider: request.provider,
+            summary: request.summary,
+            url: request.url,
+            license: request.license,
+            version: request.version,
+            citation: request.citation,
+            topics: request.topics,
+            status: request.status as i32,
+            published_at: now.clone(),
+            updated_at: now,
+        };
+        resources.push(resource.clone());
+        Ok(resource)
+    }
+
     async fn list_node_resources(
         &self,
         route_id: &str,

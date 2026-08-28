@@ -57,6 +57,39 @@ pub struct GetRequest {
     #[prost(string, tag = "1")]
     pub resource_id: ::prost::alloc::string::String,
 }
+/// Admin-managed catalog write path. An empty resource_id creates a new entry;
+/// a known id updates it. A URL that already belongs to another entry updates
+/// that entry instead of creating a duplicate (the canonical URL is the
+/// catalog's identity anchor).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpsertPublicResourceRequest {
+    #[prost(string, tag = "1")]
+    pub resource_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub title: ::prost::alloc::string::String,
+    #[prost(enumeration = "ResourceKind", tag = "3")]
+    pub kind: i32,
+    #[prost(string, tag = "4")]
+    pub provider: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub summary: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub url: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub license: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub version: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub citation: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "10")]
+    pub topics: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// UNSPECIFIED defaults to published.
+    #[prost(enumeration = "ResourceStatus", tag = "11")]
+    pub status: i32,
+    #[prost(string, tag = "12")]
+    pub operator_id: ::prost::alloc::string::String,
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RouteNodeResourceAttachment {
@@ -253,6 +286,26 @@ pub struct RagVectorHit {
 pub struct SearchRagEmbeddingsResponse {
     #[prost(message, repeated, tag = "1")]
     pub hits: ::prost::alloc::vec::Vec<RagVectorHit>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EmbedTextsRequest {
+    #[prost(string, repeated, tag = "1")]
+    pub texts: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TextEmbedding {
+    #[prost(float, repeated, tag = "1")]
+    pub values: ::prost::alloc::vec::Vec<f32>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EmbedTextsResponse {
+    #[prost(string, tag = "1")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub embeddings: ::prost::alloc::vec::Vec<TextEmbedding>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -459,6 +512,35 @@ pub mod knowledge_catalog_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
+        pub async fn embed_texts(
+            &mut self,
+            request: impl tonic::IntoRequest<super::EmbedTextsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::EmbedTextsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.knowledge.catalog.KnowledgeCatalog/EmbedTexts",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "bookway.knowledge.catalog.KnowledgeCatalog",
+                        "EmbedTexts",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn search(
             &mut self,
             request: impl tonic::IntoRequest<super::SearchRequest>,
@@ -505,6 +587,32 @@ pub mod knowledge_catalog_client {
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new("bookway.knowledge.catalog.KnowledgeCatalog", "Get"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn upsert_public_resource(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpsertPublicResourceRequest>,
+        ) -> std::result::Result<tonic::Response<super::Resource>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.knowledge.catalog.KnowledgeCatalog/UpsertPublicResource",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "bookway.knowledge.catalog.KnowledgeCatalog",
+                        "UpsertPublicResource",
+                    ),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -697,6 +805,13 @@ pub mod knowledge_catalog_server {
     /// Generated trait containing gRPC methods that should be implemented for use with KnowledgeCatalogServer.
     #[async_trait]
     pub trait KnowledgeCatalog: std::marker::Send + std::marker::Sync + 'static {
+        async fn embed_texts(
+            &self,
+            request: tonic::Request<super::EmbedTextsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::EmbedTextsResponse>,
+            tonic::Status,
+        >;
         async fn search(
             &self,
             request: tonic::Request<super::SearchRequest>,
@@ -704,6 +819,10 @@ pub mod knowledge_catalog_server {
         async fn get(
             &self,
             request: tonic::Request<super::GetRequest>,
+        ) -> std::result::Result<tonic::Response<super::Resource>, tonic::Status>;
+        async fn upsert_public_resource(
+            &self,
+            request: tonic::Request<super::UpsertPublicResourceRequest>,
         ) -> std::result::Result<tonic::Response<super::Resource>, tonic::Status>;
         async fn list_node_resources(
             &self,
@@ -824,6 +943,51 @@ pub mod knowledge_catalog_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
+                "/bookway.knowledge.catalog.KnowledgeCatalog/EmbedTexts" => {
+                    #[allow(non_camel_case_types)]
+                    struct EmbedTextsSvc<T: KnowledgeCatalog>(pub Arc<T>);
+                    impl<
+                        T: KnowledgeCatalog,
+                    > tonic::server::UnaryService<super::EmbedTextsRequest>
+                    for EmbedTextsSvc<T> {
+                        type Response = super::EmbedTextsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::EmbedTextsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KnowledgeCatalog>::embed_texts(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = EmbedTextsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/bookway.knowledge.catalog.KnowledgeCatalog/Search" => {
                     #[allow(non_camel_case_types)]
                     struct SearchSvc<T: KnowledgeCatalog>(pub Arc<T>);
@@ -898,6 +1062,55 @@ pub mod knowledge_catalog_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.knowledge.catalog.KnowledgeCatalog/UpsertPublicResource" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpsertPublicResourceSvc<T: KnowledgeCatalog>(pub Arc<T>);
+                    impl<
+                        T: KnowledgeCatalog,
+                    > tonic::server::UnaryService<super::UpsertPublicResourceRequest>
+                    for UpsertPublicResourceSvc<T> {
+                        type Response = super::Resource;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpsertPublicResourceRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KnowledgeCatalog>::upsert_public_resource(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpsertPublicResourceSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

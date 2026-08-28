@@ -29,6 +29,8 @@ getSocialStats,
   getPost,
   getRouteParticipations,
   getRouteNodeOffers,
+  payMallOrder,
+  listMyOrders,
   getRouteNodeResources,
   getSocialContext,
   getToday,
@@ -71,7 +73,6 @@ import { ReaderModal } from './src/components/ReaderModal';
 import { RouteDraftModal } from './src/components/RouteDraftModal';
 import { ReadingLibraryModal } from './src/components/ReadingLibraryModal';
 import { TabBar } from './src/components/TabBar';
-import { fallbackFeed, fallbackJourneys, fallbackReadingBooks, fallbackToday } from './src/data/fallback';
 import { DiscoverScreen } from './src/screens/DiscoverScreen';
 import { JourneysScreen } from './src/screens/JourneysScreen';
 import { ProfileScreen, type ProfileSection } from './src/screens/ProfileScreen';
@@ -100,6 +101,7 @@ import {
   KnowledgeResource,
   NotificationPage,
   NegativeFeedbackReason,
+  MallOrder,
   NodeOffer,
   PublicAuthor,
   ReaderSettings,
@@ -134,13 +136,14 @@ export default function App() {
     updated_at: '',
   }));
   const [activeTab, setActiveTab] = useState<TabKey>('today');
-  const [today, setToday] = useState<Today>(fallbackToday);
-  const [journeys, setJourneys] = useState<Journey[]>(fallbackJourneys);
-  const [feed, setFeed] = useState<Feed>(fallbackFeed);
+  const [today, setToday] = useState<Today>({ completed: 0, total: 0, focus_minutes: 0, actions: [] });
+  const [journeys, setJourneys] = useState<Journey[]>([]);
+  const [feed, setFeed] = useState<Feed>(() => ({ request_id: '', items: [], meta: { sourced: 0, filtered: 0, selected: 0 } }));
   const [contextualFeed, setContextualFeed] = useState<Feed>();
   const [contextualFeedContext, setContextualFeedContext] = useState<FeedActionContext>();
   const [contextualFeedLoading, setContextualFeedLoading] = useState(false);
   const [contextualOffers, setContextualOffers] = useState<NodeOffer[]>([]);
+  const [myOrders, setMyOrders] = useState<MallOrder[]>([]);
   const [contextualOffersLoading, setContextualOffersLoading] = useState(false);
   const [contextualOffersError, setContextualOffersError] = useState(false);
   const [contextualAction, setContextualAction] = useState<RouteTemplateAction>();
@@ -148,7 +151,7 @@ export default function App() {
   const [contextualResourcesLoading, setContextualResourcesLoading] = useState(false);
   const [contextualResourcesError, setContextualResourcesError] = useState(false);
   const [followingFeed, setFollowingFeed] = useState<Feed>(() => ({
-    request_id: 'local-following-preview',
+    request_id: '',
     items: [],
     meta: { sourced: 0, filtered: 0, selected: 0 },
   }));
@@ -158,12 +161,12 @@ export default function App() {
   const [retryingEntryIds, setRetryingEntryIds] = useState<Set<string>>(() => new Set());
   const [weeklyReview, setWeeklyReview] = useState<WeeklyReview>();
   const [companion, setCompanion] = useState<CompanionBrief>();
-  const [readingBooks, setReadingBooks] = useState<ReadingBook[]>(fallbackReadingBooks);
+  const [readingBooks, setReadingBooks] = useState<ReadingBook[]>([]);
   const [knowledgeResources, setKnowledgeResources] = useState<KnowledgeResource[]>([]);
   const [readingBookmarks, setReadingBookmarks] = useState<ReadingBookmark[]>([]);
   const [readerSettings, setReaderSettings] = useState<ReaderSettings>({ font_size: 18, line_height: 1.8, theme: 'light' });
   const [journeyActionsById, setJourneyActionsById] = useState<Record<string, Action[]>>({});
-  const [likedPostIds, setLikedPostIds] = useState<Set<string>>(() => new Set(['post-reading']));
+  const [likedPostIds, setLikedPostIds] = useState<Set<string>>(() => new Set());
   const [bookmarkedPostIds, setBookmarkedPostIds] = useState<Set<string>>(() => new Set());
   const [joinedRouteIds, setJoinedRouteIds] = useState<Set<string>>(() => new Set());
   const [joiningRouteIds, setJoiningRouteIds] = useState<Set<string>>(() => new Set());
@@ -193,6 +196,14 @@ export default function App() {
   const [commentNextCursorByPost, setCommentNextCursorByPost] = useState<Record<string, string | undefined>>({});
   const [loadingCommentPostIds, setLoadingCommentPostIds] = useState<Set<string>>(() => new Set());
   const [offline, setOffline] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [todayError, setTodayError] = useState(false);
+  const [journeysError, setJourneysError] = useState(false);
+  const [feedError, setFeedError] = useState(false);
+  const [followingFeedError, setFollowingFeedError] = useState(false);
+  const [entriesError, setEntriesError] = useState(false);
+  const [ordersLoading, setOrdersLoading] = useState(true);
+  const [ordersError, setOrdersError] = useState(false);
   const [createMenuVisible, setCreateMenuVisible] = useState(false);
   const [creatingJourney, setCreatingJourney] = useState(false);
   const [creatingPost, setCreatingPost] = useState(false);
@@ -226,7 +237,25 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
   const [readerBookId, setReaderBookId] = useState<string>();
   const [readerActionId, setReaderActionId] = useState<string>();
 
+  const refreshMyOrders = () => {
+    setOrdersLoading(true);
+    listMyOrders()
+      .then((response) => {
+        setMyOrders(response.items);
+        setOrdersError(false);
+      })
+      .catch(() => {
+        setOrdersError(true);
+        setOffline(true);
+      })
+      .finally(() => setOrdersLoading(false));
+  };
+
   useEffect(() => {
+    refreshMyOrders();
+  }, []);
+
+useEffect(() => {
     eventReporter.start();
     let mounted = true;
     Promise.allSettled([
@@ -247,12 +276,16 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
         if (!mounted) return;
         if (profileResult.status === 'fulfilled') setProfile(profileResult.value);
         if (todayResult.status === 'fulfilled') setToday(todayResult.value);
+        else setTodayError(true);
         if (journeysResult.status === 'fulfilled') setJourneys(journeysResult.value);
+        else setJourneysError(true);
         if (feedResult.status === 'fulfilled') setFeed(attachFeedAttribution(feedResult.value, 'home'));
+        else setFeedError(true);
         if (followingResult.status === 'fulfilled') {
           setFollowingFeed(attachFeedAttribution(followingResult.value, 'following'));
-        }
+        } else setFollowingFeedError(true);
         if (entriesResult.status === 'fulfilled') setEntries(entriesResult.value);
+        else setEntriesError(true);
         if (reviewResult.status === 'fulfilled') setWeeklyReview(reviewResult.value);
         if (companionResult.status === 'fulfilled') setCompanion(companionResult.value);
         if (knowledgeResult.status === 'fulfilled') {
@@ -275,6 +308,7 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
         if (participationResult.status === 'fulfilled') {
           setJoinedRouteIds(new Set(participationResult.value.map((item) => item.route_id)));
         }
+        setInitialLoading(false);
         setOffline([
           profileResult,
           todayResult,
@@ -299,7 +333,12 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
   useEffect(() => {
     if (!entries.some((entry) => entryPublicationStatus(entry) === 'pending')) return undefined;
     const timer = setTimeout(() => {
-      getEntries().then(setEntries).catch(() => undefined);
+      getEntries()
+        .then((next) => {
+          setEntries(next);
+          setEntriesError(false);
+        })
+        .catch(() => setOffline(true));
     }, 4_000);
     return () => clearTimeout(timer);
   }, [entries]);
@@ -319,7 +358,7 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
     .map((item) => item.post);
 
   const refreshCompanion = () => {
-    getCompanion().then(setCompanion).catch(() => undefined);
+    getCompanion().then(setCompanion).catch(() => setOffline(true));
   };
 
   const loadMoreFeed = async (surface: 'home' | 'following') => {
@@ -401,7 +440,7 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
         setCommentsByPost((current) => ({ ...current, [post.id]: page.items }));
         setCommentNextCursorByPost((current) => ({ ...current, [post.id]: page.next_cursor }));
       })
-      .catch(() => undefined);
+      .catch(() => setOffline(true));
     if (initialContent) return;
     getPost(post.id)
       .then((content) => {
@@ -620,11 +659,16 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
       getToday()
         .then((nextToday) => {
           setToday(nextToday);
+          setTodayError(false);
           const action = nextToday.actions.find((item) => item.id === actionId);
           if (action) openAction(action);
           else setActiveTab('today');
         })
-        .catch(() => setActiveTab('today'));
+        .catch(() => {
+          setTodayError(true);
+          setOffline(true);
+          setActiveTab('today');
+        });
       return;
     }
     if (journeyId) {
@@ -655,8 +699,13 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
     try {
       const updated = await completeAction(actionId);
       replaceAction(updated);
-      getToday().then(setToday).catch(() => undefined);
-      getWeeklyReview().then(setWeeklyReview).catch(() => undefined);
+      getToday()
+        .then((next) => {
+          setToday(next);
+          setTodayError(false);
+        })
+        .catch(() => setOffline(true));
+      getWeeklyReview().then(setWeeklyReview).catch(() => setOffline(true));
       refreshCompanion();
       return true;
     } catch {
@@ -760,7 +809,7 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
         replaceAction(updated);
         refreshCompanion();
       })
-      .catch(() => undefined);
+      .catch(() => setOffline(true));
   };
 
   const handleCreateJourney = (input: CreateJourneyInput) => {
@@ -812,7 +861,12 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
       setReadingLibraryVisible(false);
       setActiveTab('journeys');
       setSelectedJourneyId(result.journey.journey.id);
-      getToday().then(setToday).catch(() => undefined);
+      getToday()
+        .then((next) => {
+          setToday(next);
+          setTodayError(false);
+        })
+        .catch(() => setOffline(true));
       refreshCompanion();
     } catch (error) {
       setOffline(true);
@@ -1281,7 +1335,7 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
     createEntry(input)
       .then((saved) => {
         setEntries((current) => current.map((item) => item.id === entry.id ? saved : item));
-        getWeeklyReview().then(setWeeklyReview).catch(() => undefined);
+        getWeeklyReview().then(setWeeklyReview).catch(() => setOffline(true));
       })
       .catch(() => {
         setEntries((current) => current.filter((item) => item.id !== entry.id));
@@ -1358,14 +1412,14 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
     setSelectedJourneyId(journey.id);
     getJourney(journey.id)
       .then((detail) => setJourneyActionsById((current) => ({ ...current, [journey.id]: detail.actions })))
-      .catch(() => undefined);
+      .catch(() => setOffline(true));
   };
 
   const screen = {
-    today: <TodayScreen companion={companion} journeys={journeys} notificationCount={notificationPage.unread_count} onComplete={handleComplete} onCreateJourney={() => setCreatingJourney(true)} onDiscover={() => setActiveTab('discover')} onNotifications={openNotifications} onOpenAction={openAction} today={today} />,
-    discover: <DiscoverScreen bookmarkedPostIds={bookmarkedPostIds} contextualAction={contextualAction} contextualFeed={contextualFeed} contextualFeedContext={contextualFeedContext} contextualFeedLoading={contextualFeedLoading} contextualOffers={contextualOffers} contextualOffersError={contextualOffersError} contextualOffersLoading={contextualOffersLoading} contextualResources={contextualResources} contextualResourcesError={contextualResourcesError} contextualResourcesLoading={contextualResourcesLoading} feed={feed} feedLoadingMore={feedLoadingMore} followingFeed={followingFeed} followingFeedLoadingMore={followingFeedLoadingMore} joinedRouteIds={joinedRouteIds} joiningRouteIds={joiningRouteIds} likedPostIds={likedPostIds} offline={offline} onBookmark={handleBookmark} onClearContextualFeed={clearContextualFeed} onCreateOrder={createMallOrder} onHide={requestHide} onJoin={handleJoinRoute} onLike={handleLike} onLoadMoreFeed={loadMoreFeed} onOpen={openPost} onOpenAuthor={openAuthorProfile} routeParticipantCounts={routeParticipantCounts} />,
-    journeys: <JourneysScreen journeys={journeys} onCreate={() => setCreatingJourney(true)} onOpen={openJourney} />,
-    profile: <ProfileScreen entries={entries} journeys={journeys} moderator={canModerate} onOpenFeedback={() => setFeedbackVisible(true)} onOpenLibrary={() => setReadingLibraryVisible(true)} onOpenMessages={() => openMessages()} onOpenModeration={() => setModerationVisible(true)} onOpenPublicResources={() => setResourceCatalogVisible(true)} onOpenSection={setProfileSection} profile={profile} today={today} />,
+    today: <TodayScreen companion={companion} error={todayError} journeys={journeys} loading={initialLoading} notificationCount={notificationPage.unread_count} offline={offline} onComplete={handleComplete} onCreateJourney={() => setCreatingJourney(true)} onDiscover={() => setActiveTab('discover')} onNotifications={openNotifications} onOpenAction={openAction} today={today} />,
+    discover: <DiscoverScreen bookmarkedPostIds={bookmarkedPostIds} contextualAction={contextualAction} contextualFeed={contextualFeed} contextualFeedContext={contextualFeedContext} contextualFeedLoading={contextualFeedLoading} contextualOffers={contextualOffers} contextualOffersError={contextualOffersError} contextualOffersLoading={contextualOffersLoading} contextualResources={contextualResources} contextualResourcesError={contextualResourcesError} contextualResourcesLoading={contextualResourcesLoading} feed={feed} feedError={feedError} feedLoadingMore={feedLoadingMore} followingFeed={followingFeed} followingFeedError={followingFeedError} followingFeedLoadingMore={followingFeedLoadingMore} initialLoading={initialLoading} joinedRouteIds={joinedRouteIds} joiningRouteIds={joiningRouteIds} likedPostIds={likedPostIds} offline={offline} onBookmark={handleBookmark} onClearContextualFeed={clearContextualFeed} onCreateOrder={(offerId, items, adAttribution) => createMallOrder(offerId, items, adAttribution).then((order) => { refreshMyOrders(); return order; })} onPayOrder={(id, ref) => payMallOrder(id, ref).then((order) => { refreshMyOrders(); return order; })} onHide={requestHide} onJoin={handleJoinRoute} onLike={handleLike} onLoadMoreFeed={loadMoreFeed} onOpen={openPost} onOpenAuthor={openAuthorProfile} routeParticipantCounts={routeParticipantCounts} />,
+    journeys: <JourneysScreen error={journeysError} journeys={journeys} loading={initialLoading} offline={offline} onCreate={() => setCreatingJourney(true)} onOpen={openJourney} />,
+    profile: <ProfileScreen entries={entries} entriesError={entriesError} journeys={journeys} journeysError={journeysError} loading={initialLoading} moderator={canModerate} offline={offline} onOpenFeedback={() => setFeedbackVisible(true)} onOpenLibrary={() => setReadingLibraryVisible(true)} onOpenMessages={() => openMessages()} onOpenModeration={() => setModerationVisible(true)} onOpenPublicResources={() => setResourceCatalogVisible(true)} onOpenSection={setProfileSection} onRetryOrders={refreshMyOrders} orders={myOrders} ordersError={ordersError} ordersLoading={ordersLoading} profile={profile} today={today} todayError={todayError} />,
   }[activeTab];
 
   return (

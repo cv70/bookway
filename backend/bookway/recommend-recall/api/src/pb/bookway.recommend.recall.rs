@@ -29,6 +29,14 @@ pub struct Candidate {
     pub p_cvr: f64,
     #[prost(double, tag = "13")]
     pub p_wegu: f64,
+    /// Named feature values the ranker actually used for this candidate, filled
+    /// by Recommend Rank so the exposure ledger can train on serving-time
+    /// features (never on post-serving aggregates, which would leak the future).
+    #[prost(map = "string, double", tag = "14")]
+    pub feature_snapshot: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        f64,
+    >,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

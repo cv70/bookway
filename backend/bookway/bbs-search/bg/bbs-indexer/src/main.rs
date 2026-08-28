@@ -1,5 +1,6 @@
 use std::{env, time::Duration};
 
+use bookway_knowledge_catalog_api::pb::knowledge_catalog_client::KnowledgeCatalogClient;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -29,8 +30,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .trim_end_matches('/')
         .to_string();
     let write_indices = configured_write_indices()?;
+    // Semantic recall rides on the catalog's embedding provider. Both knobs
+    // must agree; otherwise the indexer stays lexical-only, which the read
+    // path treats as a normal subset of the corpus.
+    let semantic_dims: usize = env::var("SEMANTIC_VECTOR_DIMS")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0);
+    let semantic = if semantic_dims > 0 {
+        let catalog_url = env::var("KNOWLEDGE_CATALOG_GRPC_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8105".to_string());
+        match bookway_runtime::grpc_channel(&catalog_url).await {
+            Ok(channel) => Some((semantic_dims, KnowledgeCatalogClient::new(channel))),
+            Err(error) => {
+                tracing::warn!(%error, "knowledge-catalog unavailable; indexing lexical documents only");
+                None
+            }
+        }
+    } else {
+        None
+    };
     for index in &write_indices {
-        ensure_index(&client, &url, index).await?;
+        ensure_index(&client, &url, index, semantic.as_ref().map(|(dims, _)| *dims)).await?;
     }
 
     loop {
@@ -47,7 +68,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         for job in jobs {
-            if let Err(error) = synchronize_job(&client, &pool, &url, &write_indices, &job).await {
+            if let Err(error) =
+                synchronize_job(&client, &pool, &url, &write_indices, &job, semantic.as_ref()).await
+            {
                 tracing::warn!(content_id = %job.content_id, version = job.content_version, %error, "content index job failed");
                 match schedule_retry(&pool, &job, &error).await {
                     Ok(true) => {}
@@ -139,6 +162,7 @@ async fn synchronize_job(
     base_url: &str,
     indices: &[String],
     job: &IndexJob,
+    semantic: Option<&(usize, KnowledgeCatalogClient<tonic::transport::Channel>)>,
 ) -> Result<(), String> {
     let content = sqlx::query_as::<_, (Value, String, i64, bool)>(
         "SELECT payload, status, version, deleted_at IS NOT NULL FROM content_items WHERE id = $1",
@@ -158,6 +182,14 @@ async fn synchronize_job(
             (operation, version)
         },
     );
+    let operation = match (operation, semantic) {
+        (IndexOperation::Upsert(document), Some((dims, catalog))) => {
+            let mut document = document;
+            embed_document(catalog, &mut document, *dims).await;
+            IndexOperation::Upsert(document)
+        }
+        (operation, _) => operation,
+    };
     synchronize_operation(
         client,
         base_url,
@@ -410,7 +442,12 @@ fn growth_domain_name(value: &Value) -> Option<&'static str> {
     }
 }
 
-async fn ensure_index(client: &reqwest::Client, base_url: &str, index: &str) -> Result<(), String> {
+async fn ensure_index(
+    client: &reqwest::Client,
+    base_url: &str,
+    index: &str,
+    semantic_dims: Option<usize>,
+) -> Result<(), String> {
     validate_index_name(index)?;
     let index_url = resource_url(base_url, &[index])?;
     let exists = client
@@ -419,7 +456,13 @@ async fn ensure_index(client: &reqwest::Client, base_url: &str, index: &str) -> 
         .await
         .map_err(|error| error.to_string())?;
     if exists.status().is_success() {
-        return verify_concrete_index(client, base_url, index).await;
+        verify_concrete_index(client, base_url, index).await?;
+        // New fields can be added to an existing index in place, so enabling
+        // semantic vectors later never requires a rebuild.
+        if let Some(dims) = semantic_dims {
+            put_semantic_mapping(client, base_url, index, dims).await?;
+        }
+        return Ok(());
     }
     if exists.status() != reqwest::StatusCode::NOT_FOUND {
         return Err(format!(
@@ -445,9 +488,111 @@ async fn ensure_index(client: &reqwest::Client, base_url: &str, index: &str) -> 
             created.status()
         ));
     }
+    if let Some(dims) = semantic_dims {
+        put_semantic_mapping(client, base_url, index, dims).await?;
+    }
     // A concurrent creator may have won the race. Verify the resolved name
     // before accepting it so an alias can never become a document write path.
     verify_concrete_index(client, base_url, index).await
+}
+
+/// Adds (or confirms) the knn vector field used by semantic recall. The
+/// dimension must stay fixed for the lifetime of the index; changing it
+/// requires the documented reindex/alias-switch job.
+async fn put_semantic_mapping(
+    client: &reqwest::Client,
+    base_url: &str,
+    index: &str,
+    dims: usize,
+) -> Result<(), String> {
+    let mapping_url = resource_url(base_url, &[index, "_mapping"])?;
+    let body = serde_json::json!({
+        "properties": {
+            "semantic_vector": {
+                "type": "knn_vector",
+                "dimension": dims,
+                "method": { "name": "hnsw", "space_type": "cosinesimil", "engine": "lucene" }
+            }
+        }
+    });
+    let response = client
+        .put(mapping_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "OpenSearch rejected the semantic vector mapping: {}",
+            response.status()
+        ));
+    }
+    Ok(())
+}
+
+/// Attaches the semantic vector for a document. Embedding failures never
+/// block indexing: the document simply stays lexical-only until its next
+/// outbox revision.
+async fn embed_document(
+    catalog: &KnowledgeCatalogClient<tonic::transport::Channel>,
+    document: &mut Value,
+    dims: usize,
+) {
+    let text = semantic_text(document);
+    if text.is_empty() {
+        return;
+    }
+    let request = bookway_runtime::grpc_service_request(
+        bookway_knowledge_catalog_api::pb::EmbedTextsRequest { texts: vec![text] },
+    );
+    let request = match request {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::debug!(%error, "semantic embed skipped");
+            return;
+        }
+    };
+    let mut client = catalog.clone();
+    let response = tokio::time::timeout(Duration::from_secs(5), client.embed_texts(request)).await;
+    match response {
+        Ok(Ok(embeddings)) => {
+            let embeddings = embeddings.into_inner();
+            if let Some(embedding) = embeddings.embeddings.first() {
+                if embedding.values.len() == dims {
+                    if let Some(object) = document.as_object_mut() {
+                        object.insert(
+                            "semantic_vector".to_string(),
+                            serde_json::json!(embedding.values),
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        actual = embedding.values.len(),
+                        expected = dims,
+                        "embedding dimension mismatch; document stays lexical-only"
+                    );
+                }
+            }
+        }
+        Ok(Err(error)) => tracing::debug!(%error, "semantic embed degraded"),
+        Err(_) => tracing::debug!("semantic embed timed out"),
+    }
+}
+
+/// Single canonical text for a document's semantic vector. Mirrors the fields
+/// the lexical query boosts: identity (title/summary), node names, equipment.
+fn semantic_text(document: &Value) -> String {
+    let post = document.get("post").and_then(Value::as_object);
+    let mut parts: Vec<String> = Vec::new();
+    for field in ["title", "summary"] {
+        if let Some(value) = post.and_then(|post| post.get(field)).and_then(Value::as_str) {
+            parts.push(value.to_string());
+        }
+    }
+    let (_, titles, _, equipment) = route_action_search_fields(document);
+    parts.extend(titles);
+    parts.extend(equipment);
+    parts.join(" ")
 }
 
 async fn verify_concrete_index(

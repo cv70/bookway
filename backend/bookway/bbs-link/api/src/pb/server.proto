@@ -69,6 +69,10 @@ message PostSummary {
   // This is derived from Content.content_type. A question is never route
   // adoptable, but its answers may be selected by its author.
   bool is_question = 16;
+  // Published forks of this route. Maintained by BBS Link in the same
+  // transaction that publishes the fork; it is a fact of the content table,
+  // not a client-reported counter.
+  uint32 fork_count = 17;
 }
 
 // A route template is authored as community content but copied into a user's
@@ -148,6 +152,9 @@ message RouteFork {
   uint32 source_route_version = 2;
   string source_route_title = 3;
   string forked_at = 4;
+  // Author of the source route at fork time; enables attribution and
+  // author notifications without re-reading the source content.
+  string source_route_author_id = 5;
 }
 
 message Content {

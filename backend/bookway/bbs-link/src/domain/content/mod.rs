@@ -179,6 +179,7 @@ impl Domain {
                 is_route,
                 is_milestone: request.content_type == pb::ContentType::Milestone as i32,
                 is_question: request.content_type == pb::ContentType::Question as i32,
+                fork_count: 0,
             }),
             author_id: request.user_id,
             content_type: request.content_type,
@@ -277,6 +278,7 @@ impl Domain {
         let source_tags = source_post.tags.clone();
         let source_route_id = source.id.clone();
         let source_route_version = source.version;
+        let source_author_id = source.author_id.clone();
 
         let request_fingerprint = serde_json::to_string(&request)
             .map_err(|error| ContentError::Validation(error.to_string()))?;
@@ -301,6 +303,7 @@ impl Domain {
                 is_route: true,
                 is_milestone: false,
                 is_question: false,
+            fork_count: 0,
             }),
             author_id: user_id.to_string(),
             content_type: pb::ContentType::Route as i32,
@@ -322,6 +325,7 @@ impl Domain {
                 source_route_id,
                 source_route_version,
                 source_route_title,
+                source_route_author_id: source_author_id,
                 forked_at,
             }),
         };

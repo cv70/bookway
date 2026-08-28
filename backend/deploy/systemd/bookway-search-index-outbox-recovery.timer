@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily search index outbox dead-letter report
+
+[Timer]
+OnCalendar=*-*-* 05:10:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

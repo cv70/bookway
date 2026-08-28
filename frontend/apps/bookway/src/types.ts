@@ -446,6 +446,8 @@ export type MallOrder = {
   tracking_number: string;
 };
 
+export type MallOrderList = { items: MallOrder[] };
+
 export type RouteNodeResourceKind =
   | 'document'
   | 'pdf'

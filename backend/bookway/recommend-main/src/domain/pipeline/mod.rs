@@ -43,11 +43,25 @@ use crate::datasource::{Exposure, ExposureError, ExposureItem};
 pub(crate) struct FeedQuery {
     pub(crate) interests: HashSet<bbs_link_pb::GrowthDomain>,
     pub(crate) seen: HashSet<String>,
-    pub(crate) user_id: String,
-    session_id: String,
+    /// Ledger-attributable identity. Anonymous requests keep `None` — the
+    /// pipeline never fabricates a user (a shared "demo-user" once collapsed
+    /// every anonymous visitor into one frequency-cap and experiment cohort).
+    pub(crate) user_id: Option<String>,
+    pub(crate) session_id: Option<String>,
     pub(crate) surface: String,
     pub(crate) cursor: Option<String>,
     pub(crate) limit: usize,
+    /// Delivery context for fail-closed geo/device ad targeting; empty means
+    /// unknown, which matches unrestricted campaigns only.
+    pub(crate) geo_region: String,
+    pub(crate) device_os: String,
+}
+
+impl FeedQuery {
+    /// Tracing/recall identity: empty string when anonymous.
+    pub(crate) fn user_id_or_empty(&self) -> &str {
+        self.user_id.as_deref().unwrap_or("")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +74,15 @@ pub(crate) struct Candidate {
     // scores so every ranker receives the same retrieval evidence.
     pub(crate) recall_score: f64,
     pub(crate) score: f64,
+    // Multi-objective estimates produced by recommend-rank (or the local
+    // calibrated fallback). They ride on the candidate so the exposure ledger
+    // can record what the ranker actually predicted, not just its fusion.
+    pub(crate) p_ctr: f64,
+    pub(crate) p_cvr: f64,
+    pub(crate) p_wegu: f64,
+    // Serving-time feature values from recommend-rank; recorded verbatim in
+    // the exposure ledger as the training input.
+    pub(crate) feature_snapshot: std::collections::HashMap<String, f64>,
     pub(crate) source: String,
     pub(crate) reasons: Vec<String>,
     pub(crate) followed_author: bool,
@@ -159,6 +182,24 @@ pub(crate) trait PipelineSideEffect: Send + Sync {
     async fn run(&self, exposure: Exposure) -> Result<(), ExposureError>;
 }
 
+/// What the pipeline produced for one feed request. Exposure persistence is
+/// the CALLER's job: commercial mixing happens after ranking and can displace
+/// organics, and the ledger must record what actually rendered — not a page
+/// that was about to be truncated.
+pub(crate) struct ServedFeed {
+    pub(crate) response: pb::FeedResponse,
+    /// Ledger row for attributed (logged-in) serving. Anonymous serving gets
+    /// `None`: no fabricated identity, no ledger pollution, no shared
+    /// frequency state.
+    pub(crate) exposure: Option<Exposure>,
+    /// Content ids rendered on the final page (after any ad mixing) for the
+    /// frequency-guard increment.
+    pub(crate) rendered_ids: Vec<String>,
+    /// Hydrated delivery context for contextual ad mixing.
+    pub(crate) geo_region: String,
+    pub(crate) device_os: String,
+}
+
 #[derive(Clone)]
 pub(crate) struct FeedPipeline {
     query_hydrator: Arc<dyn QueryHydrator>,
@@ -214,11 +255,10 @@ impl FeedPipeline {
         }
     }
 
-    pub(crate) async fn execute(&self, request: pb::FeedRequest) -> pb::FeedResponse {
+    pub(crate) async fn execute(&self, request: pb::FeedRequest) -> ServedFeed {
         let query = self.query_hydrator.hydrate(request);
         tracing::debug!(
-            user_id = %query.user_id,
-            session_id = %query.session_id,
+            user_id = query.user_id_or_empty(),
             surface = %query.surface,
             "feed request hydrated"
         );
@@ -310,10 +350,13 @@ impl FeedPipeline {
         }
         let request_id = Uuid::now_v7().to_string();
         let pipeline_id = pipeline_id(&query.surface, &pipeline_versions);
-        let exposure = Exposure {
+        // Only an attributed request writes an exposure row. Anonymous
+        // serving keeps its response request id (clients can still reference
+        // it) without inventing a ledger identity.
+        let exposure = query.user_id.as_ref().map(|user_id| Exposure {
             request_id: request_id.clone(),
-            user_id: query.user_id.clone(),
-            session_id: query.session_id.clone(),
+            user_id: user_id.clone(),
+            session_id: query.session_id.clone().unwrap_or_default(),
             surface: query.surface.clone(),
             pipeline_id: pipeline_id.clone(),
             model_version: rank_outcome.model_version.clone(),
@@ -328,19 +371,29 @@ impl FeedPipeline {
                     content_id: candidate.post.id.clone(),
                     source: candidate.source.clone(),
                     score: candidate.score,
+                    p_ctr: candidate.p_ctr,
+                    p_cvr: candidate.p_cvr,
+                    p_wegu: candidate.p_wegu,
+                    feature_snapshot: serde_json::Value::Object(
+                        candidate
+                            .feature_snapshot
+                            .iter()
+                            .map(|(name, value)| {
+                                (
+                                    name.clone(),
+                                    serde_json::json!(value),
+                                )
+                            })
+                            .collect(),
+                    ),
                     reasons: candidate.reasons.clone(),
                 })
                 .collect(),
-        };
-        // The response's request ID is the key User Event uses for attribution.
-        // Persist it before returning so a legitimate immediate interaction can
-        // always be verified against the exact ranked candidate.
-        for side_effect in &self.side_effects {
-            if let Err(error) = side_effect.run(exposure.clone()).await {
-                degraded = true;
-                tracing::warn!(%error, request_id = %request_id, "exposure persistence degraded");
-            }
-        }
+        });
+        let rendered_ids = selected
+            .iter()
+            .map(|candidate| candidate.post.id.clone())
+            .collect::<Vec<_>>();
 
         let items = selected
             .into_iter()
@@ -349,12 +402,14 @@ impl FeedPipeline {
                 post: Some(candidate.post),
                 score: candidate.score,
                 source: candidate.source,
-                reasons: candidate.reasons,
+                // The exposure ledger above keeps the full trace (including
+                // `[debug]` entries); clients only see explainable reasons.
+                reasons: user_reasons(&candidate.reasons),
                 ad: None,
             })
             .collect::<Vec<_>>();
         let selected_count = items.len();
-        pb::FeedResponse {
+        let response = pb::FeedResponse {
             request_id,
             items,
             meta: Some(pb::FeedMeta {
@@ -367,8 +422,59 @@ impl FeedPipeline {
                 model_version: rank_outcome.model_version,
                 experiment_bucket: rank_outcome.experiment_bucket,
             }),
+        };
+        ServedFeed {
+            response,
+            exposure,
+            rendered_ids,
+            geo_region: query.geo_region,
+            device_os: query.device_os,
         }
     }
+
+    /// Persists the final rendered page. Called by the feed service AFTER
+    /// commercial mixing: ads displace organics, and the ledger/guard must
+    /// never count content that was cut from the page. Returns true when
+    /// persistence degraded (the response meta must report it).
+    pub(crate) async fn persist(&self, served: &ServedFeed) -> bool {
+        let Some(exposure) = served.exposure.as_ref() else {
+            return false; // anonymous: nothing to record, honestly
+        };
+        // The response's request ID is the key User Event uses for attribution.
+        // Persist it before returning so a legitimate immediate interaction can
+        // always be verified against the exact rendered candidate.
+        let mut degraded = false;
+        for side_effect in &self.side_effects {
+            let mut attributed = exposure.clone();
+            attributed.items = exposure
+                .items
+                .iter()
+                .filter(|item| served.rendered_ids.contains(&item.content_id))
+                .enumerate()
+                .map(|(position, item)| {
+                    let mut item = item.clone();
+                    item.position = position;
+                    item
+                })
+                .collect();
+            if let Err(error) = side_effect.run(attributed).await {
+                degraded = true;
+                tracing::warn!(%error, request_id = %exposure.request_id, "exposure persistence degraded");
+            }
+        }
+        degraded
+    }
+}
+
+/// Reasons prefixed `[debug]` are machine diagnostics (experiment buckets,
+/// degraded-mode notes). They stay in the exposure ledger for evaluation but
+/// never reach the client's feed.
+fn user_reasons(reasons: &[String]) -> Vec<String> {
+    reasons
+        .iter()
+        .filter(|reason| !reason.starts_with("[debug]"))
+        .cloned()
+        .collect()
 }
 
 fn pipeline_id(surface: &str, versions: &BTreeSet<String>) -> String {
@@ -392,7 +498,7 @@ mod tests {
     use super::{
         Candidate, CandidateHydrator, CandidateSource, DiversitySelector, FeedPipeline,
         FeedPipelineComponents, FeedQuery, HydratorFailurePolicy, PipelineError, SourceResult,
-        pipeline_id,
+        pipeline_id, user_reasons,
     };
     use crate::api::pb;
 
@@ -422,12 +528,17 @@ mod tests {
                         is_route: false,
                         is_milestone: false,
                         is_question: false,
+                        fork_count: 0,
                     },
                     author_id: "author-1".to_string(),
                     status: ContentStatus::Published as i32,
                     quality_score: 0.0,
                     recall_score: 1.0,
                     score: 1.0,
+                    p_ctr: 0.0,
+                    p_cvr: 0.0,
+                    p_wegu: 0.0,
+                    feature_snapshot: Default::default(),
                     source: "test".to_string(),
                     reasons: Vec::new(),
                     followed_author: false,
@@ -464,6 +575,20 @@ mod tests {
     }
 
     struct FailingHydrator(HydratorFailurePolicy);
+
+    #[test]
+    fn user_reasons_drop_debug_diagnostics_but_keep_explanations() {
+        let reasons = vec![
+            "符合你的学习兴趣".to_string(),
+            "[debug] recommend-rank-v9 w-wegu bucket 6".to_string(),
+            "已降低重复曝光".to_string(),
+        ];
+
+        assert_eq!(
+            user_reasons(&reasons),
+            vec!["符合你的学习兴趣".to_string(), "已降低重复曝光".to_string()]
+        );
+    }
 
     #[test]
     fn pipeline_id_persists_the_recall_strategy_version() {
@@ -535,14 +660,51 @@ mod tests {
             surface: "home".to_string(),
             cursor: None,
             action_context: None,
+            geo_region: String::new(),
+            device_os: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn attributed_responses_carry_an_exposure_row_and_anonymous_none() {
+        let attributed = pipeline(HydratorFailurePolicy::BestEffort)
+            .execute(request())
+            .await;
+        assert!(attributed.exposure.is_some());
+
+        let anonymous = pipeline(HydratorFailurePolicy::BestEffort)
+            .execute(pb::FeedRequest {
+                user_id: String::new(),
+                ..request()
+            })
+            .await;
+        assert!(anonymous.exposure.is_none());
+        // The rendered set still describes the page (the caller recomputes it
+        // after mixing); persist() simply records nothing without an identity.
+        assert_eq!(anonymous.rendered_ids.len(), anonymous.response.items.len());
+    }
+
+    #[tokio::test]
+    async fn persist_skips_anonymous_pages_without_touching_side_effects() {
+        let served = pipeline(HydratorFailurePolicy::BestEffort)
+            .execute(pb::FeedRequest {
+                user_id: String::new(),
+                ..request()
+            })
+            .await;
+        // persist() is a no-op without an identity; with side_effects empty in
+        // this fixture the observable contract is "no degradation reported".
+        assert!(!pipeline(HydratorFailurePolicy::BestEffort)
+            .persist(&served)
+            .await);
     }
 
     #[tokio::test]
     async fn hides_all_candidates_when_a_safety_hydrator_is_unavailable() {
         let response = pipeline(HydratorFailurePolicy::FailClosed)
             .execute(request())
-            .await;
+            .await
+            .response;
 
         let meta = response.meta.expect("feed metadata");
         assert!(response.items.is_empty());
@@ -557,7 +719,8 @@ mod tests {
     async fn retains_candidates_for_an_optional_hydrator_outage() {
         let response = pipeline(HydratorFailurePolicy::BestEffort)
             .execute(request())
-            .await;
+            .await
+            .response;
 
         let meta = response.meta.expect("feed metadata");
         assert_eq!(response.items.len(), 1);
@@ -573,7 +736,8 @@ mod tests {
                 limit: Some(2),
                 ..request()
             })
-            .await;
+            .await
+            .response;
 
         assert_eq!(
             response
@@ -610,12 +774,17 @@ mod tests {
                 is_route: false,
                 is_milestone: false,
                 is_question: false,
+                fork_count: 0,
             },
             author_id: author_id.to_string(),
             status: ContentStatus::Published as i32,
             quality_score: 0.0,
             recall_score: score,
             score,
+            p_ctr: 0.0,
+            p_cvr: 0.0,
+            p_wegu: 0.0,
+            feature_snapshot: Default::default(),
             source: "test".to_string(),
             reasons: Vec::new(),
             followed_author: true,
@@ -629,3 +798,4 @@ mod tests {
         }
     }
 }
+

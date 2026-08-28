@@ -1,0 +1,20 @@
+# Drives mall-order ExpirePending + PromoteAffiliateSettlements each round:
+# expired pending orders are closed and creator settlement shares whose
+# hold (MALL_AFFILIATE_HOLD_DAYS) elapsed become payable. A stalled expirer
+# freezes creator earnings and leaks phantom reservations.
+[Unit]
+Description=Bookway mall order expiry and affiliate settlement promotion
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+ExecStart=/opt/bookway/backend/target/release/bookway-mall-order-expirer
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

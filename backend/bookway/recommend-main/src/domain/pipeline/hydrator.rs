@@ -29,9 +29,14 @@ impl CandidateHydrator for ServedHistoryHydrator {
         query: &FeedQuery,
         candidates: &mut [Candidate],
     ) -> Result<(), PipelineError> {
+        // Anonymous serving has no ledger identity — nothing was ever
+        // recorded for it, so there is nothing to look up.
+        let Some(user_id) = query.user_id.as_deref() else {
+            return Ok(());
+        };
         let served = self
             .exposures
-            .recent_content_ids(&query.user_id, &query.surface, SERVED_HISTORY_LIMIT)
+            .recent_content_ids(user_id, &query.surface, SERVED_HISTORY_LIMIT)
             .await;
         for candidate in candidates {
             candidate.previously_served = served.contains(&candidate.post.id);
@@ -64,14 +69,16 @@ impl CandidateHydrator for FrequencyCapHydrator {
         if candidates.is_empty() {
             return Ok(());
         }
+        // The guard is identity-scoped; anonymous requests accrue no cap
+        // state and therefore none to read.
+        let Some(user_id) = query.user_id.as_deref() else {
+            return Ok(());
+        };
         let content_ids = candidates
             .iter()
             .map(|candidate| candidate.post.id.clone())
             .collect::<Vec<_>>();
-        let counts = self
-            .caps
-            .served_counts(&query.user_id, &content_ids)
-            .await?;
+        let counts = self.caps.served_counts(user_id, &content_ids).await?;
         for (candidate, count) in candidates.iter_mut().zip(counts) {
             candidate.daily_served_count = count;
         }
@@ -103,11 +110,11 @@ impl CandidateHydrator for SocialContextHydrator {
         let mut context_client = self.client.clone();
         let mut visibility_client = self.client.clone();
         let context_request = bbs_request(bbs_pb::ContextRequest {
-            user_id: query.user_id.clone(),
+            user_id: query.user_id_or_empty().to_string(),
             post_ids: Vec::new(),
         })?;
         let visibility_request = bbs_request(bbs_pb::ContextRequest {
-            user_id: query.user_id.clone(),
+            user_id: query.user_id_or_empty().to_string(),
             post_ids: Vec::new(),
         })?;
         let (context, visibility) = tokio::try_join!(
@@ -156,7 +163,7 @@ impl CandidateHydrator for RouteContextHydrator {
         let mut client = self.client.clone();
         let context = client
             .route_context(bbs_request(bbs_pb::RouteContextRequest {
-                user_id: query.user_id.clone(),
+                user_id: query.user_id_or_empty().to_string(),
                 route_ids,
             })?)
             .await
@@ -208,7 +215,7 @@ impl CandidateHydrator for ReactionContextHydrator {
         let mut client = self.client.clone();
         let context = client
             .context(like_pb::ContextRequest {
-                user_id: Some(query.user_id.clone()),
+                user_id: query.user_id.clone(),
                 post_ids,
             })
             .await

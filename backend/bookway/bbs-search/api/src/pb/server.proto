@@ -56,6 +56,10 @@ message SearchRequest {
   optional string scene_equipment = 10;
   // Contextual ad placement. When absent Search Main uses "search".
   optional string ad_placement = 11;
+  // Delivery context for contextual ad mixing (search-main); ignored by
+  // the search index itself.
+  optional string geo_region = 12;
+  optional string device_os = 13;
 }
 
 message SuggestionsRequest {
@@ -153,7 +157,23 @@ message SuggestionsResponse {
   repeated Suggestion items = 2;
 }
 
+// One-shot semantic recall: nearest documents to the query vector. The
+// vector comes from the same embedding model the indexer used; empty
+// responses mean "no vectors indexed yet", not an error.
+message SearchSemanticRequest {
+  string q = 1;
+  repeated float query_vector = 2;
+  optional uint32 limit = 3;
+  optional string user_id = 4;
+  repeated string excluded_author_ids = 5;
+  // Constrains recall to one typed surface. Unset recalls the mixed content
+  // surface; NODES/EQUIPMENT restrict candidates to routes that own action
+  // nodes and return typed entity results.
+  optional SearchType search_type = 6;
+}
+
 service BbsSearch {
+  rpc SearchSemantic(SearchSemanticRequest) returns (SearchResponse);
   rpc Search(SearchRequest) returns (SearchResponse);
   rpc Suggestions(SuggestionsRequest) returns (SuggestionsResponse);
 }

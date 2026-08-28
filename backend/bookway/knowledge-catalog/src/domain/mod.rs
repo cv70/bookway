@@ -68,6 +68,65 @@ impl Domain {
     pub(crate) fn config(&self) -> &Config {
         &self.config
     }
+    /// Embeds a small batch of texts with the configured provider. Internal
+    /// services (search index/queries) use this so the provider stays a
+    /// catalog-owned capability; it fails closed when no provider is
+    /// configured rather than pretending to have embeddings.
+    pub(crate) async fn embed_texts(
+        &self,
+        mut request: pb::EmbedTextsRequest,
+    ) -> Result<pb::EmbedTextsResponse, DomainError> {
+        const MAX_TEXTS: usize = 32;
+        const MAX_TEXT_CHARS: usize = 2_000;
+        request.texts = request
+            .texts
+            .into_iter()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .collect();
+        if request.texts.is_empty() {
+            return Err(DomainError::Validation(
+                "at least one non-empty text is required".to_string(),
+            ));
+        }
+        if request.texts.len() > MAX_TEXTS {
+            return Err(DomainError::Validation(format!(
+                "at most {MAX_TEXTS} texts per request"
+            )));
+        }
+        for text in &request.texts {
+            if text.chars().count() > MAX_TEXT_CHARS {
+                return Err(DomainError::Validation(
+                    "a text exceeds the embedding length limit".to_string(),
+                ));
+            }
+        }
+        let Some(provider) = self.embeddings.as_ref() else {
+            return Err(DomainError::Validation(
+                "no embedding provider is configured".to_string(),
+            ));
+        };
+        let mut embeddings = Vec::with_capacity(request.texts.len());
+        for text in &request.texts {
+            let embedding = provider
+                .embed(text)
+                .await
+                .map_err(|error| DomainError::Validation(error.to_string()))?;
+            if !crate::datasource::EMBEDDING_DIM_RANGE.contains(&embedding.len()) {
+                return Err(DomainError::Validation(format!(
+                    "embedding dimension {} is outside the supported range",
+                    embedding.len()
+                )));
+            }
+            embeddings.push(pb::TextEmbedding {
+                values: embedding,
+            });
+        }
+        Ok(pb::EmbedTextsResponse {
+            model: provider.model().to_string(),
+            embeddings,
+        })
+    }
     pub(crate) async fn search(
         &self,
         mut request: pb::SearchRequest,
@@ -91,6 +150,70 @@ impl Domain {
             ));
         }
         Ok(self.dao.get(id).await?)
+    }
+
+    /// The admin-managed catalog write path. Every field is validated here so
+    /// the DAOs only ever see complete, canonical metadata: an entry is only
+    /// worth storing when it can be cited, licensed and reached over http(s).
+    pub(crate) async fn upsert_public_resource(
+        &self,
+        request: pb::UpsertPublicResourceRequest,
+    ) -> Result<pb::Resource, DomainError> {
+        let operator_id = bounded_required("operator_id", &request.operator_id, 160)?;
+        let title = bounded_required("title", &request.title, 200)?;
+        let provider = bounded_required("provider", &request.provider, 160)?;
+        let url = bounded_required("url", &request.url, 2_048)?;
+        if !valid_public_url(&url) {
+            return Err(DomainError::Validation(
+                "url must be an http(s) URL".to_string(),
+            ));
+        }
+        let license = bounded_required("license", &request.license, 200)?;
+        let version = bounded_required("version", &request.version, 80)?;
+        let citation = bounded_required("citation", &request.citation, 2_000)?;
+        let summary = bounded_optional("summary", &request.summary, 1_000)?;
+        let kind = pb::ResourceKind::try_from(request.kind)
+            .ok()
+            .filter(|kind| *kind != pb::ResourceKind::Unspecified)
+            .ok_or_else(|| DomainError::Validation("resource kind is required".to_string()))?;
+        // An unspecified status means "publish this entry"; archived entries
+        // keep full metadata so they can be re-published without re-entry.
+        let status = match pb::ResourceStatus::try_from(request.status).ok() {
+            Some(pb::ResourceStatus::Archived) => pb::ResourceStatus::Archived,
+            _ => pb::ResourceStatus::Published,
+        };
+        const MAX_TOPICS: usize = 12;
+        const MAX_TOPIC_CHARS: usize = 40;
+        let mut topics = Vec::with_capacity(request.topics.len());
+        for topic in request.topics {
+            let topic = bounded_required("topic", &topic, MAX_TOPIC_CHARS)?;
+            if !topics.contains(&topic) {
+                topics.push(topic);
+            }
+        }
+        if topics.len() > MAX_TOPICS {
+            return Err(DomainError::Validation(format!(
+                "at most {MAX_TOPICS} topics per resource"
+            )));
+        }
+        let resource_id = bounded_optional("resource_id", &request.resource_id, 160)?;
+        tracing::info!(%operator_id, resource_id = %resource_id, %url, "upserting public resource");
+        Ok(self
+            .dao
+            .upsert_public_resource(crate::datasource::NewPublicResource {
+                resource_id: (!resource_id.is_empty()).then_some(resource_id),
+                title,
+                kind,
+                provider,
+                summary,
+                url,
+                license,
+                version,
+                citation,
+                topics,
+                status,
+            })
+            .await?)
     }
 
     pub(crate) async fn list_node_resources(
@@ -565,8 +688,16 @@ fn bounded_optional(name: &str, value: &str, max_chars: usize) -> Result<String,
     Ok(value.to_string())
 }
 
-fn validate_embedding_vector(model: &str, embedding: &[f32]) -> Result<(), DomainError> {
-    if model.trim().is_empty() || model.chars().count() > 80 {
+/// Catalog entries are reachable web resources. Script-scheme and host-less
+/// URLs can never become a citation, so they fail closed (mirrors ad-center's
+/// landing-url rule).
+fn valid_public_url(value: &str) -> bool {
+    url::Url::parse(value)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+}
+
+fn validate_embedding_vector(model: &str, embedding: &[f32]) -> Result<(), DomainError> {    if model.trim().is_empty() || model.chars().count() > 80 {
         return Err(DomainError::Validation(
             "RAG embedding model is invalid".to_string(),
         ));
@@ -717,6 +848,79 @@ mod tests {
     };
     use crate::domain::DomainError;
     use crate::{conf::Config, datasource::MemoryResourceDao};
+
+    struct FixedEmbeddings;
+
+    #[async_trait::async_trait]
+    impl crate::datasource::EmbeddingProvider for FixedEmbeddings {
+        fn model(&self) -> &str {
+            "test-embed-model"
+        }
+        async fn embed(
+            &self,
+            _text: &str,
+        ) -> Result<Vec<f32>, crate::datasource::EmbeddingError> {
+            Ok(vec![0.25; 8])
+        }
+    }
+
+    fn domain_with_embeddings(provider: Option<Arc<dyn crate::datasource::EmbeddingProvider>>) -> Domain {
+        Domain {
+            config: Config {
+                listen_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                bbs_link_url: String::new(),
+                embeddings: None,
+            },
+            dao: Arc::new(MemoryResourceDao::seeded()),
+            bbs_link: None,
+            embeddings: provider,
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_texts_fails_closed_without_a_provider() {
+        let domain = domain_with_embeddings(None);
+        let error = domain
+            .embed_texts(pb::EmbedTextsRequest {
+                texts: vec!["徒步路线".to_string()],
+            })
+            .await
+            .expect_err("no provider configured");
+        assert!(matches!(error, DomainError::Validation(message) if message.contains("provider")));
+    }
+
+    #[tokio::test]
+    async fn embed_texts_returns_model_tagged_vectors_for_trimmed_texts() {
+        let domain = domain_with_embeddings(Some(Arc::new(FixedEmbeddings)));
+        let response = domain
+            .embed_texts(pb::EmbedTextsRequest {
+                texts: vec!["  徒步路线  ".to_string(), String::new(), "骑行".to_string()],
+            })
+            .await
+            .expect("embeddings");
+        assert_eq!(response.model, "test-embed-model");
+        assert_eq!(
+            response.embeddings.len(),
+            2,
+            "blank texts are dropped instead of embedded"
+        );
+        assert!(response
+            .embeddings
+            .iter()
+            .all(|embedding| embedding.values.len() == 8));
+    }
+
+    #[tokio::test]
+    async fn embed_texts_rejects_batches_over_the_bound() {
+        let domain = domain_with_embeddings(Some(Arc::new(FixedEmbeddings)));
+        let error = domain
+            .embed_texts(pb::EmbedTextsRequest {
+                texts: vec!["文本".to_string(); 33],
+            })
+            .await
+            .expect_err("too many texts");
+        assert!(matches!(error, DomainError::Validation(message) if message.contains("at most")));
+    }
 
     #[test]
     fn required_values_are_trimmed_and_bounded() {
@@ -983,5 +1187,140 @@ mod tests {
             .await
             .expect("archived attachments must not be searchable");
         assert!(detached_hits.hits.is_empty());
+    }
+
+    fn upsert_request(title: &str, kind: pb::ResourceKind, url: &str) -> pb::UpsertPublicResourceRequest {
+        pb::UpsertPublicResourceRequest {
+            title: title.to_string(),
+            kind: kind as i32,
+            provider: "Open Product".to_string(),
+            url: url.to_string(),
+            license: "CC BY 4.0".to_string(),
+            version: "1.0".to_string(),
+            citation: "Open Product. 2026.".to_string(),
+            topics: vec!["学习".to_string()],
+            status: pb::ResourceStatus::Published as i32,
+            operator_id: "admin-1".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn public_resource_upsert_validates_kind_url_and_required_metadata() {
+        let domain = domain_with_embeddings(None);
+
+        let missing_title = pb::UpsertPublicResourceRequest {
+            title: "   ".to_string(),
+            ..upsert_request("x", pb::ResourceKind::Book, "https://example.test/book")
+        };
+        assert!(matches!(
+            domain.upsert_public_resource(missing_title).await,
+            Err(DomainError::Validation(message)) if message.contains("title")
+        ));
+
+        let unknown_kind = pb::UpsertPublicResourceRequest {
+            kind: pb::ResourceKind::Unspecified as i32,
+            ..upsert_request("开放课程", pb::ResourceKind::Course, "https://example.test/course")
+        };
+        assert!(matches!(
+            domain.upsert_public_resource(unknown_kind).await,
+            Err(DomainError::Validation(message)) if message == "resource kind is required"
+        ));
+
+        let script_url = upsert_request("公开文章", pb::ResourceKind::Article, "javascript:alert(1)");
+        assert!(matches!(
+            domain.upsert_public_resource(script_url).await,
+            Err(DomainError::Validation(message)) if message == "url must be an http(s) URL"
+        ));
+
+        let host_less = upsert_request("公开文章", pb::ResourceKind::Article, "https://");
+        assert!(domain.upsert_public_resource(host_less).await.is_err());
+
+        let missing_citation = pb::UpsertPublicResourceRequest {
+            citation: String::new(),
+            ..upsert_request("公开文章", pb::ResourceKind::Article, "https://example.test/a")
+        };
+        assert!(matches!(
+            domain.upsert_public_resource(missing_citation).await,
+            Err(DomainError::Validation(message)) if message.contains("citation")
+        ));
+    }
+
+    #[tokio::test]
+    async fn public_resource_upsert_creates_updates_and_deduplicates_by_url() {
+        let domain = domain_with_embeddings(None);
+
+        let created = domain
+            .upsert_public_resource(upsert_request(
+                "开放课程",
+                pb::ResourceKind::Course,
+                "https://open.example/course",
+            ))
+            .await
+            .expect("create should succeed");
+        assert!(!created.id.is_empty());
+        assert_eq!(created.status, pb::ResourceStatus::Published as i32);
+        let listed = domain
+            .search(pb::SearchRequest {
+                query: "开放课程".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("search after create");
+        assert_eq!(listed.items.len(), 1);
+
+        // The same URL with a different (unknown) id updates the entry that
+        // owns the URL instead of creating a duplicate.
+        let by_url = domain
+            .upsert_public_resource(pb::UpsertPublicResourceRequest {
+                resource_id: "caller-chosen-id".to_string(),
+                title: "开放课程（更新）".to_string(),
+                ..upsert_request(
+                    "开放课程（更新）",
+                    pb::ResourceKind::Course,
+                    "https://open.example/course",
+                )
+            })
+            .await
+            .expect("duplicate url should update the owning entry");
+        assert_eq!(by_url.id, created.id);
+        assert_eq!(by_url.title, "开放课程（更新）");
+        let listed = domain
+            .search(pb::SearchRequest {
+                query: "开放课程".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("search after url upsert");
+        assert_eq!(listed.items.len(), 1);
+
+        // A known id updates that entry, including archiving it.
+        let archived = domain
+            .upsert_public_resource(pb::UpsertPublicResourceRequest {
+                resource_id: created.id.clone(),
+                status: pb::ResourceStatus::Archived as i32,
+                ..upsert_request(
+                    "开放课程（更新）",
+                    pb::ResourceKind::Course,
+                    "https://open.example/course",
+                )
+            })
+            .await
+            .expect("archive update should succeed");
+        assert_eq!(archived.status, pb::ResourceStatus::Archived as i32);
+        assert!(domain
+            .get(pb::GetRequest {
+                resource_id: created.id.clone(),
+            })
+            .await
+            .is_err());
+        let listed = domain
+            .search(pb::SearchRequest {
+                query: "开放课程".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("search hides archived entries");
+        assert!(listed.items.is_empty());
     }
 }

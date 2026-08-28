@@ -1,5 +1,6 @@
 use std::{env, time::Duration};
 
+use bookway_ad_center_api::pb as ad_center_pb;
 use bookway_mall_api::pb as mall_pb;
 use bookway_user_event_api::pb as user_event_pb;
 use sqlx::PgPool;
@@ -19,6 +20,10 @@ pub(crate) struct PurchaseEventRelay {
     pool: PgPool,
     mall: mall_pb::mall_client::MallClient<Channel>,
     user_event: user_event_pb::user_event_client::UserEventClient<Channel>,
+    /// Conversions ride the same paid-order facts: rows carrying ad decision
+    /// attribution are also reported to ad-center's event ledger. `None`
+    /// only when the deploy wires no ad-center at all.
+    ad_center: Option<ad_center_pb::ad_center_client::AdCenterClient<Channel>>,
     batch_size: i64,
 }
 
@@ -33,6 +38,8 @@ struct ClaimedRow {
     order_id: String,
     user_id: String,
     node_offer_id: String,
+    ad_request_id: Option<String>,
+    ad_campaign_id: Option<String>,
 }
 
 impl PurchaseEventRelay {
@@ -53,10 +60,17 @@ impl PurchaseEventRelay {
         let user_event = user_event_pb::user_event_client::UserEventClient::new(
             Endpoint::from_shared(user_event_url)?.connect_lazy(),
         );
+        let ad_center = match env::var("AD_CENTER_GRPC_URL") {
+            Ok(url) => Some(ad_center_pb::ad_center_client::AdCenterClient::new(
+                Endpoint::from_shared(url)?.connect_lazy(),
+            )),
+            Err(_) => None,
+        };
         Ok(Self {
             pool,
             mall,
             user_event,
+            ad_center,
             batch_size,
         })
     }
@@ -95,7 +109,7 @@ impl PurchaseEventRelay {
 
     async fn claim(&self) -> Result<Vec<ClaimedRow>, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let rows = sqlx::query_as::<_, (String, String, String)>(
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>)>(
             "WITH claimed AS (
                 SELECT order_id FROM purchase_event_outbox
                 WHERE ((status = 'pending' AND available_at <= now())
@@ -105,7 +119,7 @@ impl PurchaseEventRelay {
              UPDATE purchase_event_outbox o
              SET status='processing', locked_at=now(), updated_at=now()
              FROM claimed WHERE o.order_id = claimed.order_id
-             RETURNING o.order_id, o.user_id, o.node_offer_id",
+             RETURNING o.order_id, o.user_id, o.node_offer_id, o.ad_request_id, o.ad_campaign_id",
         )
         .bind(self.batch_size)
         .fetch_all(&mut *tx)
@@ -113,10 +127,12 @@ impl PurchaseEventRelay {
         tx.commit().await?;
         Ok(rows
             .into_iter()
-            .map(|(order_id, user_id, node_offer_id)| ClaimedRow {
+            .map(|(order_id, user_id, node_offer_id, ad_request_id, ad_campaign_id)| ClaimedRow {
                 order_id,
                 user_id,
                 node_offer_id,
+                ad_request_id,
+                ad_campaign_id,
             })
             .collect())
     }
@@ -156,6 +172,47 @@ impl PurchaseEventRelay {
             .ingest(ingest_request)
             .await
             .map_err(|status| DeliveryError::Transient(status.to_string()))?;
+        self.deliver_ad_conversion(row).await
+    }
+
+    /// Reports the paid order as an ad conversion when it carries ad decision
+    /// attribution. ad-center re-verifies the tracked decision and accepted
+    /// impression on the same request id, dedupes on the deterministic event
+    /// id, and (unlike client beacons) this conversion is born from a
+    /// server-verified payment. `accepted: false` is a legitimate counted
+    /// outcome (cap reached, unverified decision) — the fact is delivered.
+    async fn deliver_ad_conversion(&self, row: &ClaimedRow) -> Result<(), DeliveryError> {
+        let (Some(ad_request_id), Some(ad_campaign_id)) =
+            (row.ad_request_id.as_deref(), row.ad_campaign_id.as_deref())
+        else {
+            return Ok(());
+        };
+        let Some(client) = self.ad_center.as_ref() else {
+            return Err(DeliveryError::Permanent(
+                "order carries ad attribution but AD_CENTER_GRPC_URL is not configured".to_string(),
+            ));
+        };
+        let request = bookway_runtime::grpc_service_request(ad_center_pb::RecordEventRequest {
+            user_id: row.user_id.clone(),
+            event_id: format!("ad-conversion-{}", row.order_id),
+            request_id: ad_request_id.to_string(),
+            campaign_id: ad_campaign_id.to_string(),
+            event_type: ad_center_pb::EventType::Conversion as i32,
+        })
+        .map_err(|error| DeliveryError::Transient(error.to_string()))?;
+        let receipt = client
+            .clone()
+            .record_event(request)
+            .await
+            .map_err(|status| DeliveryError::Transient(status.to_string()))?
+            .into_inner();
+        if !receipt.accepted {
+            tracing::info!(
+                order_id = %row.order_id,
+                campaign_id = %ad_campaign_id,
+                "ad conversion not counted by ad-center; outcome recorded"
+            );
+        }
         Ok(())
     }
 

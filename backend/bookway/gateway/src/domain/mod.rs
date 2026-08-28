@@ -630,11 +630,65 @@ impl Domain {
         }
     }
 
+    /// Signed payment-provider webhook: resolves the order by the provider's
+    /// payment reference and runs the idempotent Pay state machine. The
+    /// gateway's only job here is signature verification; the ledger stays in
+    /// mall-order.
+    pub(crate) async fn confirm_payment_webhook(
+        &self,
+        provider: &str,
+        payment_reference: &str,
+    ) -> Result<mall_order_pb::Order, UpstreamError> {
+        if provider.trim().is_empty() || provider.chars().count() > 32 {
+            return Err(upstream_invalid("payment provider slug is invalid"));
+        }
+        grpc_call!(
+            self,
+            mall_order,
+            "mall-order",
+            confirm_by_reference,
+            mall_order_pb::ConfirmByReferenceRequest {
+                payment_reference: payment_reference.to_string(),
+            }
+        )
+    }
+
     pub(crate) async fn fork_route(
         &self,
+        user_id: &str,
         request: bbs_link_pb::ForkRouteRequest,
     ) -> Result<bbs_link_pb::Content, UpstreamError> {
-        grpc_call!(self, bbs_link, "bbs-link", fork_route, request)
+        let fork = grpc_call!(self, bbs_link, "bbs-link", fork_route, request)?;
+        let (source_route_id, source_author_id) = fork
+            .route_fork
+            .as_ref()
+            .map(|fork| (fork.source_route_id.clone(), fork.source_route_author_id.clone()))
+            .unwrap_or_default();
+        // The fork itself is the durable fact; side effects are best-effort
+        // and must never fail the fork response.
+        if let Err(error) = self.record_route_fork(user_id, &source_route_id, &fork.id).await {
+            tracing::warn!(%error, fork_id = %fork.id, "route fork attribution degraded");
+        }
+        if !source_author_id.is_empty() && source_author_id != user_id {
+            // Same contract as the like/comment notifications: the fork is
+            // already committed, so enqueue degradation is warn-only.
+            self.create_community_notification(
+                &source_author_id,
+                notification(
+                    format!("fork:{user_id}:{}", fork.id),
+                    "有人创建了你的路线的新版本",
+                    "一位用户基于你的公开路线开始了自己的版本",
+                    [
+                        ("fork_id", fork.id.as_str()),
+                        ("source_route_id", source_route_id.as_str()),
+                        ("actor_id", user_id),
+                        ("interaction", "fork"),
+                    ],
+                ),
+            )
+            .await;
+        }
+        Ok(fork)
     }
 
     pub(crate) async fn update_content(
@@ -674,6 +728,19 @@ impl Domain {
             "knowledge-catalog",
             get,
             catalog_pb::GetRequest { resource_id }
+        )
+    }
+
+    pub(crate) async fn upsert_public_resource(
+        &self,
+        request: catalog_pb::UpsertPublicResourceRequest,
+    ) -> Result<catalog_pb::Resource, UpstreamError> {
+        grpc_call!(
+            self,
+            knowledge_catalog,
+            "knowledge-catalog",
+            upsert_public_resource,
+            request
         )
     }
 
@@ -1654,6 +1721,18 @@ impl Domain {
         grpc_call!(self, mall_order, "mall-order", cancel, request)
     }
 
+    pub(crate) async fn pay_mall_order(
+        &self,
+        request: mall_order_pb::PayRequest,
+    ) -> Result<mall_order_pb::Order, UpstreamError> {
+        if request.payment_reference.trim().is_empty() {
+            return Err(upstream_invalid(
+                "payment_reference is required when paying an order",
+            ));
+        }
+        grpc_call!(self, mall_order, "mall-order", pay, request)
+    }
+
     pub(crate) async fn merchant_mall_orders(
         &self,
         request: mall_order_pb::MerchantOrderRequest,
@@ -1677,6 +1756,22 @@ impl Domain {
             mall_order,
             "mall-order",
             affiliate_settlements,
+            request
+        )
+    }
+
+    /// Creator-facing read of the affiliate ledger. mall-order scopes every
+    /// row to the creator_id the gateway stamps from the authenticated
+    /// identity; this is a read-only projection of the same settlements.
+    pub(crate) async fn creator_affiliate_settlements(
+        &self,
+        request: mall_order_pb::CreatorSettlementRequest,
+    ) -> Result<mall_order_pb::AffiliateSettlementListResponse, UpstreamError> {
+        grpc_call!(
+            self,
+            mall_order,
+            "mall-order",
+            list_creator_settlements,
             request
         )
     }
@@ -1891,6 +1986,33 @@ impl Domain {
         Ok(())
     }
 
+    async fn record_route_fork(
+        &self,
+        user_id: &str,
+        source_route_id: &str,
+        fork_content_id: &str,
+    ) -> Result<(), UpstreamError> {
+        if source_route_id.is_empty() || fork_content_id.is_empty() {
+            return Ok(());
+        }
+        let event = route_fork_event(user_id, source_route_id, fork_content_id)
+            .ok_or(UpstreamError::Transport {
+                service: "user-event",
+                message: "failed to format a route fork timestamp".to_string(),
+            })?;
+        grpc_call!(
+            self,
+            user_event,
+            "user-event",
+            ingest,
+            user_event_pb::IngestRequest {
+                user_id: user_id.to_string(),
+                events: vec![event],
+            }
+        )?;
+        Ok(())
+    }
+
     async fn record_route_join(
         &self,
         user_id: &str,
@@ -1990,6 +2112,30 @@ fn route_action_completion_event(
         position: None,
         occurred_at,
         source: "gateway-route-completion".to_string(),
+        attribution_source: user_event_pb::AttributionSource::Unspecified as i32,
+        negative_feedback_reason: None,
+    })
+}
+
+fn route_fork_event(
+    user_id: &str,
+    source_route_id: &str,
+    fork_content_id: &str,
+) -> Option<user_event_pb::Event> {
+    let occurred_at = OffsetDateTime::now_utc().format(&Rfc3339).ok()?;
+    // Stable per fork instance: a retried fork request replays the same fork
+    // content id and therefore the same event id.
+    let stable_key = format!("bookway:route-fork:{user_id}:{fork_content_id}");
+    Some(user_event_pb::Event {
+        event_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, stable_key.as_bytes()).to_string(),
+        event_type: "route_fork".to_string(),
+        session_id: "server".to_string(),
+        request_id: None,
+        component_id: "route-fork".to_string(),
+        content_id: Some(source_route_id.to_string()),
+        position: None,
+        occurred_at,
+        source: "gateway-route-fork".to_string(),
         attribution_source: user_event_pb::AttributionSource::Unspecified as i32,
         negative_feedback_reason: None,
     })
@@ -2769,6 +2915,24 @@ mod tests {
         assert_eq!(first.event_id, retry.event_id);
         assert_eq!(first.event_type, "save_knowledge");
         assert_eq!(first.content_id.as_deref(), Some("post-1"));
+    }
+
+    #[test]
+    fn route_fork_event_is_stable_per_fork_and_attributed_to_the_source() {
+        let first = route_fork_event("user-1", "route-1", "fork-1")
+            .expect("fork event should build");
+        let retry = route_fork_event("user-1", "route-1", "fork-1")
+            .expect("fork event should build");
+        let other_fork = route_fork_event("user-1", "route-1", "fork-2")
+            .expect("fork event should build");
+
+        // Same fork instance replays the same event id; a second fork of the
+        // same source is a distinct fact.
+        assert_eq!(first.event_id, retry.event_id);
+        assert_ne!(first.event_id, other_fork.event_id);
+        assert_eq!(first.event_type, "route_fork");
+        // The behavioural signal lands on the route the user forked FROM.
+        assert_eq!(first.content_id.as_deref(), Some("route-1"));
     }
 
     #[test]

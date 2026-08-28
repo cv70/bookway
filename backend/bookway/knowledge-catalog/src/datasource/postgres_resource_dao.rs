@@ -125,7 +125,10 @@ impl ResourceDao for PostgresResourceDao {
             .map(kind_name);
         let pattern = format!("%{}%", escape_like(&request.query.trim().to_lowercase()));
         let topic = request.topic.trim().to_string();
-        let rows = sqlx::query_as::<_, ResourceRow>("SELECT id,title,kind,provider,summary,url,license,version,citation,topics,status,published_at,updated_at FROM public_resources WHERE status='published' AND ($1='' OR search_text ILIKE $2 ESCAPE '\\') AND ($3::TEXT IS NULL OR kind=$3) AND ($4='' OR $4 = ANY(topics)) ORDER BY updated_at DESC,id DESC LIMIT $5 OFFSET $6")
+        // Relevance first: trigram similarity of the searchable projection.
+        // An empty query scores every row 0, so directory browsing degrades
+        // to the recency order the ILIKE-only path used before.
+        let rows = sqlx::query_as::<_, ResourceRow>("SELECT id,title,kind,provider,summary,url,license,version,citation,topics,status,published_at,updated_at FROM public_resources WHERE status='published' AND ($1='' OR search_text ILIKE $2 ESCAPE '\\') AND ($3::TEXT IS NULL OR kind=$3) AND ($4='' OR $4 = ANY(topics)) ORDER BY similarity(search_text, $2) DESC, updated_at DESC, id DESC LIMIT $5 OFFSET $6")
             .bind(request.query.trim())
             .bind(pattern)
             .bind(kind)
@@ -160,6 +163,68 @@ impl ResourceDao for PostgresResourceDao {
             .map(row_to_resource)
             .transpose()?
             .ok_or_else(|| DaoError::NotFound(resource_id.to_string()))
+    }
+
+    async fn upsert_public_resource(
+        &self,
+        request: NewPublicResource,
+    ) -> Result<pb::Resource, DaoError> {
+        // The canonical URL is the catalog's identity anchor: an entry that
+        // already owns the URL is updated in place instead of duplicated. An
+        // existing caller-addressed id still wins so PATCH cannot silently
+        // rewrite a different row.
+        let mut target = request.resource_id.clone();
+        if let Some(id) = &target {
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM public_resources WHERE id=$1)",
+            )
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DaoError::Database)?;
+            if !exists {
+                target = None;
+            }
+        }
+        if target.is_none() {
+            target = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT id FROM public_resources WHERE url=$1",
+            )
+            .bind(&request.url)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(DaoError::Database)?
+            .flatten();
+        }
+        let id = target.unwrap_or_else(|| Uuid::now_v7().to_string());
+        // published_at is set once at creation and never rewritten by updates.
+        sqlx::query_as::<_, ResourceRow>("INSERT INTO public_resources (id,title,kind,provider,summary,url,license,version,citation,topics,status,published_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now()) ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title,kind=EXCLUDED.kind,provider=EXCLUDED.provider,summary=EXCLUDED.summary,url=EXCLUDED.url,license=EXCLUDED.license,version=EXCLUDED.version,citation=EXCLUDED.citation,topics=EXCLUDED.topics,status=EXCLUDED.status,updated_at=now() RETURNING id,title,kind,provider,summary,url,license,version,citation,topics,status,published_at,updated_at")
+            .bind(id)
+            .bind(&request.title)
+            .bind(kind_name(request.kind))
+            .bind(&request.provider)
+            .bind(&request.summary)
+            .bind(&request.url)
+            .bind(&request.license)
+            .bind(&request.version)
+            .bind(&request.citation)
+            .bind(&request.topics)
+            .bind(status_name(request.status))
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| {
+                if error.as_database_error().is_some_and(|database| database.is_unique_violation())
+                {
+                    // Lost the create race for this URL: refuse rather than
+                    // guess which of the two competing identities to keep.
+                    DaoError::Conflict(
+                        "resource url already belongs to a different resource".to_string(),
+                    )
+                } else {
+                    DaoError::Database(error)
+                }
+            })
+            .and_then(row_to_resource)
     }
 
     async fn list_node_resources(

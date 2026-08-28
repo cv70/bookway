@@ -1,12 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
-  affiliateSettlements,
-  AffiliateRule,
   AffiliateSettlement,
-  initialAffiliateRules,
-  initialOffers,
-  initialOrders,
-  initialProducts,
   Order,
   Product,
   productImages,
@@ -15,7 +9,7 @@ import {
   RouteOffer,
   StockAdjustment,
 } from "../domain";
-import { downloadCsv, useStoredState } from "../lib/storage";
+import { downloadCsv } from "../lib/storage";
 import {
   isMerchantAdminApiConfigured,
   merchantAdminApi,
@@ -29,25 +23,17 @@ import {
   updateMallProduct,
 } from "../lib/adminMappers";
 
+// Honest-guardrail wording: with no gateway there is no server truth to show.
+const GATEWAY_DISCONNECTED = "未连接商家管理网关，无法读写服务端数据。";
+
 export function useMerchantAdmin(notify: (message: string) => void) {
-  const [products, setProducts] = useStoredState<Product[]>(
-    "merchant-products-v7",
-    initialProducts,
-  );
-  const [orders, setOrders] = useStoredState<Order[]>(
-    "merchant-orders-v7",
-    initialOrders,
-  );
-  const [offers, setOffers] = useStoredState<RouteOffer[]>(
-    "merchant-route-offers-v7",
-    initialOffers,
-  );
-  const [stockAdjustments, setStockAdjustments] = useStoredState<
-    StockAdjustment[]
-  >("merchant-stock-adjustments-v7", []);
-  const [affiliateRules, setAffiliateRules] = useStoredState<AffiliateRule[]>(
-    "merchant-affiliate-rules-v1",
-    initialAffiliateRules,
+  // 商品、订单、路线挂载与分账台账只来自服务端网关；内存态从空开始，
+  // 不落 localStorage，也不在未连接时用本地数据冒充服务端事实。
+  const [products, setProducts] = useState<Product[]>([]);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [offers, setOffers] = useState<RouteOffer[]>([]);
+  const [stockAdjustments, setStockAdjustments] = useState<StockAdjustment[]>(
+    [],
   );
   const [productSearch, setProductSearch] = useState("");
   const [productStatus, setProductStatus] = useState("all");
@@ -62,11 +48,7 @@ export function useMerchantAdmin(notify: (message: string) => void) {
     "local" | "loading" | "ready" | "auth" | "error"
   >(isMerchantAdminApiConfigured() ? "loading" : "local");
   const [remoteMessage, setRemoteMessage] = useState("");
-  // The affiliate settlement ledger is authoritative on the backend; seeds
-  // only exist for the local sandbox mode and are replaced on remote load.
-  const [affiliateRows, setAffiliateRows] = useState<AffiliateSettlement[]>(
-    affiliateSettlements,
-  );
+  const [affiliateRows, setAffiliateRows] = useState<AffiliateSettlement[]>([]);
 
   useEffect(() => {
     if (!isMerchantAdminApiConfigured()) return;
@@ -159,29 +141,55 @@ export function useMerchantAdmin(notify: (message: string) => void) {
   };
   const beginShip = (id: string) =>
     setShippingOrder(orders.find((order) => order.id === id) || null);
-  const toggleProductStatus = (sku: string) => {
+  // 上架/下架通过网关写回 mall-catalog；未连接网关时直接拒绝，
+  // 不在本地假装状态已变更。
+  const toggleProductStatus = async (sku: string) => {
     const product = products.find((item) => item.sku === sku);
-    const offerSku = sku;
+    if (!product) return;
+    const nextStatus: Product["status"] =
+      product.status === "销售中" ? "待发布" : "销售中";
     if (
-      product?.status !== "销售中" &&
-      !offers.some((offer) => offer.sku === offerSku && offer.enabled)
+      nextStatus === "销售中" &&
+      !offers.some((offer) => offer.sku === sku && offer.enabled)
     ) {
       notify("请先将商品挂载到启用的路线行动节点，再上架销售。");
       return;
     }
-    setProducts((current) =>
-      current.map((item) =>
-        item.sku === sku
-          ? { ...item, status: item.status === "销售中" ? "待发布" : "销售中" }
-          : item,
-      ),
-    );
-    notify(
-      `“${product?.name || "商品"}”已${product?.status === "销售中" ? "下架" : "上架"}。`,
-    );
+    if (!isMerchantAdminApiConfigured()) {
+      notify(GATEWAY_DISCONNECTED);
+      return;
+    }
+    try {
+      const remote = await merchantAdminApi.updateProduct(
+        product.id,
+        updateMallProduct({ ...product, status: nextStatus }),
+      );
+      const remoteProducts = remote.skus.map((skuItem) =>
+        productFromMall(remote, skuItem),
+      );
+      setProducts((current) =>
+        current.map((item) =>
+          item.sku === sku
+            ? remoteProducts.find((remoteItem) => remoteItem.skuId === item.skuId) ||
+              { ...product, status: nextStatus }
+            : item,
+        ),
+      );
+      setRemoteStatus("ready");
+      notify(`“${product.name}”已${nextStatus === "销售中" ? "上架" : "下架"}。`);
+    } catch (error) {
+      const apiError = error instanceof AdminApiError ? error : undefined;
+      setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
+      setRemoteMessage(apiError?.message || "商品状态同步失败，请稍后重试。");
+      notify(apiError?.message || "商品状态同步失败，请稍后重试。");
+    }
   };
   const saveProduct = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!isMerchantAdminApiConfigured()) {
+      notify(GATEWAY_DISCONNECTED);
+      return;
+    }
     const data = new FormData(event.currentTarget);
     const name = String(data.get("name") || "").trim();
     const description = String(data.get("description") || "").trim();
@@ -231,36 +239,26 @@ export function useMerchantAdmin(notify: (message: string) => void) {
       };
     }
     try {
-      if (isMerchantAdminApiConfigured()) {
-        const remote = editingProduct
-          ? await merchantAdminApi.updateProduct(
-              editingProduct.id,
-              updateMallProduct(nextProduct),
+      const remote = editingProduct
+        ? await merchantAdminApi.updateProduct(
+            editingProduct.id,
+            updateMallProduct(nextProduct),
+          )
+        : await merchantAdminApi.createProduct(createMallProduct(nextProduct));
+      const remoteProducts = remote.skus.map((sku) =>
+        productFromMall(remote, sku),
+      );
+      setProducts((current) =>
+        editingProduct
+          ? current.map((item) =>
+              item.id === editingProduct.id
+                ? remoteProducts.find((remoteItem) => remoteItem.skuId === item.skuId) ||
+                  nextProduct
+                : item,
             )
-          : await merchantAdminApi.createProduct(createMallProduct(nextProduct));
-        const remoteProducts = remote.skus.map((sku) =>
-          productFromMall(remote, sku),
-        );
-        setProducts((current) =>
-          editingProduct
-            ? current.map((item) =>
-                item.id === editingProduct.id
-                  ? remoteProducts.find((remoteItem) => remoteItem.skuId === item.skuId) ||
-                    nextProduct
-                  : item,
-              )
-            : [...remoteProducts, ...current],
-        );
-        setRemoteStatus("ready");
-      } else {
-        setProducts((current) =>
-          editingProduct
-            ? current.map((item) =>
-                item.sku === editingProduct.sku ? nextProduct : item,
-              )
-            : [nextProduct, ...current],
-        );
-      }
+          : [...remoteProducts, ...current],
+      );
+      setRemoteStatus("ready");
       notify(
         editingProduct
           ? `“${name}”已更新。`
@@ -299,49 +297,45 @@ export function useMerchantAdmin(notify: (message: string) => void) {
       notify(`“${product.name}”可售库存未变化。`);
       return;
     }
-    if (isMerchantAdminApiConfigured()) {
-      try {
-        const remote = await merchantAdminApi.setSkuStock(
-          product.skuId,
-          targetStock,
-        );
-        setProducts((current) =>
-          current.map((item) =>
-            item.sku === sku ? { ...item, stock: remote.available } : item,
-          ),
-        );
-        setRemoteStatus("ready");
-      } catch (error) {
-        const apiError = error instanceof AdminApiError ? error : undefined;
-        setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
-        setRemoteMessage(apiError?.message || "库存同步失败，请稍后重试。");
-        notify(
-          apiError?.message ||
-            "库存调整被库存服务拒绝（可能低于订单预占），请稍后重试。",
-        );
-        return;
-      }
-    } else {
+    if (!isMerchantAdminApiConfigured()) {
+      notify(GATEWAY_DISCONNECTED);
+      return;
+    }
+    try {
+      const remote = await merchantAdminApi.setSkuStock(
+        product.skuId,
+        targetStock,
+      );
       setProducts((current) =>
         current.map((item) =>
-          item.sku === sku ? { ...item, stock: targetStock } : item,
+          item.sku === sku ? { ...item, stock: remote.available } : item,
         ),
       );
+      setStockAdjustments((current) =>
+        [
+          {
+            id: `ADJ-${Date.now()}`,
+            sku,
+            product: product.name,
+            warehouse: product.warehouse || "北京中心仓",
+            quantity,
+            reason,
+            createdAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+          },
+          ...current,
+        ].slice(0, 50),
+      );
+      setRemoteStatus("ready");
+    } catch (error) {
+      const apiError = error instanceof AdminApiError ? error : undefined;
+      setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
+      setRemoteMessage(apiError?.message || "库存同步失败，请稍后重试。");
+      notify(
+        apiError?.message ||
+          "库存调整被库存服务拒绝（可能低于订单预占），请稍后重试。",
+      );
+      return;
     }
-    setStockAdjustments((current) =>
-      [
-        {
-          id: `ADJ-${Date.now()}`,
-          sku,
-          product: product.name,
-          warehouse: product.warehouse || "北京中心仓",
-          quantity,
-          reason,
-          createdAt: new Date().toLocaleString("zh-CN", { hour12: false }),
-        },
-        ...current,
-      ].slice(0, 50),
-    );
     setShowStockForm(false);
     notify(
       `“${product.name}”可售库存已${quantity > 0 ? "增加" : "扣减"} ${Math.abs(quantity)} 件。`,
@@ -350,16 +344,18 @@ export function useMerchantAdmin(notify: (message: string) => void) {
   const confirmShip = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!shippingOrder) return;
+    if (!isMerchantAdminApiConfigured()) {
+      notify(GATEWAY_DISCONNECTED);
+      return;
+    }
     const data = new FormData(event.currentTarget);
     const carrier = String(data.get("carrier") || "顺丰速运");
     const tracking = String(data.get("tracking") || "").trim();
-    if (isMerchantAdminApiConfigured()) {
-      try {
-        await merchantAdminApi.updateFulfillment(shippingOrder.id, 2, tracking);
-      } catch (error) {
-        notify(error instanceof AdminApiError ? error.message : "发货状态同步失败。");
-        return;
-      }
+    try {
+      await merchantAdminApi.updateFulfillment(shippingOrder.id, 2, tracking);
+    } catch (error) {
+      notify(error instanceof AdminApiError ? error.message : "发货状态同步失败。");
+      return;
     }
     setOrders((current) =>
       current.map((order) =>
@@ -384,112 +380,67 @@ export function useMerchantAdmin(notify: (message: string) => void) {
       notify(`该笔分账当前为“${target.status}”，无法打款。`);
       return;
     }
-    if (isMerchantAdminApiConfigured()) {
-      try {
-        const remote = await merchantAdminApi.settleAffiliate(settlementId);
-        setAffiliateRows((current) =>
-          current.map((item) =>
-            item.id === settlementId ? affiliateFromMall(remote) : item,
-          ),
-        );
-        setRemoteStatus("ready");
-        notify(`分账单 ${remote.id} 已完成打款。`);
-      } catch (error) {
-        const apiError = error instanceof AdminApiError ? error : undefined;
-        setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
-        setRemoteMessage(apiError?.message || "打款失败，请稍后重试。");
-        notify(apiError?.message || "打款失败，请稍后重试。");
-      }
+    if (!isMerchantAdminApiConfigured()) {
+      notify(GATEWAY_DISCONNECTED);
       return;
     }
-    setAffiliateRows((current) =>
-      current.map((item) =>
-        item.id === settlementId
-          ? { ...item, status: "已结算", date: new Date().toISOString() }
-          : item,
-      ),
-    );
-    notify("分账单已完成打款（本地演示）。");
-  };
-  const toggleOffer = (id: string) => {
-    const target = offers.find((offer) => offer.id === id);
-    setOffers((current) =>
-      current.map((offer) =>
-        offer.id === id ? { ...offer, enabled: !offer.enabled } : offer,
-      ),
-    );
-    if (
-      target?.enabled &&
-      !offers.some(
-        (offer) => offer.id !== id && offer.sku === target.sku && offer.enabled,
-      )
-    ) {
-      setProducts((current) =>
-        current.map((product) =>
-          product.sku === target.sku
-            ? { ...product, status: "待发布" }
-            : product,
+    try {
+      const remote = await merchantAdminApi.settleAffiliate(settlementId);
+      setAffiliateRows((current) =>
+        current.map((item) =>
+          item.id === settlementId ? affiliateFromMall(remote) : item,
         ),
       );
-      notify("已停用最后一个节点挂载，关联 SKU 已回到待发布状态。");
+      setRemoteStatus("ready");
+      notify(`分账单 ${remote.id} 已完成打款。`);
+    } catch (error) {
+      const apiError = error instanceof AdminApiError ? error : undefined;
+      setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
+      setRemoteMessage(apiError?.message || "打款失败，请稍后重试。");
+      notify(apiError?.message || "打款失败，请稍后重试。");
+    }
+  };
+  // Mounting an offer requires the node's declared scene equipment, the
+  // route author as the commission recipient, and a 0-3000 bps commission —
+  // all revalidated server-side; the caller just supplies what it selected.
+  const createOffer = async (
+    offer: RouteOffer,
+    mount: { sceneEquipment: string; commissionBps: number; creatorId: string },
+  ) => {
+    if (!isMerchantAdminApiConfigured()) {
+      notify(GATEWAY_DISCONNECTED);
       return;
     }
-    notify("路线商品投放状态已更新。");
-  };
-  const createOffer = async (offer: RouteOffer) => {
     try {
-      if (isMerchantAdminApiConfigured()) {
-        const product = products.find((item) => item.id === offer.productId);
-        if (!product) {
-          notify("未找到需要挂载的远端商品。");
-          return;
-        }
-        await merchantAdminApi.attachNodeOffer(
-          offer.routeId,
-          offer.actionNodeId,
-          {
-            product_id: product.id,
-            sku_id: product.skuId,
-            creator_id: "merchant-admin",
-            commission_bps: 0,
-          },
-          `offer-${offer.routeId}-${offer.actionNodeId}-${product.skuId}`,
-        );
-        setRemoteStatus("ready");
+      const product = products.find((item) => item.id === offer.productId);
+      if (!product) {
+        notify("未找到需要挂载的远端商品。");
+        return;
       }
+      const remote = await merchantAdminApi.attachNodeOffer(
+        offer.routeId,
+        offer.actionNodeId,
+        {
+          product_id: product.id,
+          sku_id: product.skuId,
+          creator_id: mount.creatorId,
+          commission_bps: mount.commissionBps,
+          scene_equipment: mount.sceneEquipment,
+        },
+        `offer-${offer.routeId}-${offer.actionNodeId}-${product.skuId}-${mount.sceneEquipment}`,
+      );
       setOffers((current) => [
-        { ...offer, id: `offer-${Date.now()}` },
+        { ...offer, id: remote.id || `offer-${Date.now()}` },
         ...current,
       ]);
+      setRemoteStatus("ready");
       notify("路线商品关联已创建。");
     } catch (error) {
       const apiError = error instanceof AdminApiError ? error : undefined;
       setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
       setRemoteMessage(apiError?.message || "路线商品关联失败，请稍后重试。");
-      notify(apiError?.message || "路线商品关联失败，请稍后重试。");
+      notify(apiError?.message || "路线商品关联失败，请检查路线节点与装备后重试。");
     }
-  };
-  const removeOffer = (id: string) => {
-    const removed = offers.find((offer) => offer.id === id);
-    setOffers((current) => current.filter((offer) => offer.id !== id));
-    if (
-      removed &&
-      !offers.some(
-        (offer) =>
-          offer.id !== id && offer.sku === removed.sku && offer.enabled,
-      )
-    ) {
-      setProducts((current) =>
-        current.map((product) =>
-          product.sku === removed.sku
-            ? { ...product, status: "待发布" }
-            : product,
-        ),
-      );
-      notify("已解除最后一个启用挂载，关联 SKU 已回到待发布状态。");
-      return;
-    }
-    notify("路线商品关联已解除。商品不再在该行动节点曝光。");
   };
   const exportOrders = () =>
     downloadCsv(
@@ -530,62 +481,12 @@ export function useMerchantAdmin(notify: (message: string) => void) {
         item.date,
       ]),
     );
-  const addAffiliateRule = (rule: Omit<AffiliateRule, "id">) => {
-    const matchingRules = affiliateRules.filter(
-      (item) =>
-        item.route === rule.route &&
-        item.node === rule.node &&
-        item.equipment === rule.equipment &&
-        item.enabled,
-    );
-    if (matchingRules.some((item) => item.creator === rule.creator)) {
-      return "该创作者已配置此行动节点分账规则。";
-    }
-    const totalRate = matchingRules.reduce((sum, item) => sum + item.rate, 0);
-    if (totalRate + rule.rate > 50) {
-      return "同一行动节点的启用创作者分账比例不能超过 50%。";
-    }
-    setAffiliateRules((current) => [
-      { ...rule, id: `affiliate-rule-${Date.now()}` },
-      ...current,
-    ]);
-    return null;
-  };
-  const toggleAffiliateRule = (id: string) => {
-    const rule = affiliateRules.find((item) => item.id === id);
-    if (!rule) return "未找到分账规则。";
-    if (!rule.enabled) {
-      const totalRate = affiliateRules
-        .filter(
-          (item) =>
-            item.id !== id &&
-            item.route === rule.route &&
-            item.node === rule.node &&
-            item.equipment === rule.equipment &&
-            item.enabled,
-        )
-        .reduce((sum, item) => sum + item.rate, 0);
-      if (totalRate + rule.rate > 50) {
-        return "启用后该行动节点的创作者分账比例将超过 50%。";
-      }
-    }
-    setAffiliateRules((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, enabled: !item.enabled } : item,
-      ),
-    );
-    return null;
-  };
-  const removeAffiliateRule = (id: string) => {
-    setAffiliateRules((current) => current.filter((item) => item.id !== id));
-  };
 
   return {
     products,
     offers,
     stockAdjustments,
     affiliateSettlements: affiliateRows,
-    affiliateRules,
     filteredProducts,
     filteredOrders,
     productSearch,
@@ -612,15 +513,10 @@ export function useMerchantAdmin(notify: (message: string) => void) {
     saveProduct,
     adjustStock,
     confirmShip,
-    toggleOffer,
     createOffer,
-    removeOffer,
     exportOrders,
     exportAffiliates,
     payAffiliate,
-    addAffiliateRule,
-    toggleAffiliateRule,
-    removeAffiliateRule,
     orders,
     remoteStatus,
     remoteMessage,

@@ -120,7 +120,13 @@ fn expected_ecpm_micros(
     } else {
         declared_ctr
     };
-    let expected_value = bid_micros * ctr * finite_probability(campaign.predicted_cvr);
+    let declared_cvr = finite_probability(campaign.predicted_cvr);
+    let cvr = if calibrated {
+        serving_cvr(campaign.conversions, campaign.impressions, declared_cvr)
+    } else {
+        declared_cvr
+    };
+    let expected_value = bid_micros * ctr * cvr;
     match bookway_ad_center_api::pb::PricingModel::try_from(campaign.pricing_model) {
         Ok(bookway_ad_center_api::pb::PricingModel::Cpm) => expected_value,
         Ok(bookway_ad_center_api::pb::PricingModel::Cpc) => expected_value * 1_000.0,
@@ -136,10 +142,13 @@ fn expected_ecpm_micros(
 /// with no observed impressions keeps its declared rate untouched, so brand
 /// new stock behaves exactly like the static model.
 ///
-/// `predicted_cvr` is deliberately not calibrated: the event pipeline records
-/// impressions and clicks only — there is no conversion source yet, so any
-/// CVR posterior would be invented. When conversion events land upstream this
-/// function gains a symmetric twin against the same guardrail shape.
+/// Calibrated serving CVR: the symmetric twin of `serving_ctr` over the
+/// conversion events the ad-center ledger has recorded since migration 0083.
+/// `ecpm-v2` (and every static calibration) keeps the declared CVR.
+fn serving_cvr(conversions: u64, impressions: u64, declared: f64) -> f64 {
+    serving_ctr(conversions, impressions, declared)
+}
+
 fn serving_ctr(clicks: u64, impressions: u64, declared: f64) -> f64 {
     if impressions == 0 {
         return declared;
@@ -151,10 +160,24 @@ fn serving_ctr(clicks: u64, impressions: u64, declared: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::Domain;
+    use super::{serving_cvr, Domain};
     use crate::Config;
     use bookway_ad_center_api::pb as center;
     use bookway_ad_rank_api::pb;
+
+    #[test]
+    fn calibrated_cvr_blends_observed_conversions_with_the_declared_rate() {
+        let declared = 0.10;
+        // No delivery evidence at all: the declared rate stands untouched.
+        assert_eq!(serving_cvr(0, 0, declared), declared);
+        // Observed conversions pull the serving input toward the posterior,
+        // bounded to a factor of two of the paid claim; their absence is
+        // equally informative and pulls it down.
+        let lifted = serving_cvr(20, 100, declared);
+        assert!(lifted > declared);
+        assert!(lifted <= declared * 2.0);
+        assert!(serving_cvr(0, 100, declared) < declared);
+    }
 
     #[tokio::test]
     async fn auction_prefers_expected_value_over_bid_alone() {
@@ -409,8 +432,14 @@ mod tests {
                 .id,
             "observed-over-delivery"
         );
-        // Exactly the clamp ceiling: declared * 2.
-        assert_eq!(response.items[0].ecpm, 20_000.0);
+        // CTR hits exactly the clamp ceiling: declared * 2. The calibrated
+        // CVR twin also sees zero conversions over ten thousand impressions,
+        // which drags the CVR input to its own clamp floor (declared / 2):
+        // silence after that much delivery is real evidence, not neutrality.
+        let observed = response.items[0].ecpm;
+        assert!((observed - 10_001.0).abs() < 1.0, "observed ecpm: {observed}");
+        // The declared-only campaign has no delivery evidence, so its static
+        // declared rates reproduce the original contract exactly.
         assert_eq!(response.items[1].ecpm, 10_000.0);
     }
 

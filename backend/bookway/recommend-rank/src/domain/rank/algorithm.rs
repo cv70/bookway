@@ -192,6 +192,15 @@ fn objective_evidence(
                 .map(|o| o.action_completion_rate)
                 .unwrap_or_default(),
         ),
+        route_completion: route_completion_rate(features, &candidate.content_id),
+        domain_affinity: observed.map(|o| o.domain_affinity).unwrap_or_default(),
+        author_affinity: observed.map(|o| o.author_affinity).unwrap_or_default(),
+        impression_fatigue: observed
+            .map(|o| o.impression_fatigue)
+            .unwrap_or_default(),
+        direct_negative_feedback: observed
+            .map(|o| o.direct_negative_feedback)
+            .unwrap_or_default(),
     }
 }
 
@@ -265,15 +274,33 @@ pub(crate) fn rank(
         candidate.p_ctr = prediction.p_ctr;
         candidate.p_cvr = prediction.p_cvr;
         candidate.p_wegu = prediction.p_wegu;
+        // Serving-time feature snapshot: the trainer trains on exactly these
+        // named values, so the model can never learn from the future.
+        candidate.feature_snapshot = [
+            ("explicit_ctr", evidence.explicit_ctr),
+            ("observed_ctr", evidence.observed_ctr),
+            ("observed_cvr", evidence.observed_cvr),
+            ("observed_wegu", evidence.observed_wegu),
+            ("route_completion", evidence.route_completion),
+            ("domain_affinity", evidence.domain_affinity),
+            ("author_affinity", evidence.author_affinity),
+            ("impression_fatigue", evidence.impression_fatigue),
+            ("direct_negative_feedback", evidence.direct_negative_feedback),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), finite(value)))
+        .collect();
         if candidate_signals.domain_affinity >= 0.35 || candidate_signals.author_affinity >= 0.35 {
             candidate.reasons.push("符合你近期的行动偏好".to_string());
         }
         if candidate_signals.impression_fatigue > 0.0 {
             candidate.reasons.push("已降低重复曝光".to_string());
         }
+        // Machine-facing diagnostics: recommend-main persists these in the
+        // exposure ledger but strips the `[debug]` prefix from client reasons.
         candidate
             .reasons
-            .push(format!("{model_version} {} bucket {bucket}", weights.tag()));
+            .push(format!("[debug] {model_version} {} bucket {bucket}", weights.tag()));
     }
     candidates.sort_by(|left, right| {
         right
@@ -452,6 +479,34 @@ mod tests {
         // The wegu-heavy table must truly weight WEGU above control's pCTR sum.
         assert!(RankWeights::wegu_heavy().p_wegu > RankWeights::wegu_heavy().p_ctr);
         assert!(RankWeights::exploration().freshness > RankWeights::control().freshness);
+    }
+
+    #[test]
+    fn ranked_candidates_carry_serving_time_feature_snapshots() {
+        let ranked = rank(
+            vec![Candidate {
+                content_id: "c".to_string(),
+                score: 1.0,
+                ..Default::default()
+            }],
+            Some(&pb::RankFeatures {
+                candidates: vec![pb::CandidateFeatures {
+                    content_id: "c".to_string(),
+                    click_through_rate: 0.25,
+                    impression_fatigue: 0.4,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            0,
+            "recommend-rank-v9",
+            &HeuristicPredictor,
+        );
+
+        let snapshot = &ranked[0].feature_snapshot;
+        assert_eq!(snapshot.get("observed_ctr"), Some(&0.25));
+        assert_eq!(snapshot.get("impression_fatigue"), Some(&0.4));
+        assert_eq!(snapshot.len(), 9, "the trainer contract fixes the feature set");
     }
 
     #[test]

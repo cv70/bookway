@@ -1,0 +1,18 @@
+# Dispatches due growth reminders (journey schedules, review nudges) from
+# the reminder outbox.
+[Unit]
+Description=Bookway reminder dispatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+ExecStart=/opt/bookway/backend/target/release/bookway-reminder-dispatcher
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

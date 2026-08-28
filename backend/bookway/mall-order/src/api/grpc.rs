@@ -39,6 +39,18 @@ impl MallOrder for GrpcServer {
                 .map_err(order_error)?,
         ))
     }
+    async fn confirm_by_reference(
+        &self,
+        request: Request<pb::ConfirmByReferenceRequest>,
+    ) -> Result<Response<pb::Order>, Status> {
+        Ok(Response::new(
+            self.domain
+                .confirm_by_reference(request.into_inner())
+                .await
+                .map_err(order_error)?,
+        ))
+    }
+
     async fn pay(&self, request: Request<pb::PayRequest>) -> Result<Response<pb::Order>, Status> {
         Ok(Response::new(
             self.domain
@@ -47,6 +59,18 @@ impl MallOrder for GrpcServer {
                 .map_err(order_error)?,
         ))
     }
+    async fn promote_affiliate_settlements(
+        &self,
+        _request: Request<pb::BatchRequest>,
+    ) -> Result<Response<pb::PromoteAffiliateSettlementsResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .promote_affiliate_settlements()
+                .await
+                .map_err(order_error)?,
+        ))
+    }
+
     async fn cancel(
         &self,
         request: Request<pb::OrderRequest>,
@@ -98,6 +122,17 @@ impl MallOrder for GrpcServer {
         Ok(Response::new(
             self.domain
                 .affiliate_settlements(request.into_inner())
+                .await
+                .map_err(order_error)?,
+        ))
+    }
+    async fn list_creator_settlements(
+        &self,
+        request: Request<pb::CreatorSettlementRequest>,
+    ) -> Result<Response<pb::AffiliateSettlementListResponse>, Status> {
+        Ok(Response::new(
+            self.domain
+                .creator_settlements(request.into_inner())
                 .await
                 .map_err(order_error)?,
         ))

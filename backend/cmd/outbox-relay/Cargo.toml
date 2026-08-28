@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bookway-ad-center-api.workspace = true
 bookway-data.workspace = true
 bookway-event.workspace = true
 bookway-mall-api.workspace = true

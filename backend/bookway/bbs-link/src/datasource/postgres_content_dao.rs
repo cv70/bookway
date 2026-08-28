@@ -223,6 +223,10 @@ impl ContentDao for PostgresContentDao {
         }
 
         update_content_in_transaction(&mut tx, &content).await?;
+        // A published fork is a public fact about its source route. The
+        // counter lives in the source row's payload and is bumped inside the
+        // same transaction, so it can never drift from the fork facts.
+        bump_source_fork_count(&mut tx, &content).await?;
         if let Some(key) = idempotency_key {
             let response = serde_json::to_value(&content).map_err(DaoError::Serialization)?;
             sqlx::query(
@@ -240,4 +244,51 @@ impl ContentDao for PostgresContentDao {
         tx.commit().await.map_err(DaoError::Database)?;
         Ok(content)
     }
+}
+
+async fn bump_source_fork_count(
+    tx: &mut sqlx::PgConnection,
+    fork: &pb::Content,
+) -> Result<(), DaoError> {
+    let Some(source_route_id) = fork
+        .route_fork
+        .as_ref()
+        .map(|fork| fork.source_route_id.clone())
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some((payload,)) = sqlx::query_as::<_, (serde_json::Value,)>(
+        "SELECT payload FROM content_items WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(&source_route_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(DaoError::Database)?
+    else {
+        // The source route was deleted; its fork still publishes but there is
+        // no counter to maintain.
+        return Ok(());
+    };
+    let current = payload
+        .pointer("/post/fork_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let bump = |mut payload: serde_json::Value| {
+        if let Some(post) = payload.get_mut("post").and_then(serde_json::Value::as_object_mut) {
+            post.insert(
+                "fork_count".to_string(),
+                serde_json::json!(current.saturating_add(1)),
+            );
+        }
+        payload
+    };
+    let payload = bump(payload);
+    sqlx::query("UPDATE content_items SET payload = $2, updated_at = now() WHERE id = $1")
+        .bind(&source_route_id)
+        .bind(&payload)
+        .execute(&mut *tx)
+        .await
+        .map_err(DaoError::Database)?;
+    Ok(())
 }

@@ -1,23 +1,3 @@
-import { useEffect, useState } from "react";
-
-export function useStoredState<T>(key: string, fallback: T) {
-  const [value, setValue] = useState<T>(() => {
-    try {
-      const stored = window.localStorage.getItem(key);
-      return stored ? (JSON.parse(stored) as T) : fallback;
-    } catch {
-      return fallback;
-    }
-  });
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(key, JSON.stringify(value));
-    } catch {
-      /* storage is optional in restricted browsers */
-    }
-  }, [key, value]);
-  return [value, setValue] as const;
-}
 export function downloadCsv(
   filename: string,
   headers: string[],
@@ -35,12 +15,4 @@ export function downloadCsv(
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
-}
-export function readAsset(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
 }

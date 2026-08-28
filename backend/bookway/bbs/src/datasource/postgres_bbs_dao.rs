@@ -250,14 +250,20 @@ impl BbsDao for PostgresBbsDao {
         .fetch_all(&self.pool)
         .await
         .map_err(DaoError::Database)?;
-        let joined_route_ids = sqlx::query_scalar::<_, String>(
-            "SELECT route_id FROM route_participations WHERE user_id = $1 AND route_id = ANY($2) AND left_at IS NULL ORDER BY route_id",
-        )
-        .bind(user_id)
-        .bind(route_ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(DaoError::Database)?;
+        // Anonymous counts-only reads carry no identity, so the joined-route
+        // enrichment query is skipped entirely.
+        let joined_route_ids = if user_id.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query_scalar::<_, String>(
+                "SELECT route_id FROM route_participations WHERE user_id = $1 AND route_id = ANY($2) AND left_at IS NULL ORDER BY route_id",
+            )
+            .bind(user_id)
+            .bind(route_ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DaoError::Database)?
+        };
         Ok(pb::RouteParticipationContext {
             joined_route_ids,
             participant_counts: counts

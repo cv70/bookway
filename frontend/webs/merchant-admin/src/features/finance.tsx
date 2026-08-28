@@ -1,10 +1,5 @@
-import { FormEvent, useState } from "react";
-import {
-  actionNodes,
-  AffiliateRule,
-  AffiliateSettlement,
-  formatActionNode,
-} from "../domain";
+import { useState } from "react";
+import { AffiliateSettlement } from "../domain";
 
 const payableCents = (payable: string) => {
   const amount = Number(payable.replace(/[¥,]/g, ""));
@@ -18,25 +13,14 @@ const sumPayable = (items: AffiliateSettlement[]) =>
 
 export function Finance({
   affiliates,
-  affiliateRules,
   onPayAffiliate,
   onExportAffiliates,
-  onCreateAffiliateRule,
-  onToggleAffiliateRule,
-  onRemoveAffiliateRule,
 }: {
   affiliates: AffiliateSettlement[];
-  affiliateRules: AffiliateRule[];
   onPayAffiliate: (settlementId: string) => void;
   onExportAffiliates: () => void;
-  onCreateAffiliateRule: (rule: Omit<AffiliateRule, "id">) => string | null;
-  onToggleAffiliateRule: (id: string) => string | null;
-  onRemoveAffiliateRule: (id: string) => void;
 }) {
   const [filter, setFilter] = useState("全部");
-  const [showRuleForm, setShowRuleForm] = useState(false);
-  const [ruleError, setRuleError] = useState("");
-  const [removingRule, setRemovingRule] = useState<AffiliateRule | null>(null);
   // Statuses other than the tabs below (待生效 / 已冲正) surface under 全部.
   const rows = affiliates.filter(
     (item) =>
@@ -45,37 +29,6 @@ export function Finance({
         ? item.status === "待生效" || item.status === "待结算"
         : item.status === "已结算"),
   );
-  const submitRule = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const binding = actionNodes.find(
-      (node) => node.id === data.get("actionNodeId"),
-    );
-    const creator = String(data.get("creator") || "").trim();
-    const rate = Number(data.get("rate"));
-    if (
-      !binding ||
-      !creator ||
-      !Number.isInteger(rate) ||
-      rate < 1 ||
-      rate > 50
-    ) {
-      setRuleError("请选择行动节点，并填写 1 到 50 的整数分账比例。");
-      return;
-    }
-    const error = onCreateAffiliateRule({
-      ...binding,
-      creator,
-      rate,
-      enabled: true,
-    });
-    if (error) {
-      setRuleError(error);
-      return;
-    }
-    setRuleError("");
-    setShowRuleForm(false);
-  };
   return (
     <section className="content">
       <div className="page-heading">
@@ -185,157 +138,18 @@ export function Finance({
       <div className="panel table-panel affiliate-panel">
         <div className="panel-header">
           <div>
-            <h2>创作者分账规则</h2>
-            <p>按行动节点归因；同一节点的启用创作者分账合计不超过 50%</p>
+            <h2>分账比例说明</h2>
+            <p>
+              佣金比例在商品挂载到路线行动节点（Offer）时按 0–30% 确定并冻结进每笔订单；
+              结算金额以订单中的佣金快照为准，由平台分账台账执行，不在此单独配置。
+            </p>
           </div>
-          <button
-            className="button primary"
-            onClick={() => setShowRuleForm(true)}
-          >
-            ＋ 新增规则
-          </button>
-        </div>
-        <div className="responsive-table">
-          <table>
-            <thead>
-              <tr>
-                <th>创作者</th>
-                <th>路线 / 节点 / 场景装备</th>
-                <th>分账比例</th>
-                <th>状态</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {affiliateRules.map((rule) => (
-                <tr key={rule.id}>
-                  <td>
-                    <strong>{rule.creator}</strong>
-                  </td>
-                  <td>
-                    <strong>{rule.route}</strong>
-                    <small>
-                      {rule.node} · {rule.equipment}
-                    </small>
-                  </td>
-                  <td>{rule.rate}%</td>
-                  <td>
-                    <span
-                      className={`status ${rule.enabled ? "success" : "neutral"}`}
-                    >
-                      {rule.enabled ? "已启用" : "已停用"}
-                    </span>
-                  </td>
-                  <td>
-                    <div className="table-actions">
-                      <button
-                        className="table-action"
-                        onClick={() => {
-                          const error = onToggleAffiliateRule(rule.id);
-                          setRuleError(error || "");
-                        }}
-                      >
-                        {rule.enabled ? "停用" : "启用"}
-                      </button>
-                      <button
-                        className="table-action danger-action"
-                        onClick={() => setRemovingRule(rule)}
-                      >
-                        移除
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         </div>
       </div>
-      {showRuleForm && (
-        <AffiliateRuleDialog
-          error={ruleError}
-          close={() => {
-            setRuleError("");
-            setShowRuleForm(false);
-          }}
-          submit={submitRule}
-        />
-      )}
-      {removingRule && (
-        <RemoveAffiliateRuleDialog
-          rule={removingRule}
-          close={() => setRemovingRule(null)}
-          remove={() => {
-            onRemoveAffiliateRule(removingRule.id);
-            setRemovingRule(null);
-          }}
-        />
-      )}
     </section>
   );
 }
 
-function AffiliateRuleDialog({
-  error,
-  close,
-  submit,
-}: {
-  error: string;
-  close: () => void;
-  submit: (event: FormEvent<HTMLFormElement>) => void;
-}) {
-  return (
-    <div className="modal-backdrop">
-      <form className="modal" onSubmit={submit}>
-        <div className="dialog-header">
-          <div>
-            <p className="eyebrow">Affiliate 分账</p>
-            <h2>新增创作者规则</h2>
-          </div>
-          <button type="button" className="icon-button" onClick={close}>
-            ×
-          </button>
-        </div>
-        {error && (
-          <p className="form-error" role="alert">
-            {error}
-          </p>
-        )}
-        <label>
-          创作者
-          <input name="creator" required placeholder="例如：山野阿柠" />
-        </label>
-        <label>
-          路线行动节点与场景装备
-          <select name="actionNodeId" required>
-            {actionNodes.map((node) => (
-              <option value={node.id} key={node.id}>
-                {formatActionNode(node)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          分账比例（%）
-          <input
-            name="rate"
-            type="number"
-            min="1"
-            max="50"
-            required
-            defaultValue="10"
-          />
-        </label>
-        <div className="dialog-actions">
-          <button type="button" className="button secondary" onClick={close}>
-            取消
-          </button>
-          <button className="button primary">保存规则</button>
-        </div>
-      </form>
-    </div>
-  );
-}
 function Metric({
   label,
   value,
@@ -368,42 +182,4 @@ function Status({ value }: { value: AffiliateSettlement["status"] }) {
           ? "danger-status"
           : "neutral";
   return <span className={`status ${tone}`}>{value}</span>;
-}
-
-function RemoveAffiliateRuleDialog({
-  rule,
-  close,
-  remove,
-}: {
-  rule: AffiliateRule;
-  close: () => void;
-  remove: () => void;
-}) {
-  return (
-    <div className="modal-backdrop" onClick={close}>
-      <div className="modal" onClick={(event) => event.stopPropagation()}>
-        <div className="dialog-header">
-          <div>
-            <p className="eyebrow">Affiliate 分账</p>
-            <h2>移除分账规则</h2>
-          </div>
-          <button className="icon-button" onClick={close}>
-            ×
-          </button>
-        </div>
-        <p className="modal-copy">
-          将停止“{rule.creator}”在“{rule.route} · {rule.node}
-          ”的后续订单分账，已生成的结算明细不会修改。
-        </p>
-        <div className="dialog-actions">
-          <button className="button secondary" onClick={close}>
-            取消
-          </button>
-          <button className="button danger-button" onClick={remove}>
-            确认移除
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 }

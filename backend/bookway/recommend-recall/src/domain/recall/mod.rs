@@ -1,4 +1,5 @@
 mod candidate;
+mod semantic;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -15,6 +16,7 @@ const MAX_CURSOR_BYTES: usize = 1_024;
 const MAX_FOLLOWING_AUTHORS: usize = 5_000;
 const QUALITY_SOURCE_WEIGHT: usize = 4;
 const FRESH_SOURCE_WEIGHT: usize = 2;
+const SEMANTIC_SOURCE_WEIGHT: usize = 2;
 
 impl Domain {
     pub(crate) async fn recall(&self, request: pb::RecallRequest) -> pb::RecallResponse {
@@ -27,7 +29,7 @@ impl Domain {
     async fn recall_general(&self, request: pb::RecallRequest) -> pb::RecallResponse {
         let limit = (request.limit as usize).clamp(1, self.max_candidates);
         let seen = candidate::seen(&request.seen);
-        let sources = recall_sources(&request.interests);
+        let sources = recall_sources(&request.interests, self.semantic.is_some());
         let cursor_states = decode_cursor(&request.cursor);
         let source_names = sources
             .iter()
@@ -43,28 +45,78 @@ impl Domain {
             .filter(|source| !source_is_exhausted(&cursor_states, source))
             .cloned()
             .map(|source| {
-                let mut client = self.content_client.clone();
+                let mut content_client = self.content_client.clone();
+                let semantic_clients = self.semantic.clone();
+                let interests = request.interests.clone();
+                let user_id = request.user_id.clone();
                 let source_cursor = cursor_states.get(&source.name).cloned().flatten();
+                let window = (limit * 2).min(self.max_candidates);
                 async move {
-                    let request = bbs_link_pb::ListRequest {
-                        cursor: source_cursor.clone(),
-                        limit: Some((limit * 2).min(self.max_candidates) as u32),
-                        status: Some(bbs_link_pb::ContentStatus::Published as i32),
-                        strategy: Some(source.content_strategy.to_string()),
-                        ids: None,
-                        author_id: None,
-                        content_type: None,
-                        domain: source.domain.map(|domain| domain as i32),
-                        author_ids: Vec::new(),
-                    };
-                    let result = async {
-                        let request = bookway_runtime::grpc_service_request(request)
-                            .map_err(|error| error.to_string())?;
-                        client
-                            .list(request)
-                            .await
-                            .map(|response| response.into_inner())
-                            .map_err(|error| error.to_string())
+                    let result: Result<SourcePage, String> = async {
+                        match source.kind {
+                            SourceKind::List { strategy, domain } => {
+                                let list_request = bbs_link_pb::ListRequest {
+                                    cursor: source_cursor.clone(),
+                                    limit: Some(window as u32),
+                                    status: Some(bbs_link_pb::ContentStatus::Published as i32),
+                                    strategy: Some(strategy.to_string()),
+                                    ids: None,
+                                    author_id: None,
+                                    content_type: None,
+                                    domain: domain.map(|domain| domain as i32),
+                                    author_ids: Vec::new(),
+                                };
+                                let page = async {
+                                    let request =
+                                        bookway_runtime::grpc_service_request(list_request)
+                                            .map_err(|error| error.to_string())?;
+                                    content_client
+                                        .list(request)
+                                        .await
+                                        .map(|response| response.into_inner())
+                                        .map_err(|error| error.to_string())
+                                }
+                                .await?;
+                                Ok(SourcePage {
+                                    next_cursor: page.next_cursor,
+                                    candidates: page
+                                        .items
+                                        .into_iter()
+                                        .filter_map(|content| {
+                                            candidate::candidate_from_content(
+                                                content,
+                                                &source.name,
+                                            )
+                                        })
+                                        .collect(),
+                                })
+                            }
+                            SourceKind::Semantic => {
+                                // The cursor key is enough to prove the source
+                                // is registered; the callers above only build
+                                // this branch when the semantic clients exist.
+                                let clients = semantic_clients
+                                    .expect("registered semantic source has clients");
+                                let mut catalog = clients.catalog;
+                                let mut search_client = clients.search;
+                                let candidates = semantic::recall_semantic_page(
+                                    &mut catalog,
+                                    &mut search_client,
+                                    &mut content_client,
+                                    &user_id,
+                                    &interests,
+                                    window,
+                                )
+                                .await?;
+                                // SearchSemantic has no continuation token: the
+                                // lane is one window per feed, exhausted until a
+                                // later feed restarts recall.
+                                Ok(SourcePage {
+                                    next_cursor: None,
+                                    candidates,
+                                })
+                            }
+                        }
                     }
                     .await;
                     (source, source_cursor, result)
@@ -77,37 +129,34 @@ impl Domain {
             match result {
                 Ok(page) => {
                     next_cursor_states.insert(source.name.clone(), page.next_cursor);
-                    let fetched = page.items.len();
-                    let mut batch = Vec::with_capacity(fetched);
-                    for content in page.items {
-                        if let Some(candidate) =
-                            candidate::candidate_from_content(content, &source.name)
-                        {
-                            let mut candidate = candidate;
-                            if source.name == "two-tower" {
-                                candidate::apply_two_tower_score(
-                                    &mut candidate,
-                                    &request.interests,
-                                );
-                            }
-                            if !seen.contains(&candidate.content_id) {
-                                batch.push(SourcedCandidate {
-                                    content_id: candidate.content_id.clone(),
-                                    recall_score: candidate.recall_score,
-                                });
-                            }
-                            merge_candidate(&mut candidates, candidate);
-                        }
+                    let fetched = page.candidates.len();
+                    let mut batch: Vec<pb::Candidate> = page
+                        .candidates
+                        .into_iter()
+                        .filter(|candidate| !seen.contains(&candidate.content_id))
+                        .collect();
+                    if source.name == "quality" || source.name == "semantic" {
+                        candidate::assign_rank_retrieval_strength(&mut batch);
                     }
-                    sort_and_deduplicate_batch(&mut batch);
+                    let mut sourced_batch = batch
+                        .iter()
+                        .map(|candidate| SourcedCandidate {
+                            content_id: candidate.content_id.clone(),
+                            recall_score: candidate.recall_score,
+                        })
+                        .collect::<Vec<_>>();
+                    sort_and_deduplicate_batch(&mut sourced_batch);
+                    for candidate in batch {
+                        merge_candidate(&mut candidates, candidate);
+                    }
                     tracing::debug!(
                         source = %source.name,
                         fetched,
-                        eligible = batch.len(),
+                        eligible = sourced_batch.len(),
                         exhausted = source_is_exhausted(&next_cursor_states, &source),
                         "recall source completed"
                     );
-                    source_batches.insert(source.name.clone(), batch);
+                    source_batches.insert(source.name.clone(), sourced_batch);
                 }
                 Err(error) => {
                     degraded = true;
@@ -268,7 +317,7 @@ fn following_list_request(
         // has not returned to its caller yet.
         limit: Some(limit as u32),
         status: Some(bbs_link_pb::ContentStatus::Published as i32),
-        strategy: Some(following_recall_source().content_strategy.to_string()),
+        strategy: following_recall_source().kind.list_strategy().map(str::to_string),
         ids: None,
         author_id: None,
         content_type: None,
@@ -277,17 +326,45 @@ fn following_list_request(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceKind {
+    /// A paged BBS Link listing: a curated strategy index, optionally scoped
+    /// to one growth domain.
+    List {
+        strategy: &'static str,
+        domain: Option<bbs_link_pb::GrowthDomain>,
+    },
+    /// One embedding-backed nearest-document window from BBS Search's
+    /// `SearchSemantic`, hydrated against BBS Link's public projection.
+    Semantic,
+}
+
+impl SourceKind {
+    fn list_strategy(self) -> Option<&'static str> {
+        match self {
+            Self::List { strategy, .. } => Some(strategy),
+            Self::Semantic => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct RecallSource {
     name: String,
-    content_strategy: &'static str,
-    domain: Option<bbs_link_pb::GrowthDomain>,
+    kind: SourceKind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct SourcedCandidate {
     content_id: String,
     recall_score: f64,
+}
+
+/// One recall window as produced by a source: its mapped candidates plus the
+/// continuation token for the next window (`None` once the source is done).
+struct SourcePage {
+    candidates: Vec<pb::Candidate>,
+    next_cursor: Option<String>,
 }
 
 /// A source has reached the end only when the cursor explicitly records a
@@ -392,22 +469,21 @@ fn decode_following_cursor(
     }
 }
 
-fn recall_sources(interests: &[i32]) -> Vec<RecallSource> {
+fn recall_sources(interests: &[i32], semantic_enabled: bool) -> Vec<RecallSource> {
     let mut sources = vec![
         RecallSource {
             name: "quality".to_string(),
-            content_strategy: "quality",
-            domain: None,
-        },
-        RecallSource {
-            name: "two-tower".to_string(),
-            content_strategy: "quality",
-            domain: None,
+            kind: SourceKind::List {
+                strategy: "quality",
+                domain: None,
+            },
         },
         RecallSource {
             name: "fresh".to_string(),
-            content_strategy: "fresh",
-            domain: None,
+            kind: SourceKind::List {
+                strategy: "fresh",
+                domain: None,
+            },
         },
     ];
     let domains = interests
@@ -417,8 +493,16 @@ fn recall_sources(interests: &[i32]) -> Vec<RecallSource> {
     for interest in domains {
         sources.push(RecallSource {
             name: format!("interest:{}", domain_name(interest)),
-            content_strategy: "quality",
-            domain: Some(interest),
+            kind: SourceKind::List {
+                strategy: "quality",
+                domain: Some(interest),
+            },
+        });
+    }
+    if semantic_enabled {
+        sources.push(RecallSource {
+            name: "semantic".to_string(),
+            kind: SourceKind::Semantic,
         });
     }
     sources
@@ -427,8 +511,10 @@ fn recall_sources(interests: &[i32]) -> Vec<RecallSource> {
 fn following_recall_source() -> RecallSource {
     RecallSource {
         name: "following-fresh".to_string(),
-        content_strategy: "fresh",
-        domain: None,
+        kind: SourceKind::List {
+            strategy: "fresh",
+            domain: None,
+        },
     }
 }
 
@@ -492,8 +578,8 @@ fn select_source_mixed_candidates(
     let mut selected = Vec::with_capacity(limit);
     let mut source_offsets = BTreeMap::new();
 
-    // Reserve the first available placement for fresh and interest recall so
-    // a high-scoring quality index cannot eliminate all exploration.
+    // Reserve the first available placement for fresh, semantic and interest
+    // recall so a high-scoring quality index cannot eliminate all exploration.
     for source in sources
         .iter()
         .filter(|source| is_exploration_source(source))
@@ -573,13 +659,15 @@ fn take_next_source_candidate(
 }
 
 fn is_exploration_source(source: &RecallSource) -> bool {
-    source.name == "fresh" || source.name == "two-tower" || source.name.starts_with("interest:")
+    source.name == "fresh"
+        || source.name == "semantic"
+        || source.name.starts_with("interest:")
 }
 
 fn source_mix_weight(source: &RecallSource) -> usize {
     match source.name.as_str() {
         "quality" => QUALITY_SOURCE_WEIGHT,
-        "two-tower" => 2,
+        "semantic" => SEMANTIC_SOURCE_WEIGHT,
         "fresh" => FRESH_SOURCE_WEIGHT,
         _ if source.name.starts_with("interest:") => 1,
         _ => 1,
@@ -628,32 +716,66 @@ fn domain_name(domain: bbs_link_pb::GrowthDomain) -> &'static str {
 mod tests {
     use std::collections::{BTreeMap, HashMap};
 
-    use bookway_bbs_link_api::pb::{GrowthDomain, bbs_link_client::BbsLinkClient};
+    use bookway_bbs_link_api::pb::{
+        self as bbs_link_list,
+        Content, ContentPage, GrowthDomain, PostSummary, PublicContentSummaries,
+        PublicContentSummary, PublicContentSummariesRequest,
+        bbs_link_client::BbsLinkClient,
+        bbs_link_server::{BbsLink, BbsLinkServer},
+    };
+    use bookway_bbs_search_api::pb::{
+        self as search_stub,
+        SearchResponse, SearchResult, SearchResultType, SearchSemanticRequest,
+        bbs_search_client::BbsSearchClient,
+        bbs_search_server::{BbsSearch, BbsSearchServer},
+    };
+    use bookway_knowledge_catalog_api::pb::{
+        self as catalog_search,
+        EmbedTextsRequest, EmbedTextsResponse, TextEmbedding,
+        knowledge_catalog_client::KnowledgeCatalogClient,
+        knowledge_catalog_server::{KnowledgeCatalog, KnowledgeCatalogServer},
+    };
     use tonic::transport::Endpoint;
+    use tonic::{Request, Response, Status};
 
     use super::{
-        Domain, SourcedCandidate, decode_cursor, decode_following_cursor, encode_cursor,
-        encode_following_cursor, following_author_set_fingerprint, following_list_request,
-        following_recall_source, merge_candidate, normalize_following_author_ids, recall_sources,
-        select_source_mixed_candidates, sort_and_deduplicate_batch, source_is_exhausted,
+        Domain, SourcedCandidate, SourceKind, decode_cursor, decode_following_cursor,
+        encode_cursor, encode_following_cursor, following_author_set_fingerprint,
+        following_list_request, following_recall_source, merge_candidate,
+        normalize_following_author_ids, recall_sources, select_source_mixed_candidates,
+        sort_and_deduplicate_batch, source_is_exhausted,
     };
-    use crate::{api::pb, conf::Config};
+    use crate::{
+        api::pb,
+        conf::{Config, SourceBlend},
+        datasource::semantic::SemanticRecallDataSource,
+    };
 
-    fn recall_domain(bbs_link_url: &str) -> Domain {
+    fn recall_domain(bbs_link_url: &str, semantic: Option<SemanticRecallDataSource>) -> Domain {
         Domain {
             config: Config {
                 listen_addr: "127.0.0.1:0".parse().expect("valid address"),
                 bbs_link_url: bbs_link_url.to_string(),
                 max_candidates: 20,
-                source_blend: super::SourceBlend::BalancedV1,
+                source_blend: SourceBlend::BalancedV1,
+                semantic: None,
             },
             content_client: BbsLinkClient::new(
                 Endpoint::from_shared(bbs_link_url.to_string())
                     .expect("valid BBS Link URL")
                     .connect_lazy(),
             ),
+            semantic,
             max_candidates: 20,
         }
+    }
+
+    fn lazy_client<C>(url: &str, new_client: fn(tonic::transport::Channel) -> C) -> C {
+        new_client(
+            Endpoint::from_shared(url.to_string())
+                .expect("valid test endpoint")
+                .connect_lazy(),
+        )
     }
 
     fn recall_candidate(
@@ -686,15 +808,35 @@ mod tests {
     #[test]
     fn adds_each_valid_interest_source_once() {
         let sources =
-            recall_sources(&[GrowthDomain::Travel as i32, GrowthDomain::Travel as i32, 99]);
+            recall_sources(&[GrowthDomain::Travel as i32, GrowthDomain::Travel as i32, 99], false);
 
-        assert_eq!(sources.len(), 4);
-        assert_eq!(sources[3].domain, Some(GrowthDomain::Travel));
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[2].name, "interest:travel");
+        assert_eq!(
+            sources[2].kind,
+            SourceKind::List {
+                strategy: "quality",
+                domain: Some(GrowthDomain::Travel),
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_source_is_registered_only_when_configured() {
+        let without = recall_sources(&[GrowthDomain::Travel as i32], false);
+        assert!(without.iter().all(|source| source.name != "semantic"));
+
+        let with = recall_sources(&[], true);
+        let semantic = with
+            .iter()
+            .find(|source| source.name == "semantic")
+            .expect("semantic source registered");
+        assert_eq!(semantic.kind, SourceKind::Semantic);
     }
 
     #[test]
     fn source_mix_reserves_fresh_and_interest_candidates_before_quality_fill() {
-        let sources = recall_sources(&[GrowthDomain::Travel as i32]);
+        let sources = recall_sources(&[GrowthDomain::Travel as i32], false);
         let candidates = HashMap::from([
             (
                 "quality-1".to_string(),
@@ -758,8 +900,47 @@ mod tests {
     }
 
     #[test]
+    fn source_mix_reserves_a_semantic_exploration_placement() {
+        let sources = recall_sources(&[], true);
+        let candidates = HashMap::from([
+            (
+                "quality-1".to_string(),
+                recall_candidate("quality-1", "recall:quality", 1.0, &["优质"]),
+            ),
+            (
+                "quality-2".to_string(),
+                recall_candidate("quality-2", "recall:quality", 0.9, &["优质"]),
+            ),
+            (
+                "semantic-1".to_string(),
+                recall_candidate("semantic-1", "recall:semantic", 0.5, &["符合你的兴趣语义"]),
+            ),
+        ]);
+        let source_batches = BTreeMap::from([
+            (
+                "quality".to_string(),
+                source_batch(&[("quality-1", 1.0), ("quality-2", 0.9)]),
+            ),
+            (
+                "semantic".to_string(),
+                source_batch(&[("semantic-1", 0.5)]),
+            ),
+        ]);
+
+        let selected = select_source_mixed_candidates(&sources, candidates, &source_batches, 2);
+        let selected_ids = selected
+            .into_iter()
+            .map(|candidate| candidate.content_id)
+            .collect::<Vec<_>>();
+
+        // The semantic lane's reserved placement survives a dominant quality
+        // index, then quality fills the remaining capacity.
+        assert_eq!(selected_ids, ["semantic-1", "quality-1"]);
+    }
+
+    #[test]
     fn source_mix_deduplicates_candidates_and_preserves_all_source_reasons() {
-        let sources = recall_sources(&[GrowthDomain::Travel as i32]);
+        let sources = recall_sources(&[GrowthDomain::Travel as i32], false);
         let mut candidates = HashMap::new();
         merge_candidate(
             &mut candidates,
@@ -811,7 +992,7 @@ mod tests {
 
     #[test]
     fn source_mix_fills_from_healthy_quality_when_exploration_sources_are_sparse() {
-        let sources = recall_sources(&[GrowthDomain::Travel as i32]);
+        let sources = recall_sources(&[GrowthDomain::Travel as i32], false);
         let candidates = HashMap::from([
             (
                 "quality-1".to_string(),
@@ -862,10 +1043,20 @@ mod tests {
 
     #[test]
     fn keeps_an_independent_position_for_each_recall_source() {
-        let sources = recall_sources(&[GrowthDomain::Learning as i32, GrowthDomain::Travel as i32]);
+        let sources = recall_sources(
+            &[GrowthDomain::Learning as i32, GrowthDomain::Travel as i32],
+            true,
+        );
+        let by_name = |name: &str| {
+            sources
+                .iter()
+                .find(|source| source.name == name)
+                .cloned()
+                .expect("registered source")
+        };
         let cursor = encode_cursor(&BTreeMap::from([
             ("quality".to_string(), Some("60".to_string())),
-            ("two-tower".to_string(), None),
+            ("semantic".to_string(), None),
             ("fresh".to_string(), None),
             ("interest:learning".to_string(), Some("20".to_string())),
         ]));
@@ -873,8 +1064,9 @@ mod tests {
         let states = decode_cursor(&cursor);
         assert_eq!(states["quality"].as_deref(), Some("60"));
         assert_eq!(states["interest:learning"].as_deref(), Some("20"));
-        assert!(source_is_exhausted(&states, &sources[2]));
-        assert!(!source_is_exhausted(&states, &sources[4]));
+        assert!(source_is_exhausted(&states, &by_name("fresh")));
+        assert!(source_is_exhausted(&states, &by_name("semantic")));
+        assert!(!source_is_exhausted(&states, &by_name("interest:travel")));
     }
 
     #[test]
@@ -888,7 +1080,13 @@ mod tests {
         let source = following_recall_source();
 
         assert_eq!(source.name, "following-fresh");
-        assert_eq!(source.content_strategy, "fresh");
+        assert_eq!(
+            source.kind,
+            SourceKind::List {
+                strategy: "fresh",
+                domain: None,
+            }
+        );
         assert_eq!(
             normalize_following_author_ids(vec![
                 " author-b ".to_string(),
@@ -976,7 +1174,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_following_set_is_an_empty_timeline_not_a_global_fallback() {
-        let response = recall_domain("http://127.0.0.1:18004")
+        let response = recall_domain("http://127.0.0.1:18004", None)
             .recall(pb::RecallRequest {
                 following_only: true,
                 ..Default::default()
@@ -987,5 +1185,443 @@ mod tests {
         assert!(response.next_cursor.is_empty());
         assert_eq!(response.sources, vec!["recall:following-fresh"]);
         assert!(!response.degraded);
+    }
+
+    // --- Mock upstreams for the semantic lane integration tests. ---
+
+    #[derive(Clone, Default)]
+    struct MockBbsLink {
+        listings: HashMap<String, Vec<Content>>,
+        summaries: Vec<PublicContentSummary>,
+    }
+
+    impl MockBbsLink {
+        fn with_listing(strategy: &str, items: Vec<Content>) -> Self {
+            Self {
+                listings: HashMap::from([(strategy.to_string(), items)]),
+                summaries: Vec::new(),
+            }
+        }
+
+        fn with_summaries(mut self, summaries: Vec<PublicContentSummary>) -> Self {
+            self.summaries = summaries;
+            self
+        }
+    }
+
+    #[tonic::async_trait]
+    impl BbsLink for MockBbsLink {
+        async fn list(
+            &self,
+            request: Request<bbs_link_list::ListRequest>,
+        ) -> Result<Response<ContentPage>, Status> {
+            let request = request.into_inner();
+            // Only the global strategy listings serve items in these tests;
+            // domain-scoped interest listings stay empty on purpose.
+            let items = match (request.strategy.as_deref(), request.domain) {
+                (Some(strategy), None) => self.listings.get(strategy).cloned().unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            Ok(Response::new(ContentPage {
+                items,
+                next_cursor: None,
+                total_estimate: 0,
+            }))
+        }
+
+        async fn get_public_summaries(
+            &self,
+            request: Request<PublicContentSummariesRequest>,
+        ) -> Result<Response<PublicContentSummaries>, Status> {
+            let ids = request.into_inner().ids;
+            Ok(Response::new(PublicContentSummaries {
+                items: self
+                    .summaries
+                    .iter()
+                    .filter(|summary| ids.contains(&summary.id))
+                    .cloned()
+                    .collect(),
+            }))
+        }
+
+        async fn get(
+            &self,
+            _request: Request<bbs_link_list::IdRequest>,
+        ) -> Result<Response<Content>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn get_public(
+            &self,
+            _request: Request<bbs_link_list::IdRequest>,
+        ) -> Result<Response<Content>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn create(
+            &self,
+            _request: Request<bbs_link_list::CreateRequest>,
+        ) -> Result<Response<Content>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn update(
+            &self,
+            _request: Request<bbs_link_list::UpdateRequest>,
+        ) -> Result<Response<Content>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn publish(
+            &self,
+            _request: Request<bbs_link_list::PublishRequest>,
+        ) -> Result<Response<Content>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn restrict(
+            &self,
+            _request: Request<bbs_link_list::RestrictRequest>,
+        ) -> Result<Response<Content>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn restore(
+            &self,
+            _request: Request<bbs_link_list::RestoreRequest>,
+        ) -> Result<Response<Content>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn accept_answer(
+            &self,
+            _request: Request<bbs_link_list::AcceptAnswerRequest>,
+        ) -> Result<Response<Content>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn fork_route(
+            &self,
+            _request: Request<bbs_link_list::ForkRouteRequest>,
+        ) -> Result<Response<Content>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct MockCatalog {
+        fail_embedding: bool,
+    }
+
+    #[tonic::async_trait]
+    impl KnowledgeCatalog for MockCatalog {
+        async fn embed_texts(
+            &self,
+            request: Request<EmbedTextsRequest>,
+        ) -> Result<Response<EmbedTextsResponse>, Status> {
+            if self.fail_embedding {
+                return Err(Status::unavailable("embedding provider down"));
+            }
+            let request = request.into_inner();
+            assert!(!request.texts.is_empty(), "embedding needs a query text");
+            Ok(Response::new(EmbedTextsResponse {
+                model: "test-embeddings".to_string(),
+                embeddings: request
+                    .texts
+                    .into_iter()
+                    .map(|_| TextEmbedding {
+                        values: vec![0.1, 0.2, 0.3, 0.4],
+                    })
+                    .collect(),
+            }))
+        }
+
+        async fn upsert_public_resource(
+            &self,
+            _request: Request<catalog_search::UpsertPublicResourceRequest>,
+        ) -> Result<Response<catalog_search::Resource>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn search(
+            &self,
+            _request: Request<catalog_search::SearchRequest>,
+        ) -> Result<Response<catalog_search::SearchResponse>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn get(
+            &self,
+            _request: Request<catalog_search::GetRequest>,
+        ) -> Result<Response<catalog_search::Resource>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn list_node_resources(
+            &self,
+            _request: Request<catalog_search::ListNodeResourcesRequest>,
+        ) -> Result<Response<catalog_search::ListNodeResourcesResponse>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn attach_node_resource(
+            &self,
+            _request: Request<catalog_search::AttachNodeResourceRequest>,
+        ) -> Result<Response<catalog_search::RouteNodeResourceAttachment>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn detach_node_resource(
+            &self,
+            _request: Request<catalog_search::DetachNodeResourceRequest>,
+        ) -> Result<Response<catalog_search::DetachNodeResourceResponse>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn retrieve_rag_context(
+            &self,
+            _request: Request<catalog_search::RetrieveRagContextRequest>,
+        ) -> Result<Response<catalog_search::RetrieveRagContextResponse>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn upsert_rag_embedding(
+            &self,
+            _request: Request<catalog_search::UpsertRagEmbeddingRequest>,
+        ) -> Result<Response<catalog_search::UpsertRagEmbeddingResponse>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn search_rag_embeddings(
+            &self,
+            _request: Request<catalog_search::SearchRagEmbeddingsRequest>,
+        ) -> Result<Response<catalog_search::SearchRagEmbeddingsResponse>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct MockBbsSearch {
+        hits: Vec<SearchResult>,
+    }
+
+    #[tonic::async_trait]
+    impl BbsSearch for MockBbsSearch {
+        async fn search_semantic(
+            &self,
+            request: Request<SearchSemanticRequest>,
+        ) -> Result<Response<SearchResponse>, Status> {
+            let request = request.into_inner();
+            assert!(!request.query_vector.is_empty(), "vector is required");
+            Ok(Response::new(SearchResponse {
+                query: request.q,
+                items: self.hits.clone(),
+                ..Default::default()
+            }))
+        }
+
+        async fn search(
+            &self,
+            _request: Request<search_stub::SearchRequest>,
+        ) -> Result<Response<SearchResponse>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+
+        async fn suggestions(
+            &self,
+            _request: Request<search_stub::SuggestionsRequest>,
+        ) -> Result<Response<search_stub::SuggestionsResponse>, Status> {
+            Err(Status::unimplemented("not used by recall tests"))
+        }
+    }
+
+    async fn spawn_bbs_link(mock: MockBbsLink) -> String {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind test port");
+        let address = listener.local_addr().expect("read test address");
+        drop(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(BbsLinkServer::new(mock))
+                .serve(address)
+                .await
+                .expect("run bbs-link test server");
+        });
+        format!("http://{address}")
+    }
+
+    async fn spawn_catalog(mock: MockCatalog) -> String {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind test port");
+        let address = listener.local_addr().expect("read test address");
+        drop(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(KnowledgeCatalogServer::new(mock))
+                .serve(address)
+                .await
+                .expect("run knowledge-catalog test server");
+        });
+        format!("http://{address}")
+    }
+
+    async fn spawn_bbs_search(mock: MockBbsSearch) -> String {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind test port");
+        let address = listener.local_addr().expect("read test address");
+        drop(listener);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(BbsSearchServer::new(mock))
+                .serve(address)
+                .await
+                .expect("run bbs-search test server");
+        });
+        format!("http://{address}")
+    }
+
+    fn semantic_clients(catalog_url: &str, search_url: &str) -> SemanticRecallDataSource {
+        SemanticRecallDataSource {
+            catalog: lazy_client(catalog_url, KnowledgeCatalogClient::new),
+            search: lazy_client(search_url, BbsSearchClient::new),
+        }
+    }
+
+    fn content(id: &str) -> Content {
+        Content {
+            id: id.to_string(),
+            post: Some(PostSummary {
+                id: id.to_string(),
+                ..Default::default()
+            }),
+            quality_score: 0.9,
+            ..Default::default()
+        }
+    }
+
+    fn summary(id: &str) -> PublicContentSummary {
+        PublicContentSummary {
+            id: id.to_string(),
+            post: Some(PostSummary {
+                id: id.to_string(),
+                ..Default::default()
+            }),
+            author_id: format!("author-{id}"),
+            quality_score: 0.6,
+            ..Default::default()
+        }
+    }
+
+    fn hit(id: &str, result_type: SearchResultType) -> SearchResult {
+        SearchResult {
+            id: id.to_string(),
+            result_type: result_type as i32,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_lane_joins_knn_hits_with_authoritative_summaries() {
+        let bbs_link = spawn_bbs_link(
+            MockBbsLink::with_listing("quality", vec![content("quality-1")])
+                .with_summaries(vec![summary("semantic-1"), summary("semantic-2")]),
+        )
+        .await;
+        let catalog = spawn_catalog(MockCatalog::default()).await;
+        let bbs_search = spawn_bbs_search(MockBbsSearch {
+            hits: vec![
+                hit("semantic-2", SearchResultType::Journey),
+                hit("semantic-1", SearchResultType::Post),
+            ],
+        })
+        .await;
+        let domain = recall_domain(
+            &bbs_link,
+            Some(semantic_clients(&catalog, &bbs_search)),
+        );
+
+        let response = domain
+            .recall(pb::RecallRequest {
+                user_id: "user-1".to_string(),
+                interests: vec![GrowthDomain::Travel as i32],
+                limit: 10,
+                ..Default::default()
+            })
+            .await;
+
+        assert_eq!(
+            response.sources,
+            [
+                "recall:quality",
+                "recall:fresh",
+                "recall:interest:travel",
+                "recall:semantic",
+            ]
+        );
+        assert!(!response.degraded);
+        let semantic = response
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.source == "recall:semantic")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            semantic
+                .iter()
+                .map(|candidate| candidate.content_id.as_str())
+                .collect::<Vec<_>>(),
+            ["semantic-2", "semantic-1"],
+        );
+        // kNN order becomes rank-based retrieval strength inside the lane.
+        assert!(semantic[0].recall_score > semantic[1].recall_score);
+        assert!(
+            semantic
+                .iter()
+                .all(|candidate| candidate.reasons == ["符合你的兴趣语义"])
+        );
+        assert!(
+            response
+                .candidates
+                .iter()
+                .any(|candidate| candidate.content_id == "quality-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_lane_failure_degrades_the_page_but_keeps_listing_sources() {
+        let bbs_link = spawn_bbs_link(
+            MockBbsLink::with_listing("quality", vec![content("quality-1")]),
+        )
+        .await;
+        let catalog = spawn_catalog(MockCatalog {
+            fail_embedding: true,
+        })
+        .await;
+        let bbs_search = spawn_bbs_search(MockBbsSearch::default()).await;
+        let domain = recall_domain(
+            &bbs_link,
+            Some(semantic_clients(&catalog, &bbs_search)),
+        );
+
+        let response = domain
+            .recall(pb::RecallRequest {
+                user_id: "user-1".to_string(),
+                interests: vec![GrowthDomain::Travel as i32],
+                limit: 10,
+                ..Default::default()
+            })
+            .await;
+
+        assert!(response.degraded);
+        assert_eq!(
+            response
+                .candidates
+                .iter()
+                .map(|candidate| candidate.content_id.as_str())
+                .collect::<Vec<_>>(),
+            ["quality-1"],
+        );
+        assert!(
+            response
+                .candidates
+                .iter()
+                .all(|candidate| candidate.source != "recall:semantic")
+        );
     }
 }

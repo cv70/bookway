@@ -5,6 +5,7 @@ use std::{
 };
 
 use bookway_ad_main_api::pb::{self as ad_pb, ad_main_client::AdMainClient};
+use bookway_bbs_api::pb::{self as bbs_participation_pb, bbs_client::BbsClient};
 use bookway_bbs_link_api::pb::{self as bbs_link_pb, bbs_link_client::BbsLinkClient};
 use bookway_bbs_search_api::pb::{self, bbs_search_client::BbsSearchClient};
 use bookway_feature_main_api::pb::{self as feature_pb, feature_main_client::FeatureMainClient};
@@ -40,6 +41,13 @@ const QUERY_REWRITE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const BBS_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_500);
 const BBS_LINK_TIMEOUT: Duration = Duration::from_millis(1_500);
 const KNOWLEDGE_CATALOG_TIMEOUT: Duration = Duration::from_millis(1_500);
+/// Join counts are cosmetic social proof: one batched counts-only read that
+/// must never crowd out ranking within the request budget.
+const BBS_ROUTE_CONTEXT_TIMEOUT: Duration = Duration::from_millis(40);
+/// Semantic recall is an additive lane; both its RPCs get tight budgets so a
+/// slow embedding provider can never dominate the request.
+const SEMANTIC_EMBED_TIMEOUT: Duration = Duration::from_millis(60);
+const SEMANTIC_SEARCH_TIMEOUT: Duration = Duration::from_millis(60);
 const FEATURE_RERANK_TIMEOUT: Duration = Duration::from_millis(35);
 const MAX_FEATURE_RERANK_CANDIDATES: usize = 200;
 const AD_DECISION_TIMEOUT: Duration = Duration::from_millis(25);
@@ -214,6 +222,7 @@ pub(crate) struct Domain {
     pub(crate) config: Config,
     search_client: BbsSearchClient<tonic::transport::Channel>,
     content_client: Option<BbsLinkClient<tonic::transport::Channel>>,
+    bbs_client: Option<BbsClient<tonic::transport::Channel>>,
     resource_client: Option<KnowledgeCatalogClient<tonic::transport::Channel>>,
     feature_client: Option<FeatureMainClient<tonic::transport::Channel>>,
     ad_main: Option<AdMainClient<tonic::transport::Channel>>,
@@ -227,6 +236,7 @@ impl Domain {
         config: Config,
         search_client: BbsSearchClient<tonic::transport::Channel>,
         content_client: BbsLinkClient<tonic::transport::Channel>,
+        bbs_client: Option<BbsClient<tonic::transport::Channel>>,
         resource_client: KnowledgeCatalogClient<tonic::transport::Channel>,
         feature_client: Option<FeatureMainClient<tonic::transport::Channel>>,
         ad_main: Option<AdMainClient<tonic::transport::Channel>>,
@@ -252,6 +262,7 @@ impl Domain {
             config,
             search_client,
             content_client: Some(content_client),
+            bbs_client,
             resource_client: Some(resource_client),
             feature_client,
             ad_main,
@@ -272,6 +283,7 @@ impl Domain {
                 listen_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
                 bbs_search_url: String::new(),
                 bbs_link_url: String::new(),
+                bbs_url: String::new(),
                 knowledge_catalog_url: String::new(),
                 feature_main_url: String::new(),
                 ad_main_url: String::new(),
@@ -280,6 +292,7 @@ impl Domain {
             // Unit tests supply already-authoritative candidates directly. Production
             // construction above always installs the BBS Link public-fact client.
             content_client: None,
+            bbs_client: None,
             resource_client: None,
             feature_client: None,
             ad_main: None,
@@ -381,6 +394,8 @@ impl Domain {
                 .await?;
         }
 
+        self.hydrate_route_join_counts(&mut page, request.user_id.as_deref())
+            .await;
         session.delivered_count += page.len();
         let mut ad_degraded = false;
         // Search ads are a first-page contextual mix. Organic exposure is
@@ -552,10 +567,10 @@ impl Domain {
             route_id: context.route_id.clone(),
             action_node_id: context.action_node_id.clone(),
             scene_equipment: Some(context.scene_equipment.clone()),
-            // No observable delivery context reaches search mixing yet;
-            // unknown context serves unrestricted campaigns only.
-            geo_region: String::new(),
-            device_os: String::new(),
+            // Edge-derived delivery context; empty values fail closed to
+            // unrestricted campaigns only (ad-center matching rule).
+            geo_region: request.geo_region.clone().unwrap_or_default(),
+            device_os: request.device_os.clone().unwrap_or_default(),
         };
         let mut client = ad_main.clone();
         let request = bookway_runtime::grpc_service_request(rpc)
@@ -662,6 +677,11 @@ impl Domain {
             let recall_result = match recall.source {
                 RecallSource::Bbs => self.search_bbs(source_request).await,
                 RecallSource::Resource => self.search_resources(source_request).await,
+                RecallSource::Semantic => {
+                    // One-shot lane: the query vector is bound to this round's
+                    // plan, so a continuation would only repeat candidates.
+                    self.search_semantic_recall(request, plan).await
+                }
             };
             match recall_result {
                 Ok(response) => {
@@ -813,6 +833,81 @@ impl Domain {
         Ok(resource_search_response(query, response))
     }
 
+    /// Embeds the original query through the catalog provider and asks
+    /// BBS Search for the nearest indexed documents. Both RPCs are optional:
+    /// any failure yields an empty lane rather than a degraded search.
+    async fn search_semantic_recall(
+        &self,
+        request: &pb::SearchRequest,
+        plan: &SearchPlan,
+    ) -> Result<pb::SearchResponse, SearchMainError> {
+        let Some(catalog) = self.resource_client.as_ref() else {
+            return Ok(pb::SearchResponse::default());
+        };
+        let mut client = catalog.clone();
+        let embed_request =
+            bookway_runtime::grpc_service_request(catalog_pb::EmbedTextsRequest {
+                texts: vec![plan.original_query.clone()],
+            })
+            .map_err(|error| SearchMainError::ResourceUpstream {
+                code: tonic::Code::Internal,
+                message: error.to_string(),
+            })?;
+        let embeddings =
+            match tokio::time::timeout(SEMANTIC_EMBED_TIMEOUT, client.embed_texts(embed_request))
+                .await
+            {
+                Ok(Ok(response)) => response.into_inner(),
+                Ok(Err(error)) => {
+                    tracing::debug!(code = %error.code(), "query embedding degraded");
+                    return Ok(pb::SearchResponse::default());
+                }
+                Err(_) => {
+                    tracing::debug!("query embedding timed out");
+                    return Ok(pb::SearchResponse::default());
+                }
+            };
+        let Some(query_vector) = embeddings
+            .embeddings
+            .into_iter()
+            .next()
+            .map(|embedding| embedding.values)
+            .filter(|values| !values.is_empty())
+        else {
+            return Ok(pb::SearchResponse::default());
+        };
+        let mut bbs = self.search_client.clone();
+        let search_request = bookway_runtime::grpc_service_request(pb::SearchSemanticRequest {
+            q: plan.original_query.clone(),
+            query_vector,
+            limit: Some(RECALL_PAGE_SIZE as u32),
+            user_id: request.user_id.clone(),
+            excluded_author_ids: request.excluded_author_ids.clone(),
+            // The semantic lane follows the same typed routing as the lexical
+            // BBS lane, so entity tabs and entity-intent queries stay typed.
+            search_type: Some(plan.bbs_search_type as i32),
+        })
+        .map_err(|error| SearchMainError::Upstream {
+            code: tonic::Code::Internal,
+            message: error.to_string(),
+        })?;
+        let response =
+            match tokio::time::timeout(SEMANTIC_SEARCH_TIMEOUT, bbs.search_semantic(search_request))
+                .await
+            {
+                Ok(Ok(response)) => response.into_inner(),
+                Ok(Err(error)) => {
+                    tracing::debug!(code = %error.code(), "semantic recall degraded");
+                    return Ok(pb::SearchResponse::default());
+                }
+                Err(_) => {
+                    tracing::debug!("semantic recall timed out");
+                    return Ok(pb::SearchResponse::default());
+                }
+            };
+        Ok(response)
+    }
+
     async fn revalidate_pending(
         &self,
         candidates: Vec<pb::SearchResult>,
@@ -848,6 +943,62 @@ impl Domain {
         })?
         .into_inner();
         reconcile_pending_results(candidates, summaries)
+    }
+
+    /// Replaces the index-stored join counts on route results with the live
+    /// participation facts owned by BBS. The read is counts-only (anonymous
+    /// when the searcher is not signed in) and fails open: a degraded BBS
+    /// keeps whatever the authoritative summary already carried instead of
+    /// blocking the response.
+    async fn hydrate_route_join_counts(
+        &self,
+        page: &mut [pb::SearchResult],
+        user_id: Option<&str>,
+    ) {
+        let Some(bbs_client) = self.bbs_client.as_ref() else {
+            return;
+        };
+        let route_ids = page
+            .iter()
+            .filter(|item| item.result_type == pb::SearchResultType::Journey as i32)
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        if route_ids.is_empty() {
+            return;
+        }
+        let request = match bookway_runtime::grpc_service_request(bbs_participation_pb::RouteContextRequest {
+            user_id: user_id.unwrap_or_default().to_string(),
+            route_ids,
+        }) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::debug!(%error, "route join-count hydration skipped");
+                return;
+            }
+        };
+        let mut client = bbs_client.clone();
+        match tokio::time::timeout(BBS_ROUTE_CONTEXT_TIMEOUT, client.route_context(request)).await {
+            Ok(Ok(response)) => {
+                let context = response.into_inner();
+                for item in page.iter_mut() {
+                    if item.result_type != pb::SearchResultType::Journey as i32 {
+                        continue;
+                    }
+                    let Some(post) = item.post.as_mut() else {
+                        continue;
+                    };
+                    if let Some(live_count) = context.participant_counts.get(&item.id) {
+                        post.join_count = u32::try_from(*live_count).unwrap_or(u32::MAX);
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(code = %error.code(), "route join-count hydration degraded");
+            }
+            Err(_) => {
+                tracing::debug!("route join-count hydration timed out");
+            }
+        }
     }
 
     pub(crate) async fn suggestions(
@@ -1152,6 +1303,24 @@ fn make_search_plan(
                 query: expansion_terms.join(" "),
             });
         }
+    }
+    // Semantic recall covers content surfaces and the typed node/equipment
+    // tabs — route documents embed node titles and scene gear in their
+    // semantic text, so paraphrased entity queries still recall them. Users,
+    // topics and resources have exact lanes that vectors cannot serve.
+    if matches!(
+        search_type,
+        pb::SearchType::All
+            | pb::SearchType::Posts
+            | pb::SearchType::Journeys
+            | pb::SearchType::Nodes
+            | pb::SearchType::Equipment
+    ) && !matches!(intent, SearchIntent::Topic | SearchIntent::User)
+    {
+        recalls.push(RecallPlan {
+            source: RecallSource::Semantic,
+            query: original_query.clone(),
+        });
     }
     if enable_resource_search
         && matches!(search_type, pb::SearchType::All | pb::SearchType::Resources)
@@ -1585,6 +1754,11 @@ mod tests {
 
     use std::{collections::HashMap, net::TcpListener, sync::Arc, time::Duration};
 
+    use bookway_bbs_api::pb::{
+        self as bbs_participation_pb,
+        bbs_client::BbsClient,
+        bbs_server::{Bbs, BbsServer},
+    };
     use bookway_bbs_link_api::pb::{
         self as bbs_link_pb,
         bbs_link_client::BbsLinkClient,
@@ -1671,6 +1845,13 @@ mod tests {
 
     #[tonic::async_trait]
     impl BbsSearch for RecordingSearchSource {
+        async fn search_semantic(
+            &self,
+            _request: Request<pb::SearchSemanticRequest>,
+        ) -> Result<Response<pb::SearchResponse>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
+
         async fn search(
             &self,
             request: Request<pb::SearchRequest>,
@@ -1707,6 +1888,20 @@ mod tests {
 
     #[tonic::async_trait]
     impl KnowledgeCatalog for RecordingResourceSource {
+        async fn embed_texts(
+            &self,
+            _request: Request<catalog_pb::EmbedTextsRequest>,
+        ) -> Result<Response<catalog_pb::EmbedTextsResponse>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
+
+        async fn upsert_public_resource(
+            &self,
+            _request: Request<catalog_pb::UpsertPublicResourceRequest>,
+        ) -> Result<Response<catalog_pb::Resource>, Status> {
+            Err(Status::unimplemented("not used by Search Main"))
+        }
+
         async fn search(
             &self,
             request: Request<catalog_pb::SearchRequest>,
@@ -2079,6 +2274,7 @@ mod tests {
                 is_route: content_type == bbs_link_pb::ContentType::Route,
                 is_milestone: content_type == bbs_link_pb::ContentType::Milestone,
                 is_question: content_type == bbs_link_pb::ContentType::Question,
+                fork_count: 0,
             }),
             author_id: author_id.to_string(),
             content_type: content_type as i32,
@@ -2347,13 +2543,36 @@ mod tests {
         let plan = make_search_plan("跑步 计划", pb::SearchType::All, &dictionary, false)
             .expect("query plan should build");
         assert_eq!(plan.query_rewrite_version, "lifestyle-v3");
-        assert_eq!(plan.recalls.len(), 2);
+        // Exact + synonym expansion + one-shot semantic lane.
+        assert_eq!(plan.recalls.len(), 3);
         assert_eq!(plan.recalls[1].query, "跑步 计划 慢跑 晨跑");
+        assert_eq!(plan.recalls[2].source, crate::datasource::RecallSource::Semantic);
         assert_eq!(new_session(1, &plan).query_rewrite_version, "lifestyle-v3");
 
         let identity_plan = make_search_plan("#跑步", pb::SearchType::All, &dictionary, false)
             .expect("topic query plan should build");
         assert_eq!(identity_plan.recalls.len(), 1);
+    }
+
+    #[test]
+    fn entity_tabs_plan_a_semantic_lane_for_typed_recall() {
+        let dictionary = QueryRewriteDictionary {
+            version: "lifestyle-v3".to_string(),
+            rules: Vec::new(),
+        };
+        for search_type in [pb::SearchType::Nodes, pb::SearchType::Equipment] {
+            let plan = make_search_plan("壶铃", search_type, &dictionary, false)
+                .expect("entity tab plan should build");
+            assert_eq!(plan.recalls.len(), 2);
+            assert_eq!(plan.recalls[0].source, crate::datasource::RecallSource::Bbs);
+            assert_eq!(plan.recalls[1].source, crate::datasource::RecallSource::Semantic);
+            assert_eq!(plan.bbs_search_type, search_type);
+        }
+
+        // Identity surfaces keep their exact lanes.
+        let topic_plan = make_search_plan("#壶铃", pb::SearchType::Nodes, &dictionary, false)
+            .expect("topic query plan should build");
+        assert_eq!(topic_plan.recalls.len(), 1);
     }
 
     #[test]
@@ -2400,7 +2619,7 @@ mod tests {
                 .expect("fallback dictionary remains usable")
                 .recalls
                 .len(),
-            2
+            3
         );
     }
 
@@ -2859,5 +3078,204 @@ mod tests {
 
         assert_eq!(result.items.len(), 1);
         assert!(result.degraded);
+    }
+
+    #[derive(Clone, Default)]
+    struct StubParticipationSource {
+        counts: Arc<Mutex<HashMap<String, u64>>>,
+        seen_user_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl StubParticipationSource {
+        async fn last_seen_user_id(&self) -> Option<String> {
+            self.seen_user_ids.lock().await.last().cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Bbs for StubParticipationSource {
+        async fn context(
+            &self,
+            _request: Request<bbs_participation_pb::ContextRequest>,
+        ) -> Result<Response<bbs_participation_pb::SocialContext>, Status> {
+            Err(Status::unimplemented("not used by join-count hydration"))
+        }
+
+        async fn visibility_context(
+            &self,
+            _request: Request<bbs_participation_pb::ContextRequest>,
+        ) -> Result<Response<bbs_participation_pb::SocialVisibility>, Status> {
+            Err(Status::unimplemented("not used by join-count hydration"))
+        }
+
+        async fn set_edge(
+            &self,
+            _request: Request<bbs_participation_pb::SetEdgeRequest>,
+        ) -> Result<Response<bbs_participation_pb::SocialContext>, Status> {
+            Err(Status::unimplemented("not used by join-count hydration"))
+        }
+
+        async fn list_route_participations(
+            &self,
+            _request: Request<bbs_participation_pb::ContextRequest>,
+        ) -> Result<Response<bbs_participation_pb::RouteParticipationList>, Status> {
+            Err(Status::unimplemented("not used by join-count hydration"))
+        }
+
+        async fn route_context(
+            &self,
+            request: Request<bbs_participation_pb::RouteContextRequest>,
+        ) -> Result<Response<bbs_participation_pb::RouteParticipationContext>, Status> {
+            let request = request.into_inner();
+            self.seen_user_ids.lock().await.push(request.user_id);
+            let counts = self.counts.lock().await;
+            // Mirror the real read: only the requested routes come back.
+            let participant_counts = request
+                .route_ids
+                .iter()
+                .filter_map(|route_id| counts.get(route_id).map(|count| (route_id.clone(), *count)))
+                .collect();
+            Ok(Response::new(bbs_participation_pb::RouteParticipationContext {
+                participant_counts,
+                joined_route_ids: Vec::new(),
+            }))
+        }
+
+        async fn set_route_participation(
+            &self,
+            _request: Request<bbs_participation_pb::RouteParticipationRequest>,
+        ) -> Result<Response<bbs_participation_pb::RouteParticipationState>, Status> {
+            Err(Status::unimplemented("not used by join-count hydration"))
+        }
+
+        async fn list_followers(
+            &self,
+            _request: Request<bbs_participation_pb::ListFollowersRequest>,
+        ) -> Result<Response<bbs_participation_pb::FollowerPage>, Status> {
+            Err(Status::unimplemented("not used by join-count hydration"))
+        }
+
+        async fn get_social_stats(
+            &self,
+            _request: Request<bbs_participation_pb::SocialStatsRequest>,
+        ) -> Result<Response<bbs_participation_pb::SocialStats>, Status> {
+            Err(Status::unimplemented("not used by join-count hydration"))
+        }
+
+        async fn list_route_peers(
+            &self,
+            _request: Request<bbs_participation_pb::ListRoutePeersRequest>,
+        ) -> Result<Response<bbs_participation_pb::RoutePeerPage>, Status> {
+            Err(Status::unimplemented("not used by join-count hydration"))
+        }
+    }
+
+    async fn participation_client(
+        counts: HashMap<String, u64>,
+    ) -> (BbsClient<tonic::transport::Channel>, StubParticipationSource) {
+        let source = StubParticipationSource {
+            counts: Arc::new(Mutex::new(counts)),
+            seen_user_ids: Arc::new(Mutex::new(Vec::new())),
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("allocate test server port");
+        let address = listener.local_addr().expect("read test server address");
+        drop(listener);
+        let server_source = source.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(BbsServer::new(server_source))
+                .serve(address)
+                .await
+                .expect("run bbs participation test server");
+        });
+
+        let endpoint = format!("http://{address}");
+        for _ in 0..20 {
+            if let Ok(channel) = bookway_runtime::grpc_channel(&endpoint).await {
+                return (BbsClient::new(channel), source);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("connect to bbs participation test server");
+    }
+
+    fn route_result(id: &str, stored_join_count: u32) -> pb::SearchResult {
+        pb::SearchResult {
+            id: id.to_string(),
+            result_type: pb::SearchResultType::Journey as i32,
+            post: Some(pb::PostSummary {
+                id: id.to_string(),
+                join_count: stored_join_count,
+                is_route: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A channel to a socket that accepts TCP but serves nothing: hydration
+    /// tests only need the search client to be constructible, never usable.
+    async fn idle_channel() -> tonic::transport::Channel {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("allocate idle test port");
+        let address = listener.local_addr().expect("read idle test address");
+        tokio::spawn(async move {
+            let _listener = listener;
+            std::future::pending::<()>().await;
+        });
+        bookway_runtime::grpc_channel(&format!("http://{address}"))
+            .await
+            .expect("connect idle test channel")
+    }
+
+    #[tokio::test]
+    async fn hydration_replaces_stored_join_counts_with_live_participation_facts() {
+        let (client, source) = participation_client(HashMap::from([(
+            "route-live".to_string(),
+            256,
+        )]))
+        .await;
+        let mut domain = Domain::with_test_dependencies(
+            BbsSearchClient::new(idle_channel().await),
+            Arc::new(MemorySearchSessionStore::default()),
+            Arc::new(MemorySearchExposureStore::default()),
+        );
+        domain.bbs_client = Some(client);
+
+        let mut page = vec![
+            route_result("route-live", 12),
+            route_result("route-absent", 12),
+            pb::SearchResult {
+                id: "post-plain".to_string(),
+                result_type: pb::SearchResultType::Post as i32,
+                post: Some(pb::PostSummary {
+                    id: "post-plain".to_string(),
+                    join_count: 3,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ];
+        domain.hydrate_route_join_counts(&mut page, Some("walker")).await;
+
+        assert_eq!(page[0].post.as_ref().map(|post| post.join_count), Some(256));
+        assert_eq!(page[1].post.as_ref().map(|post| post.join_count), Some(12),
+            "routes without live facts keep their authoritative summary value");
+        assert_eq!(page[2].post.as_ref().map(|post| post.join_count), Some(3),
+            "non-route results are never hydrated");
+        assert_eq!(source.last_seen_user_id().await.as_deref(), Some("walker"));
+    }
+
+    #[tokio::test]
+    async fn hydration_fails_open_without_a_bbs_connection() {
+        let mut domain = Domain::with_test_dependencies(
+            BbsSearchClient::new(idle_channel().await),
+            Arc::new(MemorySearchSessionStore::default()),
+            Arc::new(MemorySearchExposureStore::default()),
+        );
+        domain.bbs_client = None;
+
+        let mut page = vec![route_result("route-live", 12)];
+        domain.hydrate_route_join_counts(&mut page, None).await;
+        assert_eq!(page[0].post.as_ref().map(|post| post.join_count), Some(12));
     }
 }

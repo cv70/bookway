@@ -103,6 +103,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .max_age(std::time::Duration::from_secs(600));
     Router::new()
         .route("/health", get(health))
+        .route("/payments/webhook/{provider}", post(payment_webhook))
         .route(
             "/v1/me/profile",
             get(account_profile).patch(update_account_profile),
@@ -186,7 +187,15 @@ pub(crate) fn router(state: AppState) -> Router {
             "/v1/admin/ads/guardrails",
             get(admin_ad_guardrails).patch(admin_set_ad_guardrails),
         )
-        .route("/v1/admin/ads/reports", get(admin_ad_delivery_report))
+        .route(
+            "/v1/admin/ads/reports",
+            get(admin_ad_delivery_report),
+        )
+        .route("/v1/admin/resources", post(admin_create_resource))
+        .route(
+            "/v1/admin/resources/{resource_id}",
+            patch(admin_update_resource),
+        )
         .route(
             "/v1/admin/mall/products",
             get(admin_mall_products).post(admin_create_mall_product),
@@ -235,6 +244,11 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/orders", get(mall_orders).post(create_mall_order))
         .route("/v1/orders/{order_id}", get(mall_order))
         .route("/v1/orders/{order_id}/cancel", post(cancel_mall_order))
+        .route("/v1/orders/{order_id}/pay", post(pay_mall_order))
+        .route(
+            "/v1/affiliate/settlements",
+            get(creator_affiliate_settlements),
+        )
         .route("/v1/search", get(search))
         .route("/v1/search/suggestions", get(suggestions))
         .route("/v1/resources", get(search_resources))
@@ -350,6 +364,100 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// Constant-time HMAC-SHA256 check over the webhook signature input. Split
+/// from the composition below so the RFC-4231 test can pin the primitive
+/// while the binding test pins the `{provider}.{raw_body}` input format.
+fn verify_hmac(secret: &[u8], input: &[u8], provided: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    let mut mac =
+        <Hmac<sha2::Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(input);
+    let expected = mac.finalize().into_bytes();
+    let Some(provided) = hex_decode(provided) else {
+        return false;
+    };
+    // XOR-accumulate: branchless on the secret-derived value, constant time
+    // in the digest length.
+    let mut difference = 0_u8;
+    for (left, right) in provided.iter().zip(expected.iter()) {
+        difference |= left ^ right;
+    }
+    difference == 0
+}
+
+fn verify_payment_signature(secret: &[u8], provider: &str, body: &[u8], provided: &str) -> bool {
+    // Signed bytes are exactly `{provider}.{raw_body}`: binding the path
+    // provider into the input means a signature captured for one provider's
+    // endpoint cannot be replayed against another's.
+    let mut input = Vec::with_capacity(provider.len() + 1 + body.len());
+    input.extend_from_slice(provider.as_bytes());
+    input.push(b'.');
+    input.extend_from_slice(body);
+    verify_hmac(secret, &input, provided)
+}
+
+fn hex_decode(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut out = [0_u8; 32];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+#[derive(serde::Deserialize)]
+struct PaymentWebhookBody {
+    payment_reference: String,
+}
+
+async fn payment_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<ApiResponse<mall_order_pb::Order>>, HttpError> {
+    let Some(secret) = std::env::var("PAYMENT_WEBHOOK_SECRET")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        // Honest failure: without a configured secret the endpoint is off,
+        // never a silent unsigned accept.
+        return Err(HttpError::ServiceUnavailable(
+            "payment webhook is not configured".to_string(),
+        ));
+    };
+    // Contract: `x-payment-signature` is the hex HMAC-SHA256 of
+    // `{provider}.{raw_body}` keyed with PAYMENT_WEBHOOK_SECRET, where
+    // `provider` is exactly this route's path segment. Binding the provider
+    // into the signed input keeps a signature captured at one provider's URL
+    // from being replayed against another's.
+    let provided = headers
+        .get("x-payment-signature")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !verify_payment_signature(secret.as_bytes(), &provider, &body, provided) {
+        return Err(HttpError::Unauthorized(
+            "invalid webhook signature".to_string(),
+        ));
+    }
+    let payload: PaymentWebhookBody = serde_json::from_slice(&body).map_err(|_| {
+        HttpError::InvalidRequest("webhook body must carry payment_reference".to_string())
+    })?;
+    let reference = payload.payment_reference.trim().to_string();
+    if reference.is_empty() {
+        return Err(HttpError::InvalidRequest(
+            "payment_reference is required".to_string(),
+        ));
+    }
+    let order = state
+        .domain
+        .confirm_payment_webhook(&provider, &reference)
+        .await?;
+    Ok(Json(ApiResponse::new(order)))
+}
+
 async fn account_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -358,7 +466,7 @@ async fn account_profile(
         state
             .domain
             .account_profile(account_pb::ProfileRequest {
-                user_id: user_id(&headers),
+                user_id: authenticated_user(&headers)?,
             })
             .await?,
     )))
@@ -372,7 +480,7 @@ async fn update_account_profile(
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .update_account_profile(request.into_pb(user_id(&headers)))
+            .update_account_profile(request.into_pb(authenticated_user(&headers)?))
             .await?,
     )))
 }
@@ -384,7 +492,7 @@ async fn own_creator_profile(
     let profile = state
         .domain
         .creator_profile(creator_pb::CreatorProfileRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
         })
         .await?;
     Ok(Json(ApiResponse::new(
@@ -399,7 +507,7 @@ async fn update_creator_profile(
 ) -> Result<Json<ApiResponse<rest::CreatorProfile>>, HttpError> {
     let profile = state
         .domain
-        .update_creator_profile(request.into_pb(user_id(&headers)))
+        .update_creator_profile(request.into_pb(authenticated_user(&headers)?))
         .await?;
     Ok(Json(ApiResponse::new(
         profile.try_into().map_err(HttpError::Contract)?,
@@ -413,7 +521,7 @@ async fn list_creator_profiles(
 ) -> Result<Json<ApiResponse<rest::CreatorProfilePage>>, HttpError> {
     let profiles = state
         .domain
-        .public_creator_profiles(&user_id(&headers), query.into_pb())
+        .public_creator_profiles(&optional_user_id(&headers), query.into_pb())
         .await?;
     Ok(Json(ApiResponse::new(
         profiles.try_into().map_err(HttpError::Contract)?,
@@ -428,7 +536,7 @@ async fn get_creator_profile(
     let profile = state
         .domain
         .public_creator_profile(
-            &user_id(&headers),
+            &optional_user_id(&headers),
             creator_pb::CreatorProfileRequest {
                 user_id: creator_user_id,
             },
@@ -445,7 +553,7 @@ async fn send_direct_message(
     Json(request): Json<rest::SendDirectMessageRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<rest::DirectMessage>>), HttpError> {
     let request = request
-        .into_pb(user_id(&headers), idempotency_key(&headers))
+        .into_pb(authenticated_user(&headers)?, idempotency_key(&headers))
         .map_err(HttpError::InvalidRequest)?;
     let message = state.domain.send_direct_message(request).await?;
     Ok((
@@ -472,7 +580,7 @@ async fn report_direct_message(
         .domain
         .report_direct_message(
             request
-                .into_pb(user_id(&headers), message_id, idempotency_key(&headers))
+                .into_pb(authenticated_user(&headers)?, message_id, idempotency_key(&headers))
                 .map_err(HttpError::InvalidRequest)?,
         )
         .await?;
@@ -491,7 +599,7 @@ async fn list_direct_conversations(
 ) -> Result<Json<ApiResponse<rest::DirectConversationPage>>, HttpError> {
     let page = state
         .domain
-        .direct_conversations(query.into_pb(user_id(&headers)))
+        .direct_conversations(query.into_pb(authenticated_user(&headers)?))
         .await?;
     Ok(Json(ApiResponse::new(page.into())))
 }
@@ -504,7 +612,7 @@ async fn list_direct_messages(
 ) -> Result<Json<ApiResponse<rest::DirectMessagePage>>, HttpError> {
     let page = state
         .domain
-        .direct_messages(query.into_pb(user_id(&headers), conversation_id))
+        .direct_messages(query.into_pb(authenticated_user(&headers)?, conversation_id))
         .await?;
     Ok(Json(ApiResponse::new(
         page.try_into().map_err(HttpError::Contract)?,
@@ -520,7 +628,7 @@ async fn mark_direct_conversation_read(
     let request = request
         .map(|request| request.0)
         .unwrap_or_default()
-        .into_pb(user_id(&headers), conversation_id);
+        .into_pb(authenticated_user(&headers)?, conversation_id);
     let response = state.domain.mark_direct_conversation_read(request).await?;
     Ok(Json(ApiResponse::new(response.into())))
 }
@@ -532,7 +640,7 @@ async fn get_direct_message_preferences(
     let preferences = state
         .domain
         .direct_message_preferences(message_pb::UserRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
         })
         .await?;
     Ok(Json(ApiResponse::new(preferences.into())))
@@ -545,7 +653,7 @@ async fn update_direct_message_preferences(
 ) -> Result<Json<ApiResponse<rest::DirectMessagePreferences>>, HttpError> {
     let preferences = state
         .domain
-        .update_direct_message_preferences(request.into_pb(user_id(&headers)))
+        .update_direct_message_preferences(request.into_pb(authenticated_user(&headers)?))
         .await?;
     Ok(Json(ApiResponse::new(preferences.into())))
 }
@@ -557,7 +665,7 @@ async fn list_journeys(
     let journeys = state
         .domain
         .list_journeys(growth_pb::UserRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
         })
         .await?;
     Ok(Json(ApiResponse::new(
@@ -571,7 +679,7 @@ async fn create_journey(
     Json(request): Json<rest::CreateJourneyRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<rest::Journey>>), HttpError> {
     let request = request
-        .into_pb(user_id(&headers), idempotency_key(&headers))
+        .into_pb(authenticated_user(&headers)?, idempotency_key(&headers))
         .map_err(HttpError::InvalidRequest)?;
     let journey = state.domain.create_journey(request).await?;
     Ok((
@@ -590,7 +698,7 @@ async fn get_journey(
     let detail = state
         .domain
         .get_journey(growth_pb::JourneyRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             journey_id,
         })
         .await?;
@@ -607,7 +715,7 @@ async fn update_journey(
 ) -> Result<Json<ApiResponse<rest::Journey>>, HttpError> {
     let journey = state
         .domain
-        .update_journey(request.into_pb(user_id(&headers), journey_id))
+        .update_journey(request.into_pb(authenticated_user(&headers)?, journey_id))
         .await?;
     Ok(Json(ApiResponse::new(
         journey.try_into().map_err(HttpError::Contract)?,
@@ -621,7 +729,7 @@ async fn create_action(
     Json(request): Json<rest::CreateActionRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<rest::Action>>), HttpError> {
     let request = request
-        .into_pb(user_id(&headers), journey_id, idempotency_key(&headers))
+        .into_pb(authenticated_user(&headers)?, journey_id, idempotency_key(&headers))
         .map_err(HttpError::InvalidRequest)?;
     let action = state.domain.create_action(request).await?;
     Ok((
@@ -640,7 +748,7 @@ async fn today(
     let today = state
         .domain
         .today(growth_pb::ScheduleRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             local_date: query.date,
             timezone: query.timezone,
         })
@@ -658,7 +766,7 @@ async fn complete_action(
     let action = state
         .domain
         .complete_action(growth_pb::CompleteActionRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             action_id,
         })
         .await?;
@@ -675,7 +783,7 @@ async fn update_action(
 ) -> Result<Json<ApiResponse<rest::Action>>, HttpError> {
     let action = state
         .domain
-        .update_action(request.into_pb(user_id(&headers), action_id))
+        .update_action(request.into_pb(authenticated_user(&headers)?, action_id))
         .await?;
     Ok(Json(ApiResponse::new(
         action.try_into().map_err(HttpError::Contract)?,
@@ -690,7 +798,7 @@ async fn reminder_preferences(
         state
             .domain
             .reminder_preferences(growth_pb::UserRequest {
-                user_id: user_id(&headers),
+                user_id: authenticated_user(&headers)?,
             })
             .await?,
     )))
@@ -704,7 +812,7 @@ async fn update_reminder_preferences(
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .update_reminder_preferences(request.into_pb(user_id(&headers)))
+            .update_reminder_preferences(request.into_pb(authenticated_user(&headers)?))
             .await?,
     )))
 }
@@ -714,7 +822,7 @@ async fn register_push_device(
     headers: HeaderMap,
     Json(mut request): Json<growth_pb::RegisterPushDeviceRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<growth_pb::PushDevice>>), HttpError> {
-    request.user_id = user_id(&headers);
+    request.user_id = authenticated_user(&headers)?;
     let device = state.domain.register_push_device(request).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::new(device))))
 }
@@ -727,7 +835,7 @@ async fn revoke_push_device(
     state
         .domain
         .revoke_push_device(growth_pb::PushDeviceRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             device_id,
         })
         .await?;
@@ -741,7 +849,7 @@ async fn list_notifications(
 ) -> Result<Json<ApiResponse<rest::NotificationPage>>, HttpError> {
     let notifications = state
         .domain
-        .list_notifications(query.into_pb(user_id(&headers)))
+        .list_notifications(query.into_pb(authenticated_user(&headers)?))
         .await?;
     Ok(Json(ApiResponse::new(
         notifications.try_into().map_err(HttpError::Contract)?,
@@ -756,7 +864,7 @@ async fn mark_notification_read(
     let notification = state
         .domain
         .mark_notification_read(growth_pb::NotificationRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             notification_id,
         })
         .await?;
@@ -772,7 +880,7 @@ async fn list_entries(
     let entries = state
         .domain
         .list_entries(growth_pb::UserRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
         })
         .await?;
     Ok(Json(ApiResponse::new(
@@ -787,7 +895,7 @@ async fn create_entry(
 ) -> Result<(StatusCode, Json<ApiResponse<rest::GrowthEntry>>), HttpError> {
     let entry = state
         .domain
-        .create_entry(request.into_pb(user_id(&headers), idempotency_key(&headers)))
+        .create_entry(request.into_pb(authenticated_user(&headers)?, idempotency_key(&headers)))
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -805,7 +913,7 @@ async fn retry_entry_publication(
     let entry = state
         .domain
         .retry_entry_publication(growth_pb::RetryEntryPublicationRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             entry_id,
         })
         .await?;
@@ -821,7 +929,7 @@ async fn weekly_review(
     let review = state
         .domain
         .weekly_review(growth_pb::UserRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
         })
         .await?;
     Ok(Json(ApiResponse::new(
@@ -836,7 +944,7 @@ async fn save_weekly_review(
 ) -> Result<Json<ApiResponse<rest::WeeklyReview>>, HttpError> {
     let review = state
         .domain
-        .save_weekly_review(request.into_pb(user_id(&headers)))
+        .save_weekly_review(request.into_pb(authenticated_user(&headers)?))
         .await?;
     Ok(Json(ApiResponse::new(
         review.try_into().map_err(HttpError::Contract)?,
@@ -851,7 +959,7 @@ async fn apply_weekly_review_adjustment(
     let applied = state
         .domain
         .apply_weekly_review_adjustment(growth_pb::ApplyWeeklyReviewAdjustmentRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             review_id,
             suggestion_index,
         })
@@ -869,7 +977,7 @@ async fn companion(
     let companion = state
         .domain
         .companion(growth_pb::ScheduleRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             local_date: query.date,
             timezone: query.timezone,
         })
@@ -886,7 +994,7 @@ async fn list_knowledge(
 ) -> Result<Json<ApiResponse<rest::KnowledgeList>>, HttpError> {
     let resources = state
         .domain
-        .list_knowledge(query.into_pb(user_id(&headers)))
+        .list_knowledge(query.into_pb(authenticated_user(&headers)?))
         .await?;
     Ok(Json(ApiResponse::new(
         resources.try_into().map_err(HttpError::Contract)?,
@@ -900,7 +1008,7 @@ async fn create_knowledge(
 ) -> Result<(StatusCode, Json<ApiResponse<rest::KnowledgeResource>>), HttpError> {
     let resource = state
         .domain
-        .create_knowledge(request.into_pb(user_id(&headers), idempotency_key(&headers)))
+        .create_knowledge(request.into_pb(authenticated_user(&headers)?, idempotency_key(&headers)))
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -918,7 +1026,7 @@ async fn update_knowledge(
 ) -> Result<Json<ApiResponse<rest::KnowledgeResource>>, HttpError> {
     let resource = state
         .domain
-        .update_knowledge(request.into_pb(user_id(&headers), resource_id))
+        .update_knowledge(request.into_pb(authenticated_user(&headers)?, resource_id))
         .await?;
     Ok(Json(ApiResponse::new(
         resource.try_into().map_err(HttpError::Contract)?,
@@ -935,7 +1043,7 @@ async fn start_knowledge_journey(
         .domain
         .start_knowledge_journey(
             request
-                .into_pb(user_id(&headers), resource_id)
+                .into_pb(authenticated_user(&headers)?, resource_id)
                 .map_err(HttpError::InvalidRequest)?,
         )
         .await?;
@@ -949,9 +1057,13 @@ async fn feed(
     headers: HeaderMap,
     Query(query): Query<rest::FeedQuery>,
 ) -> Result<Json<ApiResponse<rest::FeedResponse>>, HttpError> {
-    let request = query
-        .into_pb(user_id(&headers))
+    let mut request = query
+        .into_pb(optional_user_id(&headers))
         .map_err(HttpError::InvalidRequest)?;
+    // Edge-derived delivery context feeds fail-closed geo/device targeting
+    // in contextual ad mixing.
+    request.geo_region = geo_region_from_headers(&headers);
+    request.device_os = device_os_from_user_agent(&headers);
     let response = state.domain.feed(request).await?;
     Ok(Json(ApiResponse::new(
         response.try_into().map_err(HttpError::Contract)?,
@@ -967,22 +1079,32 @@ async fn ad_decisions(
         state
             .domain
             .ad_decisions(ad_main_pb::DecisionRequest {
-                user_id: user_id(&headers),
+                user_id: optional_user_id(&headers),
                 placement: query.placement,
                 domain: query.domain,
                 limit: query.limit,
                 route_id: query.route_id,
                 action_node_id: query.action_node_id,
                 scene_equipment: Some(query.scene_equipment),
-                // The client's user agent is the one delivery dimension a
-                // browser reliably exposes today; region stays empty until a
-                // trustworthy source exists, which keeps geo-targeted stock
-                // out of these requests by design (fail-closed).
-                geo_region: String::new(),
+                geo_region: geo_region_from_headers(&headers),
                 device_os: device_os_from_user_agent(&headers),
             })
             .await?,
     )))
+}
+
+/// Reads the delivery region from the platform edge. The gateway sits behind
+/// a CDN/edge that stamps `x-geo-region` (ISO-ish region slug, lower-cased);
+/// requests that arrive without it stay empty, so geo-targeted campaigns are
+/// excluded by the fail-closed matching rule instead of guessing.
+fn geo_region_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-geo-region")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase)
+        .unwrap_or_default()
 }
 
 /// Classifies the request user agent into the documented targeting slug
@@ -1015,7 +1137,7 @@ async fn report_ad_event(
         state
             .domain
             .report_ad_event({
-                request.user_id = user_id(&headers);
+                request.user_id = optional_user_id(&headers);
                 request
             })
             .await?,
@@ -1106,6 +1228,41 @@ async fn admin_ad_delivery_report(
     )))
 }
 
+/// Platform-curated resource library writes. The library is shared
+/// infrastructure rather than a merchant or advertiser console, so it uses the
+/// "admin"-only allowlist (platform_admin_id), not the scoped role helpers.
+async fn admin_create_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<rest::UpsertResourceRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<rest::PublicResource>>), HttpError> {
+    let request = request
+        .into_pb(String::new(), platform_admin_id(&headers)?)
+        .map_err(HttpError::InvalidRequest)?;
+    let resource = state.domain.upsert_public_resource(request).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(
+            resource.try_into().map_err(HttpError::Contract)?,
+        )),
+    ))
+}
+
+async fn admin_update_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resource_id): Path<String>,
+    Json(request): Json<rest::UpsertResourceRequest>,
+) -> Result<Json<ApiResponse<rest::PublicResource>>, HttpError> {
+    let request = request
+        .into_pb(resource_id, platform_admin_id(&headers)?)
+        .map_err(HttpError::InvalidRequest)?;
+    let resource = state.domain.upsert_public_resource(request).await?;
+    Ok(Json(ApiResponse::new(
+        resource.try_into().map_err(HttpError::Contract)?,
+    )))
+}
+
 async fn admin_mall_products(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1186,15 +1343,19 @@ async fn route_node_offers(
     State(state): State<AppState>,
     Path((route_id, action_node_id)): Path<(String, String)>,
     Query(query): Query<mall_pb::NodeOfferQueryRequest>,
-) -> Result<Json<ApiResponse<mall_pb::NodeOfferList>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::PublicNodeOfferList>>, HttpError> {
     let request = mall_pb::NodeOfferQueryRequest {
         route_id,
         action_node_id,
         limit: query.limit,
         scene_equipment: query.scene_equipment,
     };
+    // Projected in the gateway: the public storefront must not learn
+    // commission rates or internal merchant identities. The admin surface
+    // keeps the full internal offer message.
+    let offers = state.domain.mall_node_offers(request).await?;
     Ok(Json(ApiResponse::new(
-        state.domain.mall_node_offers(request).await?,
+        offers.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -1202,10 +1363,12 @@ async fn admin_mall_orders(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(mut query): Query<mall_order_pb::MerchantOrderRequest>,
-) -> Result<Json<ApiResponse<mall_order_pb::MerchantOrderListResponse>>, HttpError> {
+) -> Result<Json<ApiResponse<rest::MerchantOrderPage>>, HttpError> {
     query.merchant_id = merchant_admin_id(&headers)?;
+    let orders = state.domain.merchant_mall_orders(query).await?;
+    // Projected in the gateway: merchants never see buyer identities.
     Ok(Json(ApiResponse::new(
-        state.domain.merchant_mall_orders(query).await?,
+        orders.try_into().map_err(HttpError::Contract)?,
     )))
 }
 
@@ -1252,7 +1415,7 @@ async fn create_mall_order(
     headers: HeaderMap,
     Json(mut request): Json<mall_order_pb::CreateRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<mall_order_pb::Order>>), HttpError> {
-    request.user_id = user_id(&headers);
+    request.user_id = authenticated_user(&headers)?;
     request.idempotency_key = idempotency_key(&headers).unwrap_or_default();
     let order = state.domain.create_mall_order(request).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::new(order))))
@@ -1266,7 +1429,7 @@ async fn mall_orders(
         state
             .domain
             .mall_orders(mall_order_pb::UserRequest {
-                user_id: user_id(&headers),
+                user_id: authenticated_user(&headers)?,
             })
             .await?,
     )))
@@ -1281,7 +1444,7 @@ async fn mall_order(
         state
             .domain
             .mall_order(mall_order_pb::OrderRequest {
-                user_id: user_id(&headers),
+                user_id: authenticated_user(&headers)?,
                 order_id,
             })
             .await?,
@@ -1297,10 +1460,40 @@ async fn cancel_mall_order(
         state
             .domain
             .cancel_mall_order(mall_order_pb::OrderRequest {
-                user_id: user_id(&headers),
+                user_id: authenticated_user(&headers)?,
                 order_id,
             })
             .await?,
+    )))
+}
+
+async fn pay_mall_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+    Json(mut request): Json<mall_order_pb::PayRequest>,
+) -> Result<Json<ApiResponse<mall_order_pb::Order>>, HttpError> {
+    // The caller only supplies the payment provider reference; ownership of
+    // the order always comes from the authenticated identity, never the body.
+    request.user_id = authenticated_user(&headers)?;
+    request.order_id = order_id;
+    let order = state.domain.pay_mall_order(request).await?;
+    Ok(Json(ApiResponse::new(order)))
+}
+
+/// Creator-facing affiliate ledger. The path identity is the creator: a
+/// caller can only ever list shares attributed to themselves. Rows reuse the
+/// internal AffiliateSettlement message — it carries the merchant_id that
+/// tells the creator which shop the share came from, and no merchant-only
+/// actions (settle) are reachable from here.
+async fn creator_affiliate_settlements(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut query): Query<mall_order_pb::CreatorSettlementRequest>,
+) -> Result<Json<ApiResponse<mall_order_pb::AffiliateSettlementListResponse>>, HttpError> {
+    query.creator_id = authenticated_user(&headers)?;
+    Ok(Json(ApiResponse::new(
+        state.domain.creator_affiliate_settlements(query).await?,
     )))
 }
 
@@ -1309,10 +1502,12 @@ async fn search(
     headers: HeaderMap,
     Query(query): Query<rest::SearchQuery>,
 ) -> Result<Json<ApiResponse<rest::SearchResponse>>, HttpError> {
-    let response = state
-        .domain
-        .search(query.into_pb(user_id(&headers)))
-        .await?;
+    let mut request = query.into_pb(optional_user_id(&headers));
+    // Edge-derived delivery context feeds fail-closed geo/device targeting
+    // in contextual search-ad mixing.
+    request.geo_region = Some(geo_region_from_headers(&headers));
+    request.device_os = Some(device_os_from_user_agent(&headers));
+    let response = state.domain.search(request).await?;
     Ok(Json(ApiResponse::new(
         response.try_into().map_err(HttpError::Contract)?,
     )))
@@ -1325,7 +1520,7 @@ async fn suggestions(
 ) -> Result<Json<ApiResponse<rest::SuggestionsResponse>>, HttpError> {
     let response = state
         .domain
-        .suggestions(user_id(&headers), request.q)
+        .suggestions(optional_user_id(&headers), request.q)
         .await?;
     Ok(Json(ApiResponse::new(
         response.try_into().map_err(HttpError::Contract)?,
@@ -1388,7 +1583,7 @@ async fn attach_route_node_resource(
         .into_pb(
             route_id,
             action_node_id,
-            user_id(&headers),
+            authenticated_user(&headers)?,
             idempotency_key(&headers),
         )
         .map_err(HttpError::InvalidRequest)?;
@@ -1412,7 +1607,7 @@ async fn detach_route_node_resource(
             route_id,
             action_node_id,
             attachment_id,
-            operator_id: user_id(&headers),
+            operator_id: authenticated_user(&headers)?,
         })
         .await?;
     Ok(Json(ApiResponse::new(response.into())))
@@ -1449,7 +1644,7 @@ async fn capture_resource_knowledge(
 ) -> Result<(StatusCode, Json<ApiResponse<growth_pb::KnowledgeResource>>), HttpError> {
     let resource = state
         .domain
-        .capture_resource_as_knowledge(user_id(&headers), resource_id)
+        .capture_resource_as_knowledge(authenticated_user(&headers)?, resource_id)
         .await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::new(resource))))
 }
@@ -1464,7 +1659,7 @@ async fn ingest_events(
             .domain
             .ingest_events(
                 request
-                    .into_pb(user_id(&headers))
+                    .into_pb(optional_user_id(&headers))
                     .map_err(HttpError::InvalidRequest)?,
             )
             .await?,
@@ -1478,7 +1673,7 @@ async fn create_feedback(
 ) -> Result<(StatusCode, Json<ApiResponse<rest::FeedbackItem>>), HttpError> {
     let feedback = state
         .domain
-        .create_feedback(request.into_pb(user_id(&headers), idempotency_key(&headers)))
+        .create_feedback(request.into_pb(authenticated_user(&headers)?, idempotency_key(&headers)))
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -1495,7 +1690,7 @@ async fn list_own_feedback(
 ) -> Result<Json<ApiResponse<rest::FeedbackList>>, HttpError> {
     let feedback = state
         .domain
-        .own_feedback(query.into_own_pb(user_id(&headers)))
+        .own_feedback(query.into_own_pb(authenticated_user(&headers)?))
         .await?;
     Ok(Json(ApiResponse::new(
         feedback.try_into().map_err(HttpError::Contract)?,
@@ -1539,7 +1734,7 @@ async fn create_media_upload(
 ) -> Result<(StatusCode, Json<ApiResponse<media_pb::UploadResponse>>), HttpError> {
     let media = state
         .domain
-        .create_media_upload(request.into_pb(user_id(&headers)))
+        .create_media_upload(request.into_pb(authenticated_user(&headers)?))
         .await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::new(media))))
 }
@@ -1553,7 +1748,7 @@ async fn complete_media_upload(
         state
             .domain
             .complete_media_upload(media_pb::ResourceRequest {
-                user_id: user_id(&headers),
+                user_id: authenticated_user(&headers)?,
                 id,
             })
             .await?,
@@ -1569,7 +1764,7 @@ async fn get_media(
         state
             .domain
             .get_media(media_pb::ResourceRequest {
-                user_id: user_id(&headers),
+                user_id: optional_user_id(&headers),
                 id,
             })
             .await?,
@@ -1581,7 +1776,7 @@ async fn get_content(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<rest::Content>>, HttpError> {
-    let content = state.domain.get_content(&user_id(&headers), &id).await?;
+    let content = state.domain.get_content(&optional_user_id(&headers), &id).await?;
     Ok(Json(ApiResponse::new(
         content.try_into().map_err(HttpError::Contract)?,
     )))
@@ -1594,7 +1789,7 @@ async fn create_content(
 ) -> Result<(StatusCode, Json<ApiResponse<rest::Content>>), HttpError> {
     let content = state
         .domain
-        .create_content(request.into_pb(user_id(&headers), idempotency_key(&headers)))
+        .create_content(request.into_pb(authenticated_user(&headers)?, idempotency_key(&headers)))
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -1610,12 +1805,13 @@ async fn fork_route(
     Path(source_route_id): Path<String>,
     Json(request): Json<rest::ForkRouteRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<rest::Content>>), HttpError> {
+    let user_id = authenticated_user(&headers)?;
     let request = request.into_pb(
-        user_id(&headers),
+        user_id.clone(),
         source_route_id,
         required_idempotency_key(&headers)?,
     );
-    let content = state.domain.fork_route(request).await?;
+    let content = state.domain.fork_route(&user_id, request).await?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::new(
@@ -1632,7 +1828,7 @@ async fn update_content(
 ) -> Result<Json<ApiResponse<rest::Content>>, HttpError> {
     let content = state
         .domain
-        .update_content(request.into_pb(user_id(&headers), id))
+        .update_content(request.into_pb(authenticated_user(&headers)?, id))
         .await?;
     Ok(Json(ApiResponse::new(
         content.try_into().map_err(HttpError::Contract)?,
@@ -1647,7 +1843,7 @@ async fn publish_content(
     let content = state
         .domain
         .publish_content(bbs_link_pb::PublishRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             id,
             idempotency_key: idempotency_key(&headers),
         })
@@ -1666,7 +1862,7 @@ async fn capture_content_as_knowledge(
     let resource = state
         .domain
         .capture_content_as_knowledge(
-            user_id(&headers),
+            authenticated_user(&headers)?,
             id,
             request.and_then(|request| request.0.into_attribution()),
         )
@@ -1684,7 +1880,7 @@ async fn report_content(
 ) -> Result<(StatusCode, Json<ApiResponse<rest::ContentReport>>), HttpError> {
     let report = state
         .domain
-        .report_content(request.into_pb(user_id(&headers), id, idempotency_key(&headers)))
+        .report_content(request.into_pb(authenticated_user(&headers)?, id, idempotency_key(&headers)))
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -1702,7 +1898,7 @@ async fn appeal_content(
 ) -> Result<(StatusCode, Json<ApiResponse<rest::ContentAppeal>>), HttpError> {
     let appeal = state
         .domain
-        .appeal_content(request.into_pb(user_id(&headers), id, idempotency_key(&headers)))
+        .appeal_content(request.into_pb(authenticated_user(&headers)?, id, idempotency_key(&headers)))
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -1731,7 +1927,7 @@ async fn list_own_contents(
                 domain: query.domain.map(rest::GrowthDomain::into_link),
                 author_ids: Vec::new(),
             },
-            user_id(&headers),
+            authenticated_user(&headers)?,
         )
         .await?;
     Ok(Json(ApiResponse::new(
@@ -1747,7 +1943,7 @@ async fn list_public_author_contents(
 ) -> Result<Json<ApiResponse<rest::ContentPage>>, HttpError> {
     let page = state
         .domain
-        .public_author_contents(&user_id(&headers), &author_id, query.cursor, query.limit)
+        .public_author_contents(&optional_user_id(&headers), &author_id, query.cursor, query.limit)
         .await?;
     Ok(Json(ApiResponse::new(
         page.try_into().map_err(HttpError::Contract)?,
@@ -1761,7 +1957,7 @@ async fn list_own_appeals(
 ) -> Result<Json<ApiResponse<rest::AppealPage>>, HttpError> {
     let appeals = state
         .domain
-        .own_appeals(query.into_pb(), user_id(&headers))
+        .own_appeals(query.into_pb(), authenticated_user(&headers)?)
         .await?;
     Ok(Json(ApiResponse::new(
         appeals.try_into().map_err(HttpError::Contract)?,
@@ -1956,7 +2152,7 @@ async fn set_reaction(
     Json(request): Json<rest::SetReactionRequest>,
 ) -> Result<Json<ApiResponse<rest::Reaction>>, HttpError> {
     let (request, negative_feedback_reason, attribution) = request
-        .into_pb(user_id(&headers), post_id)
+        .into_pb(authenticated_user(&headers)?, post_id)
         .map_err(HttpError::InvalidRequest)?;
     let reaction = state
         .domain
@@ -1975,7 +2171,7 @@ async fn list_comments(
 ) -> Result<Json<ApiResponse<rest::CommentPage>>, HttpError> {
     let comments = state
         .domain
-        .comments(user_id(&headers), query.into_pb(post_id))
+        .comments(optional_user_id(&headers), query.into_pb(post_id))
         .await?;
     Ok(Json(ApiResponse::new(
         comments.try_into().map_err(HttpError::Contract)?,
@@ -1990,7 +2186,7 @@ async fn create_comment(
 ) -> Result<(StatusCode, Json<ApiResponse<rest::CommentItem>>), HttpError> {
     let comment = state
         .domain
-        .create_comment(request.into_pb(user_id(&headers), post_id, idempotency_key(&headers)))
+        .create_comment(request.into_pb(authenticated_user(&headers)?, post_id, idempotency_key(&headers)))
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -2008,7 +2204,7 @@ async fn delete_comment(
     state
         .domain
         .delete_comment(comment_pb::DeleteRequest {
-            user_id: user_id(&headers),
+            user_id: authenticated_user(&headers)?,
             post_id,
             comment_id,
         })
@@ -2023,7 +2219,7 @@ async fn accept_question_answer(
 ) -> Result<Json<ApiResponse<rest::Content>>, HttpError> {
     let content = state
         .domain
-        .accept_question_answer(user_id(&headers), post_id, comment_id)
+        .accept_question_answer(authenticated_user(&headers)?, post_id, comment_id)
         .await?;
     Ok(Json(ApiResponse::new(
         content.try_into().map_err(HttpError::Contract)?,
@@ -2039,7 +2235,7 @@ async fn report_comment(
     let report = state
         .domain
         .report_comment(
-            user_id(&headers),
+            authenticated_user(&headers)?,
             request
                 .into_pb(post_id, comment_id, idempotency_key(&headers))
                 .map_err(HttpError::InvalidRequest)?,
@@ -2062,7 +2258,7 @@ async fn appeal_comment(
     let appeal = state
         .domain
         .appeal_comment(
-            user_id(&headers),
+            authenticated_user(&headers)?,
             request
                 .into_pb(comment_id, idempotency_key(&headers))
                 .map_err(HttpError::InvalidRequest)?,
@@ -2083,7 +2279,7 @@ async fn list_own_comment_appeals(
 ) -> Result<Json<ApiResponse<rest::CommentAppealPage>>, HttpError> {
     let appeals = state
         .domain
-        .own_comment_appeals(query.into_pb(), user_id(&headers))
+        .own_comment_appeals(query.into_pb(), authenticated_user(&headers)?)
         .await?;
     Ok(Json(ApiResponse::new(
         appeals.try_into().map_err(HttpError::Contract)?,
@@ -2099,7 +2295,7 @@ async fn set_follow(
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .follow(request.into_pb(user_id(&headers), target_user_id))
+            .follow(request.into_pb(authenticated_user(&headers)?, target_user_id))
             .await?,
     )))
 }
@@ -2113,7 +2309,7 @@ async fn set_relationship(
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .follow(request.into_pb(user_id(&headers), target_user_id))
+            .follow(request.into_pb(authenticated_user(&headers)?, target_user_id))
             .await?,
     )))
 }
@@ -2123,7 +2319,7 @@ async fn social_context(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<bbs_pb::SocialContext>>, HttpError> {
     Ok(Json(ApiResponse::new(
-        state.domain.social_context(user_id(&headers)).await?,
+        state.domain.social_context(authenticated_user(&headers)?).await?,
     )))
 }
 
@@ -2162,7 +2358,7 @@ async fn list_route_peers(
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .list_route_peers(query.into_pb(user_id(&headers), route_id))
+            .list_route_peers(query.into_pb(optional_user_id(&headers), route_id))
             .await?,
     )))
 }
@@ -2174,7 +2370,7 @@ async fn list_route_participations(
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .list_route_participations(user_id(&headers))
+            .list_route_participations(authenticated_user(&headers)?)
             .await?,
     )))
 }
@@ -2188,7 +2384,7 @@ async fn set_route_participation(
     Ok(Json(ApiResponse::new(
         state
             .domain
-            .set_route_participation(request.into_pb(user_id(&headers), route_id))
+            .set_route_participation(request.into_pb(authenticated_user(&headers)?, route_id))
             .await?,
     )))
 }
@@ -2203,7 +2399,7 @@ async fn join_route(
         state
             .domain
             .join_route(
-                user_id(&headers),
+                authenticated_user(&headers)?,
                 route_id,
                 request.and_then(|request| request.0.into_attribution()),
             )
@@ -2211,12 +2407,27 @@ async fn join_route(
     )))
 }
 
-fn user_id(headers: &HeaderMap) -> String {
+/// Identity for endpoints where the facts are personal or mutating.
+/// A request without an edge-authenticated user is a 401, never a shared
+/// "demo-user" writing one phantom account's data.
+fn authenticated_user(headers: &HeaderMap) -> Result<String, HttpError> {
     headers
         .get("x-user-id")
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
-        .unwrap_or("demo-user")
+        .map(str::to_string)
+        .ok_or_else(|| HttpError::Unauthorized("x-user-id header is required".to_string()))
+}
+
+/// Viewer identity for public reads and client beacons: empty means
+/// anonymous, and downstream services treat it as such (the recommendation
+/// pipeline serves a cold-start page and records no ledger row).
+fn optional_user_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-user-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("")
         .to_string()
 }
 
@@ -2355,6 +2566,8 @@ enum HttpError {
     InvalidRequest(String),
     Contract(String),
     Forbidden(String),
+    Unauthorized(String),
+    ServiceUnavailable(String),
 }
 
 impl From<UpstreamError> for HttpError {
@@ -2375,6 +2588,14 @@ impl IntoResponse for HttpError {
                 message,
             ),
             Self::Forbidden(message) => error_response(StatusCode::FORBIDDEN, "forbidden", message),
+            Self::Unauthorized(message) => {
+                error_response(StatusCode::UNAUTHORIZED, "unauthorized", message)
+            }
+            Self::ServiceUnavailable(message) => error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                message,
+            ),
             Self::Upstream(error) => match error {
                 error @ UpstreamError::Transport { .. } => error_response(
                     StatusCode::BAD_GATEWAY,
@@ -2423,10 +2644,99 @@ fn error_response(status: StatusCode, code: &'static str, message: String) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        has_advertiser_admin_role, has_merchant_admin_role, has_moderator_role,
-        required_idempotency_key, user_id,
+        authenticated_user, geo_region_from_headers, has_advertiser_admin_role,
+        has_merchant_admin_role, has_moderator_role, optional_user_id, required_idempotency_key,
+        verify_hmac, verify_payment_signature,
     };
     use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn hmac_primitive_matches_the_rfc_4231_vector() {
+        // RFC 4231 test vector 2: key "Jefe", data "what do ya want for
+        // nothing?". Pins the webhook verifier's HMAC-SHA256 primitive.
+        let secret = b"Jefe";
+        let data = b"what do ya want for nothing?";
+        let valid = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+        assert!(verify_hmac(secret, data, valid));
+        // Tampered input under the same signature must fail.
+        assert!(!verify_hmac(secret, b"tampered", valid));
+        // Wrong length / non-hex / wrong key all fail without panicking.
+        assert!(!verify_hmac(secret, data, "abcd"));
+        assert!(!verify_hmac(secret, data, &"z".repeat(64)));
+        assert!(!verify_hmac(b"other", data, valid));
+    }
+
+    #[test]
+    fn payment_webhook_signature_binds_the_provider_path_segment() {
+        // The RFC-4231 test pins the primitive; this one pins the composition:
+        // the signed bytes are exactly `{provider}.{raw_body}`, verified
+        // server-side from the route's path segment.
+        let secret = b"webhook-secret";
+        let provider = "stripe";
+        let body = br#"{"payment_reference":"pay-1"}"#;
+        use hmac::{Hmac, Mac};
+        let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(secret)
+            .expect("HMAC accepts any key length");
+        mac.update(provider.as_bytes());
+        mac.update(b".");
+        mac.update(body);
+        let signature = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        assert!(verify_payment_signature(secret, provider, body, &signature));
+        // A signature captured at one provider's URL is dead at another's:
+        // this cross-provider replay is exactly what the binding stops.
+        assert!(!verify_payment_signature(
+            secret, "paypal", body, &signature
+        ));
+        // A tampered body or a signature computed over the bare (unbound)
+        // body both fail.
+        assert!(!verify_payment_signature(
+            secret,
+            provider,
+            b"tampered",
+            &signature
+        ));
+        let bare = {
+            let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(secret)
+                .expect("HMAC accepts any key length");
+            mac.update(body);
+            mac.finalize().into_bytes()
+        };
+        let bare_signature = bare
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert!(!verify_payment_signature(
+            secret,
+            provider,
+            body,
+            &bare_signature
+        ));
+    }
+
+    #[test]
+    fn geo_region_comes_only_from_the_edge_header_and_normalizes() {
+        let mut headers = HeaderMap::new();
+        assert!(
+            geo_region_from_headers(&headers).is_empty(),
+            "missing edge header stays fail-closed"
+        );
+        headers.insert(
+            "x-geo-region",
+            HeaderValue::from_static("  CN-BJ "),
+        );
+        assert_eq!(geo_region_from_headers(&headers), "cn-bj");
+        headers.insert("x-geo-region", HeaderValue::from_static(""));
+        assert!(
+            geo_region_from_headers(&headers).is_empty(),
+            "blank edge headers must not become a region signal"
+        );
+    }
 
     #[test]
     fn moderator_roles_are_explicitly_allowlisted() {
@@ -2453,12 +2763,16 @@ mod tests {
     }
 
     #[test]
-    fn fork_identity_and_idempotency_come_from_trusted_headers() {
+    fn identity_helpers_never_fabricate_a_user() {
         let mut headers = HeaderMap::new();
         headers.insert("x-user-id", HeaderValue::from_static("member-1"));
         headers.insert("idempotency-key", HeaderValue::from_static("fork-1"));
 
-        assert_eq!(user_id(&headers), "member-1");
+                let identity = match authenticated_user(&headers) {
+            Ok(id) => id,
+            Err(_) => panic!("present x-user-id authenticates"),
+        };
+        assert_eq!(identity, "member-1");
         let key = match required_idempotency_key(&headers) {
             Ok(key) => key,
             Err(_) => panic!("idempotency key is present"),
@@ -2467,5 +2781,9 @@ mod tests {
 
         let missing_key = HeaderMap::new();
         assert!(required_idempotency_key(&missing_key).is_err());
+        // No header: personal endpoints refuse (401), public reads stay
+        // anonymous with an empty viewer id — never a shared "demo-user".
+        assert!(authenticated_user(&missing_key).is_err());
+        assert_eq!(optional_user_id(&missing_key), "");
     }
 }

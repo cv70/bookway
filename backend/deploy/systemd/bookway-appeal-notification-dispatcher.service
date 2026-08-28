@@ -1,0 +1,18 @@
+# Dispatches appeal outcome notifications once their restriction windows
+# resolve.
+[Unit]
+Description=Bookway appeal notification dispatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+ExecStart=/opt/bookway/backend/target/release/bookway-appeal-notification-dispatcher
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

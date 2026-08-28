@@ -1,0 +1,19 @@
+# Sweeps expired mall inventory reservations back to available stock
+# (reservation TTL reconciliation behind the Redis+Lua gate). A stalled
+# sweeper permanently leaks reservable stock.
+[Unit]
+Description=Bookway mall inventory reservation sweeper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+ExecStart=/opt/bookway/backend/target/release/bookway-mall-inventory-sweeper
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

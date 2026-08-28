@@ -24,6 +24,14 @@ pub(crate) struct ExposureItem {
     pub(crate) content_id: String,
     pub(crate) source: String,
     pub(crate) score: f64,
+    // The objective estimates the ranker produced for this serving. Recorded
+    // so calibration and experiment evaluation work on what was predicted,
+    // not only on the fused score.
+    pub(crate) p_ctr: f64,
+    pub(crate) p_cvr: f64,
+    pub(crate) p_wegu: f64,
+    // Serving-time feature values (JSON object) for offline model training.
+    pub(crate) feature_snapshot: serde_json::Value,
     pub(crate) reasons: Vec<String>,
 }
 
@@ -86,6 +94,10 @@ mod tests {
                     content_id: "content-1".to_string(),
                     source: "recall:quality".to_string(),
                     score: 1.0,
+                    p_ctr: 0.0,
+                    p_cvr: 0.0,
+                    p_wegu: 0.0,
+                    feature_snapshot: serde_json::json!({}),
                     reasons: Vec::new(),
                 }],
             })
@@ -128,6 +140,10 @@ mod tests {
                     content_id: "content-1".to_string(),
                     source: "recall:quality".to_string(),
                     score: 1.0,
+                    p_ctr: 0.0,
+                    p_cvr: 0.0,
+                    p_wegu: 0.0,
+                    feature_snapshot: serde_json::json!({}),
                     reasons: Vec::new(),
                 }],
             })

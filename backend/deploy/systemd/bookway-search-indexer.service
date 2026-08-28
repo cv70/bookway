@@ -1,0 +1,20 @@
+# Long-running content index projector: drains content_index_outbox into
+# OpenSearch. Requires OPENSEARCH_URL, OPENSEARCH_WRITE_INDEX and PostgreSQL
+# in /etc/bookway/backend.env (see the indexer's README for shadow-index
+# double writes during rebuilds).
+[Unit]
+Description=Bookway search indexer (content_index_outbox -> OpenSearch)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+ExecStart=/opt/bookway/backend/target/release/bookway-search-indexer
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,7 @@ use tonic::transport::Channel;
 use super::{Candidate, CandidateRanker, FeedQuery, PipelineError, RankOutcome};
 use bookway_feature_main_api::pb::{self as feature, feature_main_client::FeatureMainClient};
 use bookway_recommend_rank_api::pb as rank;
+use bookway_bbs_link_api::pb::GrowthDomain;
 use bookway_recommend_recall_api::pb as recall;
 
 pub(crate) struct RecommendRanker {
@@ -54,15 +55,17 @@ impl CandidateRanker for RecommendRanker {
         query: &FeedQuery,
         candidates: &mut [Candidate],
     ) -> Result<RankOutcome, PipelineError> {
-        let features = self.request_features(&query.user_id, candidates).await?;
+        let user_id = query.user_id_or_empty();
+        let features = self.request_features(user_id, candidates).await?;
         let rank_features = rank_features(features.clone());
         let mut client = (*self.ranker).clone();
         let response = match client
             .rank(
                 bookway_runtime::grpc_service_request(rank::RankRequest {
-                    user_id: query.user_id.clone(),
+                    user_id: user_id.to_string(),
                     features: Some(rank_features),
                     candidates: candidates.iter().map(candidate_to_proto).collect(),
+                    user_context: user_context_text(query),
                 })
                 .map_err(|error| PipelineError::Model(error.to_string()))?,
             )
@@ -87,16 +90,15 @@ impl CandidateRanker for RecommendRanker {
         let scores = response
             .candidates
             .into_iter()
-            .map(|candidate| (candidate.content_id, candidate.score))
+            .map(|candidate| {
+                let objectives = (candidate.p_ctr, candidate.p_cvr, candidate.p_wegu);
+                (
+                    candidate.content_id,
+                    (candidate.score, objectives, candidate.feature_snapshot),
+                )
+            })
             .collect::<HashMap<_, _>>();
-        let mut scored_candidates = 0;
-        for candidate in candidates {
-            if let Some(score) = scores.get(&candidate.post.id) {
-                scored_candidates += 1;
-                candidate.score = *score;
-                candidate.reasons.push("模型排序".to_string());
-            }
-        }
+        let scored_candidates = apply_ranked_scores(candidates, scores);
         Ok(RankOutcome {
             model_version: (!response.model_version.is_empty()).then_some(response.model_version),
             experiment_bucket: (!response.experiment_bucket.is_empty())
@@ -104,6 +106,32 @@ impl CandidateRanker for RecommendRanker {
             degraded: response.degraded || scored_candidates != expected_scores,
         })
     }
+}
+
+/// Applies the rank response's fused score and per-objective estimates to the
+/// matching candidates. Returns how many candidates the response covered.
+fn apply_ranked_scores(
+    candidates: &mut [Candidate],
+    scores: HashMap<String, (f64, (f64, f64, f64), HashMap<String, f64>)>,
+) -> usize {
+    let mut scored_candidates = 0;
+    for candidate in candidates {
+        if let Some((score, (p_ctr, p_cvr, p_wegu), feature_snapshot)) =
+            scores.get(&candidate.post.id)
+        {
+            scored_candidates += 1;
+            candidate.score = *score;
+            // Keep the per-objective estimates and the serving-time feature
+            // values so the exposure ledger can record exactly what the ranker
+            // used and predicted for this serving.
+            candidate.p_ctr = *p_ctr;
+            candidate.p_cvr = *p_cvr;
+            candidate.p_wegu = *p_wegu;
+            candidate.feature_snapshot = feature_snapshot.clone();
+            candidate.reasons.push("模型排序".to_string());
+        }
+    }
+    scored_candidates
 }
 
 fn apply_feature_fallback(candidates: &mut [Candidate], features: &feature::FeaturesResponse) {
@@ -119,13 +147,56 @@ fn apply_feature_fallback(candidates: &mut [Candidate], features: &feature::Feat
         let p_cvr = calibrated_probability(signal.purchase_conversion_rate);
         let p_wegu = calibrated_probability(signal.action_completion_rate);
         let route_completion = finite_probability(signal.route_completion_rate);
+        candidate.p_ctr = p_ctr;
+        candidate.p_cvr = p_cvr;
+        candidate.p_wegu = p_wegu;
         candidate.score += 0.18 * p_ctr
             + 0.20 * p_cvr
             + 0.30 * p_wegu
             + 0.20 * route_completion
             + 0.08 * finite_probability(signal.save_rate);
-        candidate.reasons.push("多目标特征降级排序".to_string());
+        candidate
+            .reasons
+            .push("[debug] 多目标特征降级排序".to_string());
     }
+}
+
+/// Human-readable serving context for the LLM scorer, composed only from
+/// hydrated request facts (declared interests, surface). No private ledger
+/// text ever leaves the pipeline boundary through this field.
+fn user_context_text(query: &FeedQuery) -> String {
+    // Labels keyed by bbs-link GrowthDomain's real discriminants
+    // (Learning=0 .. Leisure=4) — an off-by-one table once told the LLM a
+    // movement candidate was "学习".
+    const DOMAIN_LABELS: &[(i32, &str)] = &[
+        (GrowthDomain::Learning as i32, "学习"),
+        (GrowthDomain::Movement as i32, "运动"),
+        (GrowthDomain::Wellness as i32, "健康"),
+        (GrowthDomain::Travel as i32, "旅行"),
+        (GrowthDomain::Leisure as i32, "休闲"),
+    ];
+    let mut interests = query
+        .interests
+        .iter()
+        .filter_map(|domain| {
+            DOMAIN_LABELS
+                .iter()
+                .find(|(value, _)| *value == *domain as i32)
+                .map(|(_, label)| *label)
+        })
+        .collect::<Vec<_>>();
+    interests.sort();
+    interests.dedup();
+    let interests_text = if interests.is_empty() {
+        "暂无明确兴趣".to_string()
+    } else {
+        interests.join("、")
+    };
+    let surface_text = match query.surface.as_str() {
+        "following" => "关注流",
+        _ => "发现流",
+    };
+    format!("用户兴趣领域：{interests_text}；内容场景：{surface_text}")
 }
 
 fn rank_features(features: feature::FeaturesResponse) -> rank::RankFeatures {
@@ -165,11 +236,12 @@ fn candidate_to_proto(candidate: &Candidate) -> recall::Candidate {
         freshness: candidate.post.freshness,
         recall_score: candidate.recall_score,
         score: candidate.score,
+        p_ctr: candidate.p_ctr,
+        p_cvr: candidate.p_cvr,
+        p_wegu: candidate.p_wegu,
+        feature_snapshot: candidate.feature_snapshot.clone(),
         source: candidate.source.clone(),
         reasons: candidate.reasons.clone(),
-        p_ctr: 0.0,
-        p_cvr: 0.0,
-        p_wegu: 0.0,
     }
 }
 
@@ -191,9 +263,11 @@ fn finite_probability(value: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use bookway_bbs_link_api::pb::PostSummary;
 
-    use super::{apply_feature_fallback, candidate_to_proto};
+    use super::{apply_feature_fallback, apply_ranked_scores, candidate_to_proto};
     use crate::domain::pipeline::Candidate;
     use bookway_feature_main_api::pb as feature;
 
@@ -212,6 +286,58 @@ mod tests {
         let request_candidate = candidate_to_proto(&candidate);
         assert_eq!(request_candidate.recall_score, 0.25);
         assert_eq!(request_candidate.score, 0.92);
+    }
+
+    #[test]
+    fn rank_response_objectives_land_on_candidates_for_the_exposure_ledger() {
+        let mut candidates = vec![
+            Candidate {
+                post: PostSummary {
+                    id: "content-1".to_string(),
+                    ..Default::default()
+                },
+                ..test_candidate_defaults()
+            },
+            Candidate {
+                post: PostSummary {
+                    id: "content-2".to_string(),
+                    ..Default::default()
+                },
+                ..test_candidate_defaults()
+            },
+        ];
+        let scores = HashMap::from([
+            (
+                "content-1".to_string(),
+                (
+                    0.9,
+                    (0.11, 0.07, 0.33),
+                    HashMap::from([("observed_ctr".to_string(), 0.4)]),
+                ),
+            ),
+            // content-2 is deliberately missing: the ranker did not cover it.
+        ]);
+
+        let scored = apply_ranked_scores(&mut candidates, scores);
+
+        assert_eq!(scored, 1);
+        assert_eq!(candidates[0].score, 0.9);
+        assert_eq!(candidates[0].p_ctr, 0.11);
+        assert_eq!(candidates[0].p_cvr, 0.07);
+        assert_eq!(candidates[0].p_wegu, 0.33);
+        assert_eq!(
+            candidates[0].feature_snapshot.get("observed_ctr"),
+            Some(&0.4),
+            "the serving-time feature values ride to the exposure ledger"
+        );
+        assert_eq!(
+            candidates[1].p_wegu, 0.0,
+            "uncovered candidates keep zeroed objectives so the ledger can spot ranker gaps"
+        );
+        assert_eq!(
+            candidates[0].reasons.last().map(String::as_str),
+            Some("模型排序")
+        );
     }
 
     #[test]
@@ -264,7 +390,7 @@ mod tests {
             candidate
                 .reasons
                 .iter()
-                .any(|reason| reason == "多目标特征降级排序")
+                .any(|reason| reason == "[debug] 多目标特征降级排序")
         }));
     }
 
@@ -276,6 +402,10 @@ mod tests {
             quality_score: 0.0,
             recall_score: 0.0,
             score: 0.0,
+            p_ctr: 0.0,
+            p_cvr: 0.0,
+            p_wegu: 0.0,
+            feature_snapshot: HashMap::new(),
             source: String::new(),
             reasons: Vec::new(),
             followed_author: false,

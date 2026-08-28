@@ -1,76 +1,34 @@
 import { FormEvent, useState } from "react";
+import { Product, productSkuLabel, productSpu, RouteOffer } from "../domain";
 import {
-  actionNodes,
-  formatActionNode,
-  Product,
-  productSkuLabel,
-  productSpu,
-  RouteOffer,
-} from "../domain";
+  AdminApiError,
+  isMerchantAdminApiConfigured,
+  merchantAdminApi,
+  PublicRouteAction,
+} from "../lib/adminApi";
+
+type LoadedRoute = {
+  id: string;
+  title: string;
+  authorId: string;
+  actions: PublicRouteAction[];
+};
 
 export function RouteOffers({
   offers,
   products,
-  onToggle,
   onCreate,
-  onRemove,
+  notify,
 }: {
   offers: RouteOffer[];
   products: Product[];
-  onToggle: (id: string) => void;
-  onCreate: (offer: RouteOffer) => void;
-  onRemove: (id: string) => void;
+  onCreate: (
+    offer: RouteOffer,
+    mount: { sceneEquipment: string; commissionBps: number; creatorId: string },
+  ) => void;
+  notify: (message: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [error, setError] = useState("");
-  const [removing, setRemoving] = useState<RouteOffer | null>(null);
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const binding = actionNodes.find(
-      (node) => node.id === data.get("actionNodeId"),
-    );
-    if (!binding) {
-      setError("请选择有效的路线行动节点与场景装备。");
-      return;
-    }
-    const { route, node, equipment } = binding;
-    const product = products.find(
-      (item) => item.sku === String(data.get("sku")),
-    );
-    if (!product) {
-      setError("请选择有效 SKU。");
-      return;
-    }
-    const sku = product.sku;
-    if (
-      offers.some(
-        (offer) =>
-          offer.route === route && offer.node === node && offer.sku === sku,
-      )
-    ) {
-      setError("该 SKU 已挂载到此路线节点，请选择其他场景装备。");
-      return;
-    }
-    onCreate({
-      id: "",
-      productId: product.id,
-      routeId: binding.routeId,
-      actionNodeId: binding.id,
-      route,
-      node,
-      equipment,
-      product: product.name,
-      sku,
-      clicks: 0,
-      orders: 0,
-      wegu: 0,
-      routeCompletion: 0,
-      enabled: true,
-    });
-    setOpen(false);
-    setError("");
-  };
   return (
     <section className="content">
       <div className="page-heading">
@@ -78,7 +36,7 @@ export function RouteOffers({
           <p className="eyebrow">场景化商城</p>
           <h1>路线商品</h1>
           <p className="muted">
-            把 SKU 挂载到路线行动节点，商品只在用户执行相应任务时出现。
+            把 SKU 挂载到公开路线的行动节点，商品只在用户执行相应任务时出现。
           </p>
         </div>
         <button className="button primary" onClick={() => setOpen(true)}>
@@ -89,14 +47,14 @@ export function RouteOffers({
         <span>✓</span>
         <p>
           <strong>场景挂载护栏</strong>
-          未绑定路线节点的商品不会进入推荐、搜索或广告混排。
+          未绑定路线节点的商品不会进入推荐、搜索或广告混排；只有路线作者能获得该节点的分账。
         </p>
       </div>
       <div className="panel table-panel">
         <div className="panel-header">
           <div>
             <h2>已关联商品</h2>
-            <p>点击与订单数据按节点归因</p>
+            <p>节点点击与成交归因暂未由网关提供，如实展示为 --</p>
           </div>
         </div>
         <div className="responsive-table">
@@ -104,81 +62,63 @@ export function RouteOffers({
             <thead>
               <tr>
                 <th>路线 / 行动节点</th>
-                <th>商品 / SKU</th>
                 <th>场景装备</th>
+                <th>商品 / SKU</th>
+                <th>佣金比例</th>
                 <th>节点点击</th>
                 <th>成交订单</th>
-                <th>WEGU</th>
-                <th>路线完成度</th>
                 <th>状态</th>
-                <th />
               </tr>
             </thead>
             <tbody>
-              {offers.map((offer) => (
-                <tr key={offer.id}>
-                  <td>
-                    <strong>{offer.route}</strong>
-                    <small>{offer.node}</small>
-                  </td>
-                  <td>{offer.equipment}</td>
-                  <td>
-                    {offer.product}
-                    <small>{offer.sku}</small>
-                  </td>
-                  <td>{offer.clicks.toLocaleString()}</td>
-                  <td>{offer.orders}</td>
-                  <td>{offer.wegu ? `${offer.wegu.toFixed(2)}%` : "--"}</td>
-                  <td>
-                    {offer.routeCompletion
-                      ? `${offer.routeCompletion.toFixed(1)}%`
-                      : "--"}
-                  </td>
-                  <td>
-                    <span
-                      className={`status ${offer.enabled ? "success" : "neutral"}`}
-                    >
-                      {offer.enabled ? "投放中" : "已停用"}
-                    </span>
-                  </td>
-                  <td>
-                    <div className="table-actions">
-                      <button
-                        className="table-action"
-                        onClick={() => onToggle(offer.id)}
-                      >
-                        {offer.enabled ? "停用" : "启用"}
-                      </button>
-                      <button
-                        className="table-action danger-action"
-                        onClick={() => setRemoving(offer)}
-                      >
-                        移除
-                      </button>
-                    </div>
+              {offers.length ? (
+                offers.map((offer) => (
+                  <tr key={offer.id}>
+                    <td>
+                      <strong>{offer.route}</strong>
+                      <small>{offer.node}</small>
+                    </td>
+                    <td>{offer.equipment}</td>
+                    <td>
+                      {offer.product}
+                      <small>{offer.sku}</small>
+                    </td>
+                    <td>
+                      {offer.commissionBps !== undefined
+                        ? `${(offer.commissionBps / 100).toFixed(1)}%`
+                        : "--"}
+                    </td>
+                    {/* 归因数据没有服务端来源；本地创建时为 0，
+                        展示为 -- 避免把占位值冒充服务端统计。 */}
+                    <td>{offer.clicks ? offer.clicks.toLocaleString() : "--"}</td>
+                    <td>{offer.orders ? offer.orders : "--"}</td>
+                    <td>
+                      <span className={`status ${offer.enabled ? "success" : "neutral"}`}>
+                        {offer.enabled ? "投放中" : "已停用"}
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={7} className="empty-row">
+                    暂无路线商品关联；请通过「关联商品」把 SKU 挂载到公开路线的行动节点。
                   </td>
                 </tr>
-              ))}
+              )}
             </tbody>
           </table>
         </div>
       </div>
       {open && (
         <OfferForm
-          error={error}
           products={products}
           close={() => setOpen(false)}
-          submit={submit}
-        />
-      )}
-      {removing && (
-        <RemoveOffer
-          offer={removing}
-          close={() => setRemoving(null)}
-          remove={() => {
-            onRemove(removing.id);
-            setRemoving(null);
+          onSubmit={(offer, mount) => {
+            onCreate(offer, mount);
+            setOpen(false);
           }}
+          notify={notify}
         />
       )}
     </section>
@@ -186,19 +126,115 @@ export function RouteOffers({
 }
 
 function OfferForm({
-  error,
   products,
   close,
-  submit,
+  onSubmit,
+  notify,
 }: {
-  error: string;
   products: Product[];
   close: () => void;
-  submit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (
+    offer: RouteOffer,
+    mount: { sceneEquipment: string; commissionBps: number; creatorId: string },
+  ) => void;
+  notify: (message: string) => void;
 }) {
+  const [routeId, setRouteId] = useState("");
+  const [route, setRoute] = useState<LoadedRoute | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [selectedAction, setSelectedAction] = useState<PublicRouteAction | null>(
+    null,
+  );
+  const [equipment, setEquipment] = useState("");
+  const loadRoute = async () => {
+    const id = routeId.trim();
+    if (!id) {
+      setError("请输入公开路线的内容 ID。");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const content = await merchantAdminApi.getPublicContent(id);
+      if (
+        content.status !== 2 /* Published */ ||
+        !content.route_template?.actions?.length
+      ) {
+        setError("该内容不是已发布的路线，无法挂载商品。");
+        return;
+      }
+      setRoute({
+        id: content.id,
+        title: content.id,
+        authorId: content.author_id,
+        actions: content.route_template.actions,
+      });
+      setSelectedAction(null);
+      setEquipment("");
+    } catch (loadError) {
+      const apiError =
+        loadError instanceof AdminApiError ? loadError : undefined;
+      setError(apiError?.message || "路线加载失败，请确认内容 ID 后重试。");
+    } finally {
+      setLoading(false);
+    }
+  };
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const product = products.find(
+      (item) => item.sku === String(data.get("sku")),
+    );
+    if (!product) {
+      setError("请选择有效 SKU。");
+      return;
+    }
+    if (!route || !selectedAction) {
+      setError("请先加载公开路线并选择行动节点。");
+      return;
+    }
+    if (!equipment) {
+      setError("请选择该行动节点声明的场景装备。");
+      return;
+    }
+    const commissionBps = Number(data.get("commissionPercent"));
+    if (
+      !Number.isFinite(commissionBps) ||
+      commissionBps < 0 ||
+      commissionBps > 30
+    ) {
+      setError("佣金比例需在 0 到 30 之间。");
+      return;
+    }
+    onSubmit(
+      {
+        id: "",
+        productId: product.id,
+        routeId: route.id,
+        actionNodeId: selectedAction.id,
+        route: route.title,
+        node: selectedAction.title,
+        equipment,
+        product: product.name,
+        sku: product.sku,
+        clicks: 0,
+        orders: 0,
+        wegu: 0,
+        routeCompletion: 0,
+        enabled: true,
+        commissionBps: Math.round(commissionBps * 100),
+      },
+      {
+        sceneEquipment: equipment,
+        commissionBps: Math.round(commissionBps * 100),
+        creatorId: route.authorId,
+      },
+    );
+  };
   return (
     <div className="modal-backdrop">
-      <form className="modal" onSubmit={submit}>
+      <form className="modal" onSubmit={handleSubmit}>
         <div className="dialog-header">
           <div>
             <p className="eyebrow">场景化挂载</p>
@@ -213,16 +249,93 @@ function OfferForm({
             {error}
           </p>
         )}
+        {!isMerchantAdminApiConfigured() && (
+          <p className="form-error" role="alert">
+            未连接商家管理网关，挂载无法写入服务端路线节点。
+          </p>
+        )}
         <label>
-          路线行动节点与场景装备
-          <select name="actionNodeId" required>
-            {actionNodes.map((node) => (
-              <option value={node.id} key={node.id}>
-                {formatActionNode(node)}
-              </option>
-            ))}
-          </select>
+          公开路线内容 ID
+          <div className="form-grid">
+            <input
+              name="routeContentId"
+              value={routeId}
+              required
+              placeholder="例如：route-weekend-hike"
+              onChange={(event) => setRouteId(event.target.value)}
+            />
+            <button
+              type="button"
+              className="button secondary"
+              disabled={loading}
+              onClick={() => {
+                void loadRoute();
+              }}
+            >
+              {loading ? "加载中…" : "加载路线"}
+            </button>
+          </div>
         </label>
+        {route && (
+          <>
+            <label>
+              行动节点
+              <select
+                name="actionNode"
+                required
+                onChange={(event) => {
+                  const action = route.actions.find(
+                    (item) => item.id === event.target.value,
+                  );
+                  setSelectedAction(action ?? null);
+                  setEquipment("");
+                }}
+              >
+                <option value="" disabled>
+                  选择行动节点
+                </option>
+                {route.actions.map((action) => (
+                  <option value={action.id} key={action.id}>
+                    {action.title}（{action.id}
+                    {action.scene_equipment.length
+                      ? ""
+                      : "，未声明场景装备"}
+                    ）
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selectedAction && selectedAction.scene_equipment.length > 0 && (
+              <label>
+                场景装备（节点声明）
+                <select
+                  name="sceneEquipment"
+                  required
+                  value={equipment}
+                  onChange={(event) => setEquipment(event.target.value)}
+                >
+                  <option value="" disabled>
+                    选择场景装备
+                  </option>
+                  {selectedAction.scene_equipment.map((item) => (
+                    <option value={item} key={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {selectedAction && selectedAction.scene_equipment.length === 0 && (
+              <p className="form-error" role="alert">
+                该节点未声明场景装备，不能挂载商品；请选择其他节点。
+              </p>
+            )}
+            <label>
+              创作者分账接收方（路线作者）
+              <input value={route.authorId} readOnly disabled />
+            </label>
+          </>
+        )}
         <label>
           选择 SKU
           <select name="sku">
@@ -234,6 +347,18 @@ function OfferForm({
             ))}
           </select>
         </label>
+        <label>
+          佣金比例（%，0-30）
+          <input
+            name="commissionPercent"
+            type="number"
+            min="0"
+            max="30"
+            step="0.5"
+            required
+            defaultValue="10"
+          />
+        </label>
         <div className="dialog-actions">
           <button type="button" className="button secondary" onClick={close}>
             取消
@@ -241,43 +366,6 @@ function OfferForm({
           <button className="button primary">确认关联</button>
         </div>
       </form>
-    </div>
-  );
-}
-function RemoveOffer({
-  offer,
-  close,
-  remove,
-}: {
-  offer: RouteOffer;
-  close: () => void;
-  remove: () => void;
-}) {
-  return (
-    <div className="modal-backdrop" onClick={close}>
-      <div className="modal" onClick={(event) => event.stopPropagation()}>
-        <div className="dialog-header">
-          <div>
-            <p className="eyebrow">解除场景挂载</p>
-            <h2>移除路线商品</h2>
-          </div>
-          <button className="icon-button" onClick={close}>
-            ×
-          </button>
-        </div>
-        <p className="modal-copy">
-          “{offer.product}”将不再在“{offer.route} · {offer.node} ·{" "}
-          {offer.equipment}”节点曝光。
-        </p>
-        <div className="dialog-actions">
-          <button className="button secondary" onClick={close}>
-            取消
-          </button>
-          <button className="button danger-button" onClick={remove}>
-            确认移除
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

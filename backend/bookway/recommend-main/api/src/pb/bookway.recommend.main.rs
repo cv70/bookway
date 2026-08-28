@@ -38,6 +38,12 @@ pub struct FeedRequest {
     pub cursor: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "8")]
     pub action_context: ::core::option::Option<FeedActionContext>,
+    /// Delivery context the gateway derives from edge headers; drives
+    /// fail-closed geo/device targeting in contextual ad mixing.
+    #[prost(string, tag = "9")]
+    pub geo_region: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub device_os: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

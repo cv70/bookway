@@ -216,12 +216,68 @@ impl Domain {
                 "user_id, event_id, request_id and campaign_id are required".to_string(),
             ));
         }
+        // Conversions are a MONEY fact: the only legitimate producer is the
+        // payment pipeline (purchase_event_outbox -> outbox-relay ->
+        // ad-center), which carries the server-verified paid order. A client
+        // asserting its own purchase would poison pCVR calibration, so the
+        // public beacon path admits impressions and clicks only.
+        reject_client_asserted_conversion(&request)?;
         let mut client = self.center.clone();
         client
             .record_event(service_request("ad-center", request)?)
             .await
             .map(|response| response.into_inner())
             .map_err(|error| upstream_error("ad-center", error))
+    }
+}
+
+/// Conversions are a server-side fact: only the payment pipeline
+/// (purchase_event_outbox -> cmd/outbox-relay -> ad-center) may report one,
+/// because it alone carries a verified paid order. A client-asserted
+/// conversion would poison pCVR calibration.
+fn reject_client_asserted_conversion(
+    request: &center::RecordEventRequest,
+) -> Result<(), AdMainError> {
+    if request.event_type == center::EventType::Conversion as i32 {
+        return Err(AdMainError::Validation(
+            "conversions are server-attributed from payment facts; clients may report impressions and clicks only".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod conversion_gate_tests {
+    use super::reject_client_asserted_conversion;
+    use bookway_ad_center_api::pb as center;
+
+    #[test]
+    fn client_conversion_beacons_are_rejected() {
+        let request = center::RecordEventRequest {
+            user_id: "user-1".to_string(),
+            event_id: "event-1".to_string(),
+            request_id: "ad-request-1".to_string(),
+            campaign_id: "campaign-1".to_string(),
+            event_type: center::EventType::Conversion as i32,
+        };
+        assert!(reject_client_asserted_conversion(&request).is_err());
+    }
+
+    #[test]
+    fn impression_and_click_beacons_still_pass_the_gate() {
+        for event_type in [
+            center::EventType::Impression as i32,
+            center::EventType::Click as i32,
+        ] {
+            let request = center::RecordEventRequest {
+                user_id: "user-1".to_string(),
+                event_id: "event-1".to_string(),
+                request_id: "ad-request-1".to_string(),
+                campaign_id: "campaign-1".to_string(),
+                event_type,
+            };
+            assert!(reject_client_asserted_conversion(&request).is_ok());
+        }
     }
 }
 

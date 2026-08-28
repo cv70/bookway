@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly recommendation quality evaluation (full label window required)
+
+[Timer]
+OnCalendar=Mon *-*-* 06:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

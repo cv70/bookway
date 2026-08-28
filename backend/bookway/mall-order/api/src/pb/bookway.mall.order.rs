@@ -20,6 +20,22 @@ pub struct CreateRequest {
     /// checkout is intentionally not part of the commerce model.
     #[prost(string, tag = "4")]
     pub node_offer_id: ::prost::alloc::string::String,
+    /// Ad decision context captured from the creative that led to this
+    /// checkout. Recorded on the order and reported to ad-center as a
+    /// server-side conversion only when the payment is VERIFIED — the client
+    /// can never assert the conversion itself.
+    #[prost(message, optional, tag = "5")]
+    pub ad_attribution: ::core::option::Option<AdAttribution>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AdAttribution {
+    /// Ad decision request id from the served FeedAd/SearchAd.
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Campaign that owned the served creative.
+    #[prost(string, tag = "2")]
+    pub campaign_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -75,6 +91,9 @@ pub struct Order {
     pub fulfillment_status: i32,
     #[prost(string, tag = "16")]
     pub tracking_number: ::prost::alloc::string::String,
+    /// Ad decision context this order is attributed to (see CreateRequest).
+    #[prost(message, optional, tag = "17")]
+    pub ad_attribution: ::core::option::Option<AdAttribution>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -91,6 +110,20 @@ pub struct ExpirePendingResponse {
     pub expired: u32,
     #[prost(uint32, tag = "3")]
     pub failed: u32,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct PromoteAffiliateSettlementsResponse {
+    #[prost(uint64, tag = "1")]
+    pub promoted: u64,
+}
+/// Payment-provider webhook confirmation: the gateway verifies the provider's
+/// signature, then drives the same idempotent Pay state machine by reference.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfirmByReferenceRequest {
+    #[prost(string, tag = "1")]
+    pub payment_reference: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -188,6 +221,22 @@ pub struct AffiliateSettlementRequest {
     #[prost(uint32, optional, tag = "4")]
     pub limit: ::core::option::Option<u32>,
 }
+/// Creator-facing settlement listing. The creator only ever reads rows
+/// attributed to their own id (the gateway stamps it from the authenticated
+/// identity); every AffiliateSettlement field stays visible, including the
+/// merchant_id that tells the creator which shop the share came from.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreatorSettlementRequest {
+    #[prost(string, tag = "1")]
+    pub creator_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "AffiliateSettlementStatus", optional, tag = "2")]
+    pub status: ::core::option::Option<i32>,
+    #[prost(string, optional, tag = "3")]
+    pub cursor: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "4")]
+    pub limit: ::core::option::Option<u32>,
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AffiliateSettlementListResponse {
@@ -222,6 +271,11 @@ pub enum MallOrderStatus {
     Cancelled = 2,
     Expired = 3,
     PaymentProcessing = 4,
+    /// The payment provider confirmed the money after the order's payment TTL
+    /// already expired the order. Money has moved, so the state is honestly
+    /// distinct from `paid`: fulfillment and affiliate settlement are NOT started
+    /// automatically — operations decides refund vs. fulfill per order.
+    PaidAfterExpiry = 5,
 }
 impl MallOrderStatus {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -235,6 +289,7 @@ impl MallOrderStatus {
             Self::Cancelled => "MALL_ORDER_STATUS_CANCELLED",
             Self::Expired => "MALL_ORDER_STATUS_EXPIRED",
             Self::PaymentProcessing => "MALL_ORDER_STATUS_PAYMENT_PROCESSING",
+            Self::PaidAfterExpiry => "MALL_ORDER_STATUS_PAID_AFTER_EXPIRY",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -245,6 +300,7 @@ impl MallOrderStatus {
             "MALL_ORDER_STATUS_CANCELLED" => Some(Self::Cancelled),
             "MALL_ORDER_STATUS_EXPIRED" => Some(Self::Expired),
             "MALL_ORDER_STATUS_PAYMENT_PROCESSING" => Some(Self::PaymentProcessing),
+            "MALL_ORDER_STATUS_PAID_AFTER_EXPIRY" => Some(Self::PaidAfterExpiry),
             _ => None,
         }
     }
@@ -621,6 +677,38 @@ pub mod mall_order_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Creator-facing read of the same ledger, keyed by creator_id. Rows are the
+        /// existing AffiliateSettlement messages; no merchant-only actions (settle,
+        /// fulfillment) are reachable through it.
+        pub async fn list_creator_settlements(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreatorSettlementRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AffiliateSettlementListResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.mall.order.MallOrder/ListCreatorSettlements",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "bookway.mall.order.MallOrder",
+                        "ListCreatorSettlements",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn settle_affiliate(
             &mut self,
             request: impl tonic::IntoRequest<super::SettleAffiliateRequest>,
@@ -672,6 +760,60 @@ pub mod mall_order_client {
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new("bookway.mall.order.MallOrder", "ReverseAffiliate"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Called by the expirer worker: flips pending creator shares whose refund
+        /// window has elapsed to eligible, so merchants can pay them out.
+        pub async fn promote_affiliate_settlements(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BatchRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PromoteAffiliateSettlementsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.mall.order.MallOrder/PromoteAffiliateSettlements",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "bookway.mall.order.MallOrder",
+                        "PromoteAffiliateSettlements",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn confirm_by_reference(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ConfirmByReferenceRequest>,
+        ) -> std::result::Result<tonic::Response<super::Order>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.mall.order.MallOrder/ConfirmByReference",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.mall.order.MallOrder", "ConfirmByReference"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -738,6 +880,16 @@ pub mod mall_order_server {
             tonic::Response<super::AffiliateSettlementListResponse>,
             tonic::Status,
         >;
+        /// Creator-facing read of the same ledger, keyed by creator_id. Rows are the
+        /// existing AffiliateSettlement messages; no merchant-only actions (settle,
+        /// fulfillment) are reachable through it.
+        async fn list_creator_settlements(
+            &self,
+            request: tonic::Request<super::CreatorSettlementRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AffiliateSettlementListResponse>,
+            tonic::Status,
+        >;
         async fn settle_affiliate(
             &self,
             request: tonic::Request<super::SettleAffiliateRequest>,
@@ -754,6 +906,19 @@ pub mod mall_order_server {
             tonic::Response<super::AffiliateSettlement>,
             tonic::Status,
         >;
+        /// Called by the expirer worker: flips pending creator shares whose refund
+        /// window has elapsed to eligible, so merchants can pay them out.
+        async fn promote_affiliate_settlements(
+            &self,
+            request: tonic::Request<super::BatchRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PromoteAffiliateSettlementsResponse>,
+            tonic::Status,
+        >;
+        async fn confirm_by_reference(
+            &self,
+            request: tonic::Request<super::ConfirmByReferenceRequest>,
+        ) -> std::result::Result<tonic::Response<super::Order>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct MallOrderServer<T> {
@@ -1225,6 +1390,52 @@ pub mod mall_order_server {
                     };
                     Box::pin(fut)
                 }
+                "/bookway.mall.order.MallOrder/ListCreatorSettlements" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListCreatorSettlementsSvc<T: MallOrder>(pub Arc<T>);
+                    impl<
+                        T: MallOrder,
+                    > tonic::server::UnaryService<super::CreatorSettlementRequest>
+                    for ListCreatorSettlementsSvc<T> {
+                        type Response = super::AffiliateSettlementListResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreatorSettlementRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MallOrder>::list_creator_settlements(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListCreatorSettlementsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/bookway.mall.order.MallOrder/SettleAffiliate" => {
                     #[allow(non_camel_case_types)]
                     struct SettleAffiliateSvc<T: MallOrder>(pub Arc<T>);
@@ -1300,6 +1511,99 @@ pub mod mall_order_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ReverseAffiliateSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.mall.order.MallOrder/PromoteAffiliateSettlements" => {
+                    #[allow(non_camel_case_types)]
+                    struct PromoteAffiliateSettlementsSvc<T: MallOrder>(pub Arc<T>);
+                    impl<T: MallOrder> tonic::server::UnaryService<super::BatchRequest>
+                    for PromoteAffiliateSettlementsSvc<T> {
+                        type Response = super::PromoteAffiliateSettlementsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BatchRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MallOrder>::promote_affiliate_settlements(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PromoteAffiliateSettlementsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/bookway.mall.order.MallOrder/ConfirmByReference" => {
+                    #[allow(non_camel_case_types)]
+                    struct ConfirmByReferenceSvc<T: MallOrder>(pub Arc<T>);
+                    impl<
+                        T: MallOrder,
+                    > tonic::server::UnaryService<super::ConfirmByReferenceRequest>
+                    for ConfirmByReferenceSvc<T> {
+                        type Response = super::Order;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ConfirmByReferenceRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MallOrder>::confirm_by_reference(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ConfirmByReferenceSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

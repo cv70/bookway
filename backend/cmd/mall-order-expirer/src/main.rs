@@ -1,8 +1,6 @@
 use std::{env, time::Duration};
 
-use bookway_mall_order_api::pb::{
-    BatchRequest, ExpirePendingResponse, mall_order_client::MallOrderClient,
-};
+use bookway_mall_order_api::pb::{BatchRequest, mall_order_client::MallOrderClient};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -50,16 +48,40 @@ where
     }
 }
 
+struct RoundOutcome {
+    promoted: u64,
+    scanned: u32,
+    expired: u32,
+    failed: u32,
+}
+
 async fn run_once(
     client: &mut MallOrderClient<tonic::transport::Channel>,
     batch_size: u32,
-) -> Result<ExpirePendingResponse, WorkerError> {
-    Ok(client
+) -> Result<RoundOutcome, WorkerError> {
+    // Promotion runs before expiry: creator shares whose settlement hold
+    // (MALL_AFFILIATE_HOLD_DAYS) elapsed become payable the moment they
+    // qualify — this job is the promoter per migrations/README.md. Without
+    // it every share stays `pending` forever and creators can never be paid.
+    let promoted = client
+        .promote_affiliate_settlements(bookway_runtime::grpc_service_request(BatchRequest {
+            limit: batch_size,
+        })?)
+        .await?
+        .into_inner()
+        .promoted;
+    let expiry = client
         .expire_pending(bookway_runtime::grpc_service_request(BatchRequest {
             limit: batch_size,
         })?)
         .await?
-        .into_inner())
+        .into_inner();
+    Ok(RoundOutcome {
+        promoted,
+        scanned: expiry.scanned,
+        expired: expiry.expired,
+        failed: expiry.failed,
+    })
 }
 
 #[tokio::main]
@@ -70,12 +92,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = MallOrderClient::new(channel);
     loop {
         match run_once(&mut client, config.batch_size).await {
-            Ok(result) if result.scanned == 0 => tokio::time::sleep(config.idle_interval).await,
+            Ok(result) if result.scanned == 0 && result.promoted == 0 => {
+                tokio::time::sleep(config.idle_interval).await
+            }
             Ok(result) => tracing::info!(
+                promoted = result.promoted,
                 scanned = result.scanned,
                 expired = result.expired,
                 failed = result.failed,
-                "mall order expiry batch processed"
+                "mall order settlement/expiry round processed"
             ),
             Err(error) => {
                 tracing::error!(%error, "mall order expiry batch failed");

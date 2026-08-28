@@ -10,6 +10,8 @@ pub(crate) struct PurchaseOutboxEntry {
     pub(crate) order_id: String,
     pub(crate) user_id: String,
     pub(crate) node_offer_id: String,
+    pub(crate) ad_request_id: Option<String>,
+    pub(crate) ad_campaign_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -26,6 +28,12 @@ pub(crate) struct MemoryOrderDao {
 impl MemoryOrderDao {
     pub(crate) async fn purchase_queue(&self) -> Vec<PurchaseOutboxEntry> {
         self.purchase_queue.read().await.clone()
+    }
+
+    pub(crate) async fn settlements_debug(
+        &self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<String, pb::AffiliateSettlement>> {
+        self.settlements.write().await
     }
 }
 
@@ -46,6 +54,11 @@ impl MemoryOrderDao {
                 order_id: order.id.clone(),
                 user_id: order.user_id.clone(),
                 node_offer_id: order.node_offer_id.clone(),
+                ad_request_id: order.ad_attribution.as_ref().map(|a| a.request_id.clone()),
+                ad_campaign_id: order
+                    .ad_attribution
+                    .as_ref()
+                    .map(|a| a.campaign_id.clone()),
             });
         }
     }
@@ -242,7 +255,12 @@ impl OrderDao for MemoryOrderDao {
                 && order.order.status == pb::MallOrderStatus::PendingPayment as i32)
             || (status == pb::MallOrderStatus::Expired as i32
                 && (order.order.status == pb::MallOrderStatus::PendingPayment as i32
-                    || order.order.status == pb::MallOrderStatus::PaymentProcessing as i32));
+                    || order.order.status == pb::MallOrderStatus::PaymentProcessing as i32))
+            // Expiry reconciliation: a late provider confirmation moves the
+            // expired order to paid_after_expiry. Money moved, so the state is
+            // durable, not an error replay target.
+            || (status == pb::MallOrderStatus::PaidAfterExpiry as i32
+                && order.order.status == pb::MallOrderStatus::Expired as i32);
         if !allowed_source {
             return Err(DaoError::Failed(format!(
                 "order {id} is not in a transitionable payment state"
@@ -331,22 +349,68 @@ impl OrderDao for MemoryOrderDao {
         order.order.updated_at = timestamp(OffsetDateTime::now_utc());
         Ok(order.order.clone())
     }
-    async fn ensure_settlement(&self, order: &pb::Order) -> Result<(), DaoError> {
+    async fn get_by_payment_reference(
+        &self,
+        reference: &str,
+    ) -> Result<Option<(String, String)>, DaoError> {
+        let orders = self.orders.read().await;
+        Ok(orders
+            .values()
+            .find(|stored| stored.order.payment_reference.as_deref() == Some(reference))
+            .map(|stored| (stored.order.id.clone(), stored.order.user_id.clone())))
+    }
+    async fn ensure_settlement(
+        &self,
+        order: &pb::Order,
+        hold_days: u32,
+    ) -> Result<(), DaoError> {
         let mut settlements = self.settlements.write().await;
         settlements
             .entry(order.id.clone())
-            .or_insert_with(|| pb::AffiliateSettlement {
-                id: uuid::Uuid::now_v7().to_string(),
-                order_id: order.id.clone(),
-                merchant_id: order.merchant_id.clone(),
-                creator_id: order.affiliate_creator_id.clone(),
-                amount_cents: order.commission_cents,
-                status: pb::AffiliateSettlementStatus::Eligible as i32,
-                eligible_at: timestamp(OffsetDateTime::now_utc()),
-                settled_at: None,
-                created_at: timestamp(OffsetDateTime::now_utc()),
+            .or_insert_with(|| {
+                let now = OffsetDateTime::now_utc();
+                let (status, eligible_at) = if hold_days > 0 {
+                    (
+                        pb::AffiliateSettlementStatus::Pending as i32,
+                        timestamp(now + std::time::Duration::from_secs(86_400 * u64::from(hold_days))),
+                    )
+                } else {
+                    (pb::AffiliateSettlementStatus::Eligible as i32, timestamp(now))
+                };
+                pb::AffiliateSettlement {
+                    id: uuid::Uuid::now_v7().to_string(),
+                    order_id: order.id.clone(),
+                    merchant_id: order.merchant_id.clone(),
+                    creator_id: order.affiliate_creator_id.clone(),
+                    amount_cents: order.commission_cents,
+                    status,
+                    eligible_at,
+                    settled_at: None,
+                    created_at: timestamp(now),
+                }
             });
         Ok(())
+    }
+    async fn promote_eligible_settlements(&self) -> Result<u64, DaoError> {
+        // Compare parsed instants: lexicographic RFC3339 comparison breaks
+        // whenever the two timestamps carry different fractional-digit
+        // lengths (".1Z" vs ".09Z" orders wrongly by string).
+        let now = OffsetDateTime::now_utc();
+        let mut settlements = self.settlements.write().await;
+        let mut promoted = 0;
+        for item in settlements.values_mut() {
+            if item.status != pb::AffiliateSettlementStatus::Pending as i32 {
+                continue;
+            }
+            let Ok(eligible_at) = OffsetDateTime::parse(&item.eligible_at, &Rfc3339) else {
+                continue; // unreadable stored instant: skip, never guess
+            };
+            if eligible_at <= now {
+                item.status = pb::AffiliateSettlementStatus::Eligible as i32;
+                promoted += 1;
+            }
+        }
+        Ok(promoted)
     }
     async fn settlements(
         &self,
@@ -362,6 +426,28 @@ impl OrderDao for MemoryOrderDao {
             .await
             .values()
             .filter(|item| item.merchant_id == merchant_id)
+            .filter(|item| status.is_none_or(|value| item.status == value))
+            .filter(|item| cursor.is_empty() || item.id.as_str() < cursor)
+            .cloned()
+            .collect::<Vec<_>>();
+        values.sort_by(|left, right| right.id.cmp(&left.id));
+        values.truncate(limit.clamp(1, 100));
+        Ok(values)
+    }
+    async fn creator_settlements(
+        &self,
+        creator_id: &str,
+        status: Option<i32>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<pb::AffiliateSettlement>, DaoError> {
+        let cursor = cursor.unwrap_or_default();
+        let mut values = self
+            .settlements
+            .read()
+            .await
+            .values()
+            .filter(|item| item.creator_id == creator_id)
             .filter(|item| status.is_none_or(|value| item.status == value))
             .filter(|item| cursor.is_empty() || item.id.as_str() < cursor)
             .cloned()
@@ -396,7 +482,9 @@ impl OrderDao for MemoryOrderDao {
             .get_mut(order_id)
             .ok_or_else(|| DaoError::NotFound(order_id.to_string()))?;
         match pb::AffiliateSettlementStatus::try_from(item.status).ok() {
-            Some(pb::AffiliateSettlementStatus::Eligible) => {
+            // A refund inside the window voids the pending share too.
+            Some(pb::AffiliateSettlementStatus::Eligible)
+            | Some(pb::AffiliateSettlementStatus::Pending) => {
                 item.status = pb::AffiliateSettlementStatus::Reversed as i32;
                 item.settled_at = None;
                 Ok(item.clone())

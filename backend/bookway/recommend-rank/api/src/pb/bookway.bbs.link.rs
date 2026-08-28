@@ -56,6 +56,11 @@ pub struct PostSummary {
     /// adoptable, but its answers may be selected by its author.
     #[prost(bool, tag = "16")]
     pub is_question: bool,
+    /// Published forks of this route. Maintained by BBS Link in the same
+    /// transaction that publishes the fork; it is a fact of the content table,
+    /// not a client-reported counter.
+    #[prost(uint32, tag = "17")]
+    pub fork_count: u32,
 }
 /// A route template is authored as community content but copied into a user's
 /// private plan when they join. It never references the author's private data.
@@ -182,6 +187,10 @@ pub struct RouteFork {
     pub source_route_title: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub forked_at: ::prost::alloc::string::String,
+    /// Author of the source route at fork time; enables attribution and
+    /// author notifications without re-reading the source content.
+    #[prost(string, tag = "5")]
+    pub source_route_author_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

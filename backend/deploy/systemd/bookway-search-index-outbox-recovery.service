@@ -1,0 +1,14 @@
+[Service]
+Type=oneshot
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+# Audits dead letters in content_index_outbox. Requeueing dead letters is a
+# named, reason-annotated manual operation (see migrations/README.md on 0034);
+# this unit only reports.
+[Unit]
+Description=Bookway search index outbox dead-letter report
+After=bookway-search-indexer.service
+
+[Service]
+ExecStart=/opt/bookway/backend/target/release/bookway-search-index-outbox-recovery

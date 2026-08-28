@@ -11,7 +11,7 @@ import {
   View,
 } from 'react-native';
 
-import { ApiRequestError, getSuggestions, search as searchApi } from '../api/client';
+import { ApiRequestError, getSuggestions, search as searchApi, type MallOrderAdAttribution } from '../api/client';
 import { eventReporter } from '../analytics/eventReporter';
 import { FeedCard } from '../components/FeedCard';
 import { ScreenHeader } from '../components/ScreenHeader';
@@ -49,9 +49,13 @@ export function DiscoverScreen({
   joiningRouteIds,
   routeParticipantCounts,
   offline = false,
+  initialLoading = false,
+  feedError = false,
+  followingFeedError = false,
   onLike,
   onBookmark,
   onCreateOrder,
+  onPayOrder,
   onHide,
   onJoin,
   onLoadMoreFeed,
@@ -79,9 +83,19 @@ export function DiscoverScreen({
   joiningRouteIds?: Set<string>;
   routeParticipantCounts?: Record<string, number>;
   offline?: boolean;
+  initialLoading?: boolean;
+  feedError?: boolean;
+  followingFeedError?: boolean;
   onLike?: (postId: string, context?: FeedItem['recommendation_context']) => void;
   onBookmark?: (postId: string, context?: FeedItem['recommendation_context']) => void;
-  onCreateOrder?: (nodeOfferId: string, items: Array<{ sku_id: string; quantity: number }>) => Promise<MallOrder>;
+  onCreateOrder?: (
+    nodeOfferId: string,
+    items: Array<{ sku_id: string; quantity: number }>,
+    adAttribution?: MallOrderAdAttribution,
+  ) => Promise<MallOrder>;
+  // Ready for the payment-provider SDK: orders stay honestly `待支付` until a
+  // real PSP receipt exists, so nothing here fakes a paid order.
+  onPayOrder?: (orderId: string, paymentReference: string) => Promise<MallOrder>;
   onHide?: (postId: string, context?: FeedItem['recommendation_context']) => void;
   onJoin?: (post: NonNullable<Feed['items'][number]['post']>, context?: FeedItem['recommendation_context']) => void;
   onLoadMoreFeed?: (surface: FeedSurface) => void;
@@ -107,6 +121,10 @@ export function DiscoverScreen({
   const visibleFeed = activeFeed.items;
   const feedLoading = mode === 'following' ? followingFeedLoadingMore : contextualFeedLoading || feedLoadingMore;
   const items = filter === 'all' ? visibleFeed : visibleFeed.filter((item) => item.ad || item.post?.domain === filter);
+  // An empty list whose fetch failed is 未连接, not "nothing here yet".
+  const feedUnavailable = mode === 'following'
+    ? followingFeedError && followingFeed.items.length === 0
+    : feedError && feed.items.length === 0;
   const searchResults = searchResponse?.items ?? null;
   const visibleSearchResults = (searchResults?.map((result, position) => ({ result, attribution: result.event_context ?? searchAttribution(position, searchResponse?.request_id) })) ?? null)
     ?.filter(({ result }) => filter === 'all' || (result.post?.domain ?? result.domain) === filter);
@@ -114,6 +132,7 @@ export function DiscoverScreen({
   useEffect(() => {
     setOrderingOfferId(undefined);
     setOrderNotice(undefined);
+    setAdAttribution(undefined);
   }, [contextualAction?.id, contextualFeedContext?.route_id, contextualFeedContext?.action_node_id]);
 
   const contextualOfferItems = contextualFeedContext
@@ -130,20 +149,51 @@ export function DiscoverScreen({
     ))
     : [];
 
+  // Ad decision context captured when the user opened this node context from
+  // a served ad card. Session-scoped, node-matched, cleared after use.
+  const [adAttribution, setAdAttribution] = useState<MallOrderAdAttribution | undefined>();
+  const handleAdPress = (ad: NonNullable<FeedItem['ad']>) => {
+    if (
+      contextualFeedContext
+      && ad.route_id === contextualFeedContext.route_id
+      && ad.action_node_id === contextualFeedContext.action_node_id
+    ) {
+      setAdAttribution({ request_id: ad.request_id, campaign_id: ad.campaign_id });
+    }
+  };
+
   const createOrder = async (offer: NodeOffer) => {
     const sku = offer.product?.skus.find((item) => item.id === offer.sku_id && item.saleable);
     if (!onCreateOrder || !sku || orderingOfferId) return;
     setOrderingOfferId(offer.id);
     setOrderNotice(undefined);
     try {
-      const order = await onCreateOrder(offer.id, [{ sku_id: sku.id, quantity: 1 }]);
-      setOrderNotice(`订单已创建 · ${order.id}`);
+      // If this node context was entered from a served ad, the order carries
+      // that decision context; the conversion itself is verified server-side
+      // after payment (the client can never assert it).
+      const order = await onCreateOrder(
+        offer.id,
+        [{ sku_id: sku.id, quantity: 1 }],
+        adAttribution,
+      );
+      setAdAttribution(undefined);
+      // status 1 = pending_payment. Payment needs a real provider receipt;
+      // without an integrated PSP the order honestly stays payable-later.
+      const pendingPayment = order.status === 1 && !order.payment_reference;
+      setOrderNotice(
+        pendingPayment
+          ? `订单已创建，待支付 · ${order.id}（支付服务商接入后可直接支付）`
+          : `订单已创建 · ${order.id}`,
+      );
     } catch {
       setOrderNotice('暂时无法创建订单，请稍后重试');
     } finally {
       setOrderingOfferId(undefined);
     }
   };
+  // Keeps the pay path wired for the PSP integration; unused references must
+  // never become a fabricated "paid" order.
+  void onPayOrder;
 
   const openResource = (attachment: RouteNodeResourceAttachment) => {
     const url = attachment.resource?.url?.trim();
@@ -304,7 +354,7 @@ export function DiscoverScreen({
       showsVerticalScrollIndicator={false}
     >
       <ScreenHeader action={contextualActive ? 'close' : undefined} onAction={contextualActive ? onClearContextualFeed : undefined} title="发现" />
-      {offline ? <Text style={styles.offline}>当前展示离线预览，连接恢复后会自动更新</Text> : null}
+      {offline ? <Text style={styles.offline}>未连接：暂时无法获取服务端数据，连接恢复后会自动更新</Text> : null}
       <View style={styles.searchBox}>
         <Search color={colors.muted} size={18} />
         <TextInput
@@ -467,7 +517,11 @@ export function DiscoverScreen({
               ),
             )
           : items.map((item) => item.ad ? (
-              <FeedCard item={item} key={`ad:${item.ad.request_id}:${item.ad.campaign_id}`} />
+              <FeedCard
+                item={item}
+                key={`ad:${item.ad.request_id}:${item.ad.campaign_id}`}
+                onAdPress={handleAdPress}
+              />
             ) : item.post ? (
               <FeedCard
                 item={item}
@@ -496,7 +550,11 @@ export function DiscoverScreen({
           {feedLoading ? <ActivityIndicator color={colors.evergreen} size="small" /> : <Text style={styles.loadMoreText}>加载更多{mode === 'following' ? '关注内容' : '推荐内容'}</Text>}
         </Pressable>
       ) : null}
-      {((query && visibleSearchResults?.length === 0) || (!query && items.length === 0)) ? (
+      {!query && items.length === 0 && initialLoading && !feedUnavailable ? (
+        <View style={styles.empty}><ActivityIndicator color={colors.evergreen} size="small" /><Text style={styles.emptyStateText}>正在获取内容…</Text></View>
+      ) : !query && items.length === 0 && feedUnavailable ? (
+        <View style={styles.empty}><Text style={styles.emptyStateTitle}>未连接</Text><Text style={styles.emptyStateText}>暂时无法获取{mode === 'following' ? '关注内容' : '推荐内容'}，连接恢复后会自动更新。</Text></View>
+      ) : ((query && visibleSearchResults?.length === 0) || (!query && items.length === 0)) ? (
         <View style={styles.empty}><Text style={styles.emptyText}>{mode === 'following' && !query ? '关注创作者后，他们的行记会出现在这里' : '这一页还在生长'}</Text></View>
       ) : null}
     </ScrollView>
@@ -569,6 +627,8 @@ const styles = StyleSheet.create({
   resourceDetail: { marginTop: 3, color: colors.muted, fontSize: 12, lineHeight: 17, letterSpacing: 0 },
   empty: { height: 200, alignItems: 'center', justifyContent: 'center' },
   emptyText: { color: colors.faint, fontSize: 14, letterSpacing: 0 },
+  emptyStateTitle: { color: colors.ink, fontSize: 16, fontWeight: '700', letterSpacing: 0 },
+  emptyStateText: { maxWidth: 260, color: colors.muted, fontSize: 13, lineHeight: 20, textAlign: 'center', marginTop: 6, letterSpacing: 0 },
   resultRow: { paddingHorizontal: 20, paddingVertical: 15, backgroundColor: colors.surface, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
   resultTitle: { color: colors.ink, fontSize: 15, fontWeight: '700', letterSpacing: 0 },
   resultSnippet: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4, letterSpacing: 0 },

@@ -8,17 +8,27 @@ pub struct Config {
     /// Endpoint reserved for the standalone model-serving deployment. Empty
     /// keeps ranking on the deterministic heuristic predictor.
     pub model_endpoint: Option<String>,
+    /// Trained logistic artifact (`{version, bias, weights}` JSON). When set
+    /// it wins over the endpoint: the model serves locally with no extra hop,
+    /// and a broken file refuses startup instead of silently ranking with
+    /// the heuristic.
+    pub model_artifact: Option<std::path::PathBuf>,
 }
 impl Config {
     pub fn from_env() -> Result<Self, RuntimeError> {
         let model_endpoint = env::var("RECOMMEND_RANK_MODEL_ENDPOINT")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        let model_artifact = env::var("RECOMMEND_RANK_MODEL_ARTIFACT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(std::path::PathBuf::from);
         Ok(Self {
             listen_addr: bookway_runtime::listen_addr("RECOMMEND_RANK_ADDR", "127.0.0.1:8096")?,
             model_version: env::var("RECOMMEND_RANK_MODEL_VERSION")
                 .unwrap_or_else(|_| "recommend-rank-v2".to_string()),
             model_endpoint,
+            model_artifact,
         })
     }
 }

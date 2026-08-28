@@ -6,9 +6,11 @@
 
 ## 接口
 
-- 内部 gRPC：`search`、`suggestions`。
+- 内部 gRPC：`search`、`search_semantic`、`suggestions`。
 
 配置 `OPENSEARCH_URL` 后，服务通过 OpenSearch 读别名执行多字段检索。OpenSearch 只负责候选召回与稳定排序：每个索引页都会按内容 ID 批量调用 `bbs-link.get_public_summaries`，再以当前公开摘要重建可显示字段；缺失项会丢弃并标记 `degraded=true`，验证失败时整个索引页 fail-closed，绝不返回索引中的旧标题、正文、媒体或已受限内容。Gateway 从可信身份派生拉黑/静音作者集合；OpenSearch 以 `author_id` 条件下推排除，任何降级源也会在生成帖子、路线、用户、话题和内容派生联想词之前过滤，因此不会把不可见作者计入用户结果、话题数或联想词。结果续页使用 5 分钟 PIT、`_score` / 内容 ID 排序和 `search_after`，而公共游标仅包含版本、查询/类型/查看者可见性指纹和短期会话 ID；PIT token、未消费的混合结果及跨页去重键保存在服务端。可见性策略变化会使旧游标失效，避免后续页混入不再可见的内容。PostgreSQL 模式的会话可跨实例续页，过期时服务返回可识别的前置条件错误，客户端应重新发起搜索。首次索引请求不可用时回退到 `bbs-link` 的公开内容并返回 `degraded=true`；继续中的 PIT 请求不会混用降级排序。未配置 OpenSearch 时可直接使用 `bbs-link` 作为无依赖开发路径。结果包含稳定游标、相关性分数和高亮。
+
+`search_semantic` 是 Search Main 的一次性语义召回路：查询向量在同一读别名上执行 kNN 查询，直接遍历索引器写入的 HNSW 图（`cosinesimil`、lucene engine），`status`/`author_id` 可见性与实体面（`route_action_ids` 存在性）过滤随 k-NN 子句下推，由图遍历在 `k` 内完成过滤；结果按 `_score`/内容 ID 稳定排序，且无游标。实体面（NODES/EQUIPMENT）召回语义近邻路线，节点与装备在近邻路线上全量提取，先后交由调用方重排决定；用户/话题/资源面不提供语义召回。
 
 `bbs-indexer` 会把 Protobuf 枚举投影为稳定的关键字 `status`、`content_type` 和 `domain`，避免生成代码的整数表示污染 OpenSearch 过滤。`milestone` 以普通内容参与关键词召回、重排和公开摘要回读，且在结果摘要中保留 `is_milestone=true`；它不会被误分类为可加入的路线。此映射需要新物理索引，已有索引应遵循下方的影子写入、重建、对账和别名切换流程升级，不能原地改变字段类型。
 

@@ -19,6 +19,8 @@ pub(crate) enum SearchSourceError {
     CursorExpired,
     #[error("primary search source is unavailable")]
     Fallback,
+    #[error("semantic vector search is unavailable")]
+    SemanticUnavailable,
 }
 
 pub(crate) struct SearchSourceResult {
@@ -81,6 +83,21 @@ pub(crate) trait SearchSource: Send + Sync {
         _entity_bias: Option<EntityBias>,
     ) -> Result<SearchSourceResult, SearchSourceError> {
         self.contents(query).await
+    }
+
+    /// One-shot semantic (kNN) recall over the indexed vectors. The entity
+    /// bias narrows the traversal to documents that own route action nodes,
+    /// mirroring the lexical entity surfaces. Sources without a vector field
+    /// report `SemanticUnavailable`; the caller then serves an empty semantic
+    /// lane instead of failing the request.
+    async fn search_semantic(
+        &self,
+        _query_vector: &[f32],
+        _limit: usize,
+        _excluded_author_ids: &[String],
+        _entity_bias: Option<EntityBias>,
+    ) -> Result<SearchSourceResult, SearchSourceError> {
+        Err(SearchSourceError::SemanticUnavailable)
     }
 
     /// Releases a cursor that a one-shot caller intentionally will not continue.

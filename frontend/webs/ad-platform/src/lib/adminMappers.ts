@@ -2,10 +2,8 @@ import { ActionNodeBinding, Campaign } from "../domain";
 import { AdCampaign, CreateAdCampaign, UpdateAdCampaign } from "./adminApi";
 
 const bindingFor = (remote: AdCampaign): ActionNodeBinding => ({
-  id: remote.action_node_id,
   routeId: remote.route_id,
-  route: remote.route_id,
-  node: remote.action_node_id,
+  actionNodeId: remote.action_node_id,
   equipment: remote.scene_equipment,
 });
 
@@ -20,10 +18,10 @@ export function campaignFromRemote(remote: AdCampaign): Campaign {
     budget: `¥${(remote.daily_budget_micros / 1_000_000).toFixed(2)}`,
     spent: `¥${(remote.spent_today_micros / 1_000_000).toFixed(2)}`,
     impressions: remote.impressions.toLocaleString(),
+    clicks: remote.clicks,
     state: stateFor(remote.status),
     color: "gray",
     binding: bindingFor(remote),
-    creativeName: remote.title,
     title: remote.title,
     body: remote.body,
     imageUrl: remote.image_url,
@@ -48,7 +46,7 @@ export function createRemoteCampaign(campaign: Campaign): CreateAdCampaign {
     name: campaign.name,
     placement: "action_node",
     route_id: campaign.binding.routeId,
-    action_node_id: campaign.binding.id,
+    action_node_id: campaign.binding.actionNodeId,
     scene_equipment: campaign.binding.equipment,
     title: campaign.title,
     body: campaign.body,
@@ -69,15 +67,21 @@ export function createRemoteCampaign(campaign: Campaign): CreateAdCampaign {
   };
 }
 
-export function updateRemoteCampaign(campaign: Campaign): UpdateAdCampaign {
+export function updateRemoteCampaign(
+  campaign: Campaign,
+  status?: number,
+): UpdateAdCampaign {
   return {
     name: campaign.name,
     title: campaign.title,
     body: campaign.body,
     image_url: campaign.imageUrl,
     landing_url: campaign.landingUrl,
-    status:
-      campaign.state === "running" ? 1 : campaign.state === "paused" ? 2 : 0,
+    status: status ?? (campaign.state === "running"
+      ? 1
+      : campaign.state === "paused"
+        ? 2
+        : 0),
     bid_micros: Math.round(campaign.bid * 1_000_000),
     daily_budget_micros: Math.round(
       Number(campaign.budget.replace(/[¥,]/g, "")) * 1_000_000,

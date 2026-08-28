@@ -1,0 +1,10 @@
+[Unit]
+Description=Bookway rank model training (PyTorch, exposure-ledger features)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=bookway
+WorkingDirectory=/opt/bookway/backend/bookway-py/cronjob/rank_training
+EnvironmentFile=/etc/bookway/trainer.env
+ExecStart=/opt/bookway/backend/bookway-py/cronjob/rank_training/.venv/bin/python train.py

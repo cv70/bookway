@@ -6,6 +6,12 @@ pub struct Config {
     pub(crate) mall_url: String,
     pub(crate) inventory_url: String,
     pub(crate) payment_ttl_seconds: u64,
+    /// Affiliate refund-window hold, in days. A paid order creates its
+    /// creator share as `pending`; the expirer promotes it to `eligible`
+    /// once the window elapses, so a refund inside the window can still
+    /// reverse the share instead of clawing back settled money. `0` keeps
+    /// the legacy immediate-eligibility behaviour.
+    pub(crate) affiliate_hold_days: u32,
 }
 impl Config {
     pub fn from_env() -> Result<Self, RuntimeError> {
@@ -19,6 +25,10 @@ impl Config {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(900),
+            affiliate_hold_days: env::var("MALL_AFFILIATE_HOLD_DAYS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(7),
         })
     }
 }

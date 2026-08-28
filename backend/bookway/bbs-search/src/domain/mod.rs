@@ -80,6 +80,91 @@ impl Domain {
             .suggestions_with_content_client(request, Some(self.content_client.clone()))
             .await
     }
+
+    /// One-shot semantic recall used by Search Main as an additional lane.
+    /// The query vector was produced by the same catalog embedding provider
+    /// the indexer used; no vectors indexed yet simply means no results.
+    pub(crate) async fn search_semantic(
+        &self,
+        request: pb::SearchSemanticRequest,
+    ) -> Result<pb::SearchResponse, SearchError> {
+        let started = Instant::now();
+        let query_text = request.q.trim().to_string();
+        if request.query_vector.is_empty() {
+            return Err(SearchError::Validation(
+                "query_vector is required for semantic search".to_string(),
+            ));
+        }
+        let search_type = pb::SearchType::try_from(request.search_type.unwrap_or_default())
+            .map_err(|_| SearchError::Validation("搜索类型无效".to_string()))?;
+        if matches!(
+            search_type,
+            pb::SearchType::Users | pb::SearchType::Topics | pb::SearchType::Resources
+        ) {
+            return Err(SearchError::Validation(
+                "语义搜索不支持该搜索类型".to_string(),
+            ));
+        }
+        let limit = request
+            .limit
+            .unwrap_or(DEFAULT_PAGE_SIZE as u32)
+            .clamp(1, MAX_PAGE_SIZE as u32) as usize;
+        let excluded_author_ids = normalize_excluded_author_ids(&request.excluded_author_ids);
+        let excluded_authors = excluded_author_ids.iter().cloned().collect::<HashSet<_>>();
+        let entity_bias = match search_type {
+            pb::SearchType::Nodes => Some(EntityBias::ActionNode),
+            pb::SearchType::Equipment => Some(EntityBias::SceneEquipment),
+            _ => None,
+        };
+        let Some(source) = self.search.source.as_ref() else {
+            return Ok(empty_semantic_response(&query_text, started));
+        };
+        let result = match source
+            .search_semantic(
+                &request.query_vector,
+                limit,
+                &excluded_author_ids,
+                entity_bias,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(SearchSourceError::SemanticUnavailable) => {
+                return Ok(empty_semantic_response(&query_text, started));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let items = search_results(
+            &result.page.items,
+            &query_text,
+            search_type,
+            &excluded_authors,
+            result.source_ranked,
+            None,
+            true,
+        );
+        Ok(pb::SearchResponse {
+            request_id: String::new(),
+            query: query_text,
+            items,
+            next_cursor: None,
+            total_estimate: result.page.total_estimate,
+            took_ms: started.elapsed().as_millis() as u64,
+            degraded: false,
+        })
+    }
+}
+
+fn empty_semantic_response(query: &str, started: Instant) -> pb::SearchResponse {
+    pb::SearchResponse {
+        request_id: String::new(),
+        query: query.to_string(),
+        items: Vec::new(),
+        next_cursor: None,
+        total_estimate: 0,
+        took_ms: started.elapsed().as_millis() as u64,
+        degraded: false,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -284,6 +369,7 @@ impl SearchService {
                 &excluded_authors,
                 source_result.source_ranked,
                 route_context.as_ref(),
+                false,
             );
             if !source_result.source_ranked {
                 sort_results(&mut candidates);
@@ -869,6 +955,7 @@ fn search_results(
     excluded_authors: &HashSet<String>,
     source_ranked: bool,
     route_context: Option<&RouteSearchContext>,
+    semantic: bool,
 ) -> Vec<pb::SearchResult> {
     let visible_contents = contents
         .iter()
@@ -886,8 +973,8 @@ fn search_results(
         }
         pb::SearchType::Users => user_results(&visible_contents, query),
         pb::SearchType::Topics => topic_results(&visible_contents, query),
-        pb::SearchType::Nodes => action_node_results(&visible_contents, query),
-        pb::SearchType::Equipment => scene_equipment_results(&visible_contents, query),
+        pb::SearchType::Nodes => action_node_results(&visible_contents, query, semantic),
+        pb::SearchType::Equipment => scene_equipment_results(&visible_contents, query, semantic),
         pb::SearchType::Resources => Vec::new(),
         pb::SearchType::All => {
             let mut results = content_results(&visible_contents, query, true, true, source_ranked);
@@ -901,10 +988,13 @@ fn search_results(
 // Entity results are extracted domain-side for BOTH pipelines: indexed hits
 // revalidate into summaries that rebuild `route_template.actions`, and the
 // BBS Link fallback reads full templates — so nodes and gear keep identical
-// typed semantics no matter which source served the candidates.
+// typed semantics no matter which source served the candidates. The semantic
+// lane (`semantic=true`) recalls whole routes by vector distance, so every
+// attached node/gear is a candidate and the caller's reranker decides order.
 fn action_node_results(
     contents: &[&bbs_link_pb::Content],
     query: &str,
+    semantic: bool,
 ) -> Vec<pb::SearchResult> {
     contents
         .iter()
@@ -927,6 +1017,8 @@ fn action_node_results(
                     let id_hit = !query.is_empty() && action.id == query;
                     let (mut score, mut highlights) = if id_hit {
                         (10.0, vec![action.title.clone()])
+                    } else if semantic {
+                        (2.0, Vec::new())
                     } else {
                         relevance(query, &[action.title.as_str(), action.detail.as_str()], &metadata)?
                     };
@@ -962,6 +1054,7 @@ fn action_node_results(
 fn scene_equipment_results(
     contents: &[&bbs_link_pb::Content],
     query: &str,
+    semantic: bool,
 ) -> Vec<pb::SearchResult> {
     let needle = query.to_lowercase();
     contents
@@ -974,14 +1067,20 @@ fn scene_equipment_results(
             let mut matches = Vec::new();
             for action in &template.actions {
                 for gear in &action.scene_equipment {
-                    if !gear.to_lowercase().contains(&needle) {
+                    if !semantic && !gear.to_lowercase().contains(&needle) {
                         continue;
                     }
                     // Equipment has no standalone record; its identity is the
                     // route node it belongs to. Same-gear hits across routes
                     // deliberately stay separate so route attribution is kept.
                     let exact = gear.to_lowercase() == needle;
-                    let score = if exact { 8.0 } else { 4.0 } + content.quality_score;
+                    let score = if semantic {
+                        2.0
+                    } else if exact {
+                        8.0
+                    } else {
+                        4.0
+                    } + content.quality_score;
                     matches.push(pb::SearchResult {
                         id: format!("{}/{}/equipment/{}", content.id, action.id, gear),
                         result_type: pb::SearchResultType::SceneEquipment as i32,
@@ -1575,7 +1674,7 @@ mod tests {
     fn action_node_search_returns_typed_nodes_carrying_the_route_card() {
         let route = route_with_entities();
 
-        let results = action_node_results(&[&route], "登顶");
+        let results = action_node_results(&[&route], "登顶", false);
 
         assert_eq!(results.len(), 1);
         let node = &results[0];
@@ -1587,7 +1686,7 @@ mod tests {
         assert_eq!(card.route_actions.len(), 2, "full public route context travels along");
 
         assert!(
-            action_node_results(&[&route], "不存在的节点词").is_empty(),
+            action_node_results(&[&route], "不存在的节点词", false).is_empty(),
             "only entity matches become typed nodes"
         );
     }
@@ -1596,7 +1695,7 @@ mod tests {
     fn scene_equipment_search_keeps_route_and_node_attribution() {
         let route = route_with_entities();
 
-        let results = scene_equipment_results(&[&route], "登山鞋");
+        let results = scene_equipment_results(&[&route], "登山鞋", false);
 
         assert_eq!(results.len(), 1);
         let gear = &results[0];
@@ -1608,8 +1707,33 @@ mod tests {
         );
         let exact = results[0].score;
         // An exact term outranks a partial mention on the same quality score.
-        let partial = scene_equipment_results(&[&route], "登山");
+        let partial = scene_equipment_results(&[&route], "登山", false);
         assert!(partial.iter().all(|item| item.score < exact));
+    }
+
+    #[test]
+    fn semantic_extraction_keeps_every_entity_without_a_lexical_match() {
+        // The semantic lane recalls whole routes by vector distance, so a
+        // paraphrased query must still surface the attached typed entities.
+        let route = route_with_entities();
+
+        let nodes = action_node_results(&[&route], "野外正念", true);
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().all(|item| item.result_type == pb::SearchResultType::ActionNode as i32));
+        assert_eq!(nodes[0].id, "node-summit", "k-NN document order is retained");
+        assert!(nodes.iter().all(|item| item.score > 0.0));
+
+        let gear = scene_equipment_results(&[&route], "野外露营", true);
+        assert_eq!(gear.len(), 2);
+        assert_eq!(
+            gear.iter().map(|item| item.title.as_str()).collect::<Vec<_>>(),
+            vec!["登山鞋", "登山杖"]
+        );
+        assert!(gear.iter().all(|item| item.result_type == pb::SearchResultType::SceneEquipment as i32));
+
+        // The lexical lanes keep their match gate.
+        assert!(action_node_results(&[&route], "野外正念", false).is_empty());
+        assert!(scene_equipment_results(&[&route], "野外露营", false).is_empty());
     }
 
     #[tokio::test]
@@ -2210,6 +2334,8 @@ mod tests {
             action_node_id: None,
             scene_equipment: None,
             ad_placement: None,
+            geo_region: None,
+            device_os: None,
         }
     }
 
@@ -2251,6 +2377,7 @@ mod tests {
                 is_route: false,
                 is_milestone: false,
                 is_question: false,
+                fork_count: 0,
             }),
             author_id: format!("author-{id}"),
             content_type: bbs_link_pb::ContentType::Article as i32,

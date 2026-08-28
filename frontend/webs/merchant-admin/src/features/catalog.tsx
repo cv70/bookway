@@ -150,7 +150,7 @@ export function Inventory({
           <p className="eyebrow">仓储管理</p>
           <h1>库存管理</h1>
           <p className="muted">
-            可用库存由库存服务统一维护，订单预占会自动扣减可售量
+            可用库存由库存服务统一维护，订单预占会自动扣减可售量；预占与安全库存明细暂未由网关提供
           </p>
         </div>
         <button className="button primary" onClick={onAdjust}>
@@ -190,7 +190,7 @@ export function Inventory({
             </thead>
             <tbody>
               {visible.length ? (
-                visible.map((product, index) => (
+                visible.map((product) => (
                   <tr key={product.sku}>
                     <td>
                       <strong>{product.name}</strong>
@@ -200,10 +200,10 @@ export function Inventory({
                       </small>
                     </td>
                     <td className="stock-number">{product.stock}</td>
-                    <td>
-                      {product.kind === "课程" ? 0 : [2, 4, 1][index % 3]}
-                    </td>
-                    <td>{[20, 30, 20][index]}</td>
+                    {/* 预占与安全库存由 mall-inventory 维护，网关暂未暴露读取接口，
+                        如实展示为未知，而非本地编造数值。 */}
+                    <td>—</td>
+                    <td>—</td>
                     <td>
                       <Status value={product.stock < 21 ? "需补货" : "充足"} />
                     </td>

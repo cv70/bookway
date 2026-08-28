@@ -143,12 +143,14 @@ impl Domain {
                 "node offer contextual metadata is invalid".to_string(),
             ));
         }
+        let ad_attribution = normalize_ad_attribution(request.ad_attribution)?;
         let order = new_order(
             &request.user_id,
             &request.items,
             sku_map,
             self.config.payment_ttl_seconds,
             &node_offer,
+            ad_attribution,
         )?;
         let created = self
             .dao
@@ -188,6 +190,7 @@ impl Domain {
 
     pub(crate) async fn pay(&self, request: pb::PayRequest) -> Result<pb::Order, OrderError> {
         let mut request = request;
+        let hold_days = self.config.affiliate_hold_days;
         request.user_id = request.user_id.trim().to_string();
         request.order_id = request.order_id.trim().to_string();
         request.payment_reference = request.payment_reference.trim().to_string();
@@ -200,75 +203,134 @@ impl Domain {
             ));
         }
         let order = self.get_by_id(&request.user_id, &request.order_id).await?;
-        if order.status == pb::MallOrderStatus::Paid as i32 {
-            if order.payment_reference.as_deref() != Some(&request.payment_reference) {
-                return Err(OrderError::Conflict(
-                    "payment reference belongs to a different payment".to_string(),
-                ));
+        match payment_action(&order, &request.payment_reference)? {
+            PaymentAction::ReplayPaid => {
+                self.dao
+                    .ensure_settlement(&order, hold_days)
+                    .await
+                    .map_err(repo_error)?;
+                Ok(order)
             }
-            self.dao
-                .ensure_settlement(&order)
-                .await
-                .map_err(repo_error)?;
-            return Ok(order);
-        }
-        if order.status == pb::MallOrderStatus::PaymentProcessing as i32 {
-            if order.payment_reference.as_deref() != Some(&request.payment_reference) {
-                return Err(OrderError::Conflict(
-                    "order is already processing a different payment".to_string(),
-                ));
+            PaymentAction::FinishProcessing => {
+                // The payment-processing state is durable across a process
+                // crash. Once inventory has committed, that fact wins over the
+                // order TTL: expiry reconciliation deliberately leaves this
+                // state intact so a retry can finish the payment transition. A
+                // still-reserved reservation is subject to the normal expiry
+                // race and will either commit here or be released by the
+                // inventory service.
+                let reservation = self.confirm_reservation(&request.order_id).await?;
+                if reservation.status != "committed" {
+                    return Err(OrderError::State(format!(
+                        "reservation {} did not commit during payment retry",
+                        request.order_id
+                    )));
+                }
+                let paid = self
+                    .dao
+                    .transition(&request.order_id, pb::MallOrderStatus::Paid as i32, None)
+                    .await
+                    .map_err(repo_error)?;
+                self.dao
+                    .ensure_settlement(&paid, hold_days)
+                    .await
+                    .map_err(repo_error)?;
+                Ok(paid)
             }
-            // The payment-processing state is durable across a process crash.
-            // Once inventory has committed, that fact wins over the order TTL:
-            // expiry reconciliation deliberately leaves this state intact so a
-            // retry can finish the payment transition. A still-reserved
-            // reservation is subject to the normal expiry race and will either
-            // commit here or be released by the inventory service.
-            let reservation = self.confirm_reservation(&request.order_id).await?;
-            if reservation.status != "committed" {
-                return Err(OrderError::State(format!(
-                    "reservation {} did not commit during payment retry",
-                    request.order_id
-                )));
+            PaymentAction::ReconcileAfterExpiry => {
+                // The provider confirmed money that arrived after the order's
+                // payment TTL already expired it (and expiry released the
+                // stock reservation). Record the durable paid_after_expiry
+                // fact instead of failing the provider forever while it holds
+                // the buyer's money. Fulfillment and the affiliate settlement
+                // are deliberately NOT started here: the inventory is no
+                // longer reserved, so operations decides refund vs. fulfill
+                // per order. Replays stay idempotent on the same state.
+                let reconciled = self
+                    .dao
+                    .transition(
+                        &request.order_id,
+                        pb::MallOrderStatus::PaidAfterExpiry as i32,
+                        None,
+                    )
+                    .await
+                    .map_err(repo_error)?;
+                Ok(reconciled)
             }
-            let paid = self
-                .dao
-                .transition(&request.order_id, pb::MallOrderStatus::Paid as i32, None)
-                .await
-                .map_err(repo_error)?;
-            self.dao
-                .ensure_settlement(&paid)
-                .await
-                .map_err(repo_error)?;
-            return Ok(paid);
+            PaymentAction::Begin => {
+                self.dao
+                    .begin_payment(&request.order_id, &request.payment_reference)
+                    .await
+                    .map_err(repo_error)?;
+                let reservation = self.confirm_reservation(&request.order_id).await?;
+                if reservation.status != "committed" {
+                    return Err(OrderError::State(format!(
+                        "reservation {} did not commit during payment",
+                        request.order_id
+                    )));
+                }
+                let paid = self
+                    .dao
+                    .transition(&request.order_id, pb::MallOrderStatus::Paid as i32, None)
+                    .await
+                    .map_err(repo_error)?;
+                self.dao
+                    .ensure_settlement(&paid, hold_days)
+                    .await
+                    .map_err(repo_error)?;
+                Ok(paid)
+            }
         }
-        if order.status != pb::MallOrderStatus::PendingPayment as i32 {
-            return Err(OrderError::State(format!(
-                "order {} cannot be paid from its current state",
-                request.order_id
-            )));
+    }
+
+    /// Webhook-driven payment confirmation. The provider reference is the
+    /// only input; resolving the order and then running the regular Pay
+    /// state machine keeps a single idempotency story for both entry paths.
+    /// A confirmation that lands after the TTL expired the order reconciles
+    /// to `paid_after_expiry` through the same machine instead of retrying a
+    /// failed_precondition forever.
+    pub(crate) async fn confirm_by_reference(
+        &self,
+        mut request: pb::ConfirmByReferenceRequest,
+    ) -> Result<pb::Order, OrderError> {
+        request.payment_reference = request.payment_reference.trim().to_string();
+        if request.payment_reference.is_empty() {
+            return Err(OrderError::Validation(
+                "payment_reference is required".to_string(),
+            ));
         }
-        self.dao
-            .begin_payment(&request.order_id, &request.payment_reference)
-            .await
-            .map_err(repo_error)?;
-        let reservation = self.confirm_reservation(&request.order_id).await?;
-        if reservation.status != "committed" {
-            return Err(OrderError::State(format!(
-                "reservation {} did not commit during payment",
-                request.order_id
-            )));
-        }
-        let paid = self
+        let (order_id, user_id) = self
             .dao
-            .transition(&request.order_id, pb::MallOrderStatus::Paid as i32, None)
+            .get_by_payment_reference(&request.payment_reference)
+            .await
+            .map_err(repo_error)?
+            .ok_or_else(|| {
+                OrderError::NotFound(format!(
+                    "no order carries this payment reference (len {})",
+                    request.payment_reference.len()
+                ))
+            })?;
+        self.pay(pb::PayRequest {
+            user_id,
+            order_id,
+            payment_reference: request.payment_reference,
+        })
+        .await
+    }
+
+    /// Promotion pass for pending creator shares (driven by the expirer
+    /// worker). Idempotent: already-eligible rows are untouched.
+    pub(crate) async fn promote_affiliate_settlements(
+        &self,
+    ) -> Result<pb::PromoteAffiliateSettlementsResponse, OrderError> {
+        let promoted = self
+            .dao
+            .promote_eligible_settlements()
             .await
             .map_err(repo_error)?;
-        self.dao
-            .ensure_settlement(&paid)
-            .await
-            .map_err(repo_error)?;
-        Ok(paid)
+        Ok(pb::PromoteAffiliateSettlementsResponse {
+            promoted,
+        })
     }
 
     pub(crate) async fn merchant_orders(
@@ -355,6 +417,38 @@ impl Domain {
         Ok(pb::AffiliateSettlementListResponse { items, next_cursor })
     }
 
+    /// Creator-facing view of the affiliate ledger. The gateway stamps
+    /// `creator_id` from the authenticated identity, so a creator can only
+    /// ever list their own shares. Read-only: settling stays a merchant
+    /// action.
+    pub(crate) async fn creator_settlements(
+        &self,
+        mut request: pb::CreatorSettlementRequest,
+    ) -> Result<pb::AffiliateSettlementListResponse, OrderError> {
+        request.creator_id = request.creator_id.trim().to_string();
+        request.cursor = request.cursor.take().map(|value| value.trim().to_string());
+        if invalid_identifier(&request.creator_id) {
+            return Err(OrderError::Validation("creator id is required".to_string()));
+        }
+        validate_cursor(request.cursor.as_deref())?;
+        let limit = usize::try_from(request.limit.unwrap_or(50).clamp(1, 100)).unwrap_or(100);
+        let items = self
+            .dao
+            .creator_settlements(
+                &request.creator_id,
+                request.status,
+                request.cursor.as_deref(),
+                limit,
+            )
+            .await
+            .map_err(repo_error)?;
+        let next_cursor = items
+            .last()
+            .map(|item| item.id.clone())
+            .filter(|_| items.len() == limit);
+        Ok(pb::AffiliateSettlementListResponse { items, next_cursor })
+    }
+
     pub(crate) async fn settle_affiliate(
         &self,
         mut request: pb::SettleAffiliateRequest,
@@ -399,6 +493,9 @@ impl Domain {
         let order = self.get_by_id(&request.user_id, &request.order_id).await?;
         if order.status == pb::MallOrderStatus::Cancelled as i32
             || order.status == pb::MallOrderStatus::Expired as i32
+            // Money already arrived for a paid_after_expiry order; only
+            // operations can decide refund vs. fulfill, never a cancel call.
+            || order.status == pb::MallOrderStatus::PaidAfterExpiry as i32
         {
             return Ok(order);
         }
@@ -434,6 +531,7 @@ impl Domain {
                         || value == pb::MallOrderStatus::Paid as i32
                         || value == pb::MallOrderStatus::Cancelled as i32
                         || value == pb::MallOrderStatus::Expired as i32
+                        || value == pb::MallOrderStatus::PaidAfterExpiry as i32
                 ) {
                     return Ok(current);
                 }
@@ -731,6 +829,7 @@ fn new_order(
     skus: BTreeMap<String, mall_pb::MallSku>,
     ttl_seconds: u64,
     node_offer: &mall_pb::NodeOffer,
+    ad_attribution: Option<pb::AdAttribution>,
 ) -> Result<pb::Order, OrderError> {
     let mut total = 0_i64;
     let mut currency = None;
@@ -794,7 +893,31 @@ fn new_order(
         merchant_id: node_offer.merchant_id.clone(),
         fulfillment_status: pb::FulfillmentStatus::Pending as i32,
         tracking_number: String::new(),
+        ad_attribution,
     })
+}
+
+/// Attribution is recorded only in valid pairs — a one-sided context is a
+/// client bug, not a convertible fact. The conversion itself is never
+/// asserted here: it becomes one only when ad-center re-verifies the ad
+/// decision + impression after the payment pipeline reports the paid order.
+fn normalize_ad_attribution(
+    attribution: Option<pb::AdAttribution>,
+) -> Result<Option<pb::AdAttribution>, OrderError> {
+    let Some(attribution) = attribution else {
+        return Ok(None);
+    };
+    let request_id = attribution.request_id.trim().to_string();
+    let campaign_id = attribution.campaign_id.trim().to_string();
+    if invalid_identifier(&request_id) || invalid_identifier(&campaign_id) {
+        return Err(OrderError::Validation(
+            "ad attribution requires non-empty request_id and campaign_id".to_string(),
+        ));
+    }
+    Ok(Some(pb::AdAttribution {
+        request_id,
+        campaign_id,
+    }))
 }
 
 fn reservation_lines(order: &pb::Order) -> Vec<inventory_pb::ReservationLine> {
@@ -823,6 +946,73 @@ fn expired(value: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// What a payment confirmation means for the order's current durable state.
+/// The webhook path (`ConfirmByReference`) and the direct pay path run the
+/// same decision so both entries share one idempotency story.
+#[derive(Debug, PartialEq, Eq)]
+enum PaymentAction {
+    /// Already `paid` with the same reference: pure replay.
+    ReplayPaid,
+    /// Durable `payment_processing`: finish the committed transition.
+    FinishProcessing,
+    /// The provider confirmed money after the TTL already expired the order
+    /// (`expired`, or a replay of `paid_after_expiry`). Reconciles to the
+    /// distinct `paid_after_expiry` state — never to fulfillment, settlement,
+    /// or attribution.
+    ReconcileAfterExpiry,
+    /// Still `pending_payment`: claim the reference and run the saga.
+    Begin,
+}
+
+fn payment_action(order: &pb::Order, payment_reference: &str) -> Result<PaymentAction, OrderError> {
+    let status = pb::MallOrderStatus::try_from(order.status)
+        .map_err(|_| OrderError::State(format!("order {} carries an unknown status", order.id)))?;
+    let stored_matches = order.payment_reference.as_deref() == Some(payment_reference);
+    match status {
+        pb::MallOrderStatus::Paid => {
+            if stored_matches {
+                Ok(PaymentAction::ReplayPaid)
+            } else {
+                Err(OrderError::Conflict(
+                    "payment reference belongs to a different payment".to_string(),
+                ))
+            }
+        }
+        pb::MallOrderStatus::PaymentProcessing => {
+            if stored_matches {
+                Ok(PaymentAction::FinishProcessing)
+            } else {
+                Err(OrderError::Conflict(
+                    "order is already processing a different payment".to_string(),
+                ))
+            }
+        }
+        // A stored reference proves payment was actually claimed before the
+        // TTL hit; reconciling keeps the provider from retrying a
+        // failed_precondition forever while it holds the buyer's money.
+        // Anything else is a reference this order never owned.
+        pb::MallOrderStatus::Expired | pb::MallOrderStatus::PaidAfterExpiry => {
+            if stored_matches {
+                Ok(PaymentAction::ReconcileAfterExpiry)
+            } else if order.payment_reference.is_none() {
+                Err(OrderError::State(format!(
+                    "order {} expired without a payment claim; a new order is required",
+                    order.id
+                )))
+            } else {
+                Err(OrderError::Conflict(
+                    "payment reference belongs to a different payment".to_string(),
+                ))
+            }
+        }
+        pb::MallOrderStatus::PendingPayment => Ok(PaymentAction::Begin),
+        pb::MallOrderStatus::Cancelled => Err(OrderError::State(format!(
+            "order {} cannot be paid from its current state",
+            order.id
+        ))),
+    }
+}
+
 fn timestamp(value: OffsetDateTime) -> String {
     value.format(&Rfc3339).unwrap_or_default()
 }
@@ -847,7 +1037,7 @@ fn repo_error(error: DaoError) -> OrderError {
 
 #[cfg(test)]
 mod tests {
-    use super::{OrderError, contextual_order_item};
+    use super::{OrderError, PaymentAction, contextual_order_item, payment_action};
     use crate::api::pb;
     use bookway_mall_api::pb as mall_pb;
 
@@ -876,4 +1066,126 @@ mod tests {
             Err(OrderError::Validation(_))
         ));
     }
+
+    fn probe(status: pb::MallOrderStatus, reference: Option<&str>) -> pb::Order {
+        pb::Order {
+            id: "order-1".to_string(),
+            status: status as i32,
+            payment_reference: reference.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn late_provider_confirmation_reconciles_instead_of_failing_forever() {
+        // The webhook replays after MALL_PAYMENT_TTL_SECONDS already expired
+        // the order. The reference claimed before expiry matches, so both the
+        // fresh reconciliation and its idempotent replay land on
+        // paid_after_expiry — the same outcome for the ConfirmByReference
+        // path and the direct pay path.
+        for status in [
+            pb::MallOrderStatus::Expired,
+            pb::MallOrderStatus::PaidAfterExpiry,
+        ] {
+            let order = probe(status, Some("payment-1"));
+            assert_eq!(
+                payment_action(&order, "payment-1").expect("late confirmation must reconcile"),
+                PaymentAction::ReconcileAfterExpiry,
+                "{status:?} with the claimed reference must reconcile, not fail"
+            );
+        }
+    }
+
+    #[test]
+    fn after_expiry_reconciliation_is_the_only_settlement_free_confirmation() {
+        // Fulfillment and affiliate settlement are driven exactly by the
+        // pre-expiry confirmations; the after-expiry arm is a distinct variant
+        // whose handler never reaches ensure_settlement or inventory commit.
+        // Pinning the variant set keeps a future refactor from silently
+        // folding paid_after_expiry into the paid path.
+        let settlement_driving = [
+            PaymentAction::ReplayPaid,
+            PaymentAction::FinishProcessing,
+            PaymentAction::Begin,
+        ];
+        let order = probe(pb::MallOrderStatus::Expired, Some("payment-1"));
+        let action = payment_action(&order, "payment-1").expect("reconciles");
+        assert!(!settlement_driving.contains(&action));
+    }
+
+    #[test]
+    fn payment_confirmation_rejects_references_the_order_never_owned() {
+        // Expired without a claim: the honest answer is a new order, not a
+        // fabricated paid state.
+        let expired_without_claim = probe(pb::MallOrderStatus::Expired, None);
+        assert!(matches!(
+            payment_action(&expired_without_claim, "payment-1"),
+            Err(OrderError::State(_))
+        ));
+        // A different provider reference on an expired order is a conflict,
+        // not a reconciliation.
+        let expired_other = probe(pb::MallOrderStatus::Expired, Some("payment-1"));
+        assert!(matches!(
+            payment_action(&expired_other, "payment-2"),
+            Err(OrderError::Conflict(_))
+        ));
+        // Cancelled orders never accept payment.
+        let cancelled = probe(pb::MallOrderStatus::Cancelled, None);
+        assert!(matches!(
+            payment_action(&cancelled, "payment-1"),
+            Err(OrderError::State(_))
+        ));
+
+        // The pre-expiry decisions stay byte-for-byte what they were.
+        let paid = probe(pb::MallOrderStatus::Paid, Some("payment-1"));
+        assert_eq!(
+            payment_action(&paid, "payment-1").expect("paid replay"),
+            PaymentAction::ReplayPaid
+        );
+        assert!(matches!(
+            payment_action(&paid, "payment-2"),
+            Err(OrderError::Conflict(_))
+        ));
+        let processing = probe(pb::MallOrderStatus::PaymentProcessing, Some("payment-1"));
+        assert_eq!(
+            payment_action(&processing, "payment-1").expect("processing retry"),
+            PaymentAction::FinishProcessing
+        );
+        let pending = probe(pb::MallOrderStatus::PendingPayment, None);
+        assert_eq!(
+            payment_action(&pending, "payment-1").expect("fresh payment"),
+            PaymentAction::Begin
+        );
+    }
 }
+
+#[test]
+fn ad_attribution_is_accepted_only_as_a_valid_pair() {
+    assert!(normalize_ad_attribution(None).is_ok());
+    for broken in [
+        pb::AdAttribution {
+            request_id: "  ".to_string(),
+            campaign_id: "campaign-1".to_string(),
+        },
+        pb::AdAttribution {
+            request_id: "ad-request-1".to_string(),
+            campaign_id: String::new(),
+        },
+    ] {
+        assert!(
+            normalize_ad_attribution(Some(broken)).is_err(),
+            "a one-sided context is a client bug, not attribution"
+        );
+    }
+    let paired = normalize_ad_attribution(Some(pb::AdAttribution {
+        request_id: " ad-request-1 ".to_string(),
+        campaign_id: " campaign-1 ".to_string(),
+    }))
+    .expect("valid pair");
+    let paired = paired.expect("some");
+    assert_eq!(
+        (paired.request_id.as_str(), paired.campaign_id.as_str()),
+        ("ad-request-1", "campaign-1")
+    );
+}
+

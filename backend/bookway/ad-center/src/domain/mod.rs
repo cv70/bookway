@@ -279,6 +279,11 @@ impl Domain {
         )
         .await?;
         let items = self.eligible_items(&request).await?;
+        let (items, throttled) =
+            apply_delivery_pacing(items, day_fraction(OffsetDateTime::now_utc()), self.config().pacing_enabled);
+        if throttled > 0 {
+            tracing::debug!(throttled, "delivery pacing held campaigns back");
+        }
         Ok(pb::CampaignList { items })
     }
 
@@ -481,6 +486,7 @@ impl Domain {
                     impressions: row.impressions,
                     clicks: row.clicks,
                     spent_micros: row.spent_micros,
+                    conversions: row.conversions,
                 })
                 .collect(),
         })
@@ -532,6 +538,102 @@ impl Domain {
             ));
         }
         Ok(())
+    }
+}
+
+/// Even-delivery budget pacing. A campaign that already burned more than
+/// `day_fraction × daily_budget × (1 + headroom)` sits out this decision so
+/// front-loaded traffic cannot exhaust the day's budget in its first hour;
+/// `RecordEvent`'s hard budget cap remains the authoritative backstop. The
+/// catch-up headroom lets a campaign recover after a slow start instead of
+/// being punished for it.
+fn apply_delivery_pacing(
+    candidates: Vec<pb::AdCampaign>,
+    day_fraction: f64,
+    enabled: bool,
+) -> (Vec<pb::AdCampaign>, usize) {
+    if !enabled || day_fraction >= 1.0 {
+        return (candidates, 0);
+    }
+    const CATCH_UP_HEADROOM: f64 = 1.5;
+    let mut throttled = 0;
+    let kept = candidates
+        .into_iter()
+        .filter(|candidate| {
+            let budget = candidate.daily_budget_micros.max(0) as f64;
+            let spent = candidate.spent_today_micros.max(0) as f64;
+            let allowance = budget * day_fraction * CATCH_UP_HEADROOM;
+            if budget > 0.0 && spent > allowance {
+                throttled += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (kept, throttled)
+}
+
+/// Fraction of the UTC day elapsed (0..=1]. A small floor keeps midnight
+/// deliveries from being paced to zero.
+fn day_fraction(now: OffsetDateTime) -> f64 {
+    const DAY: f64 = 86_400.0;
+    let time = now.time();
+    let seconds = f64::from(time.hour()) * 3_600.0
+        + f64::from(time.minute()) * 60.0
+        + f64::from(time.second());
+    (seconds / DAY).clamp(0.01, 1.0)
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::{apply_delivery_pacing, day_fraction};
+    use bookway_ad_center_api::pb;
+
+    fn campaign(spent_today_micros: i64, daily_budget_micros: i64) -> pb::AdCampaign {
+        pb::AdCampaign {
+            id: format!("c-{spent_today_micros}"),
+            spent_today_micros,
+            daily_budget_micros,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pacing_holds_front_loaded_campaigns_back() {
+        // Half the day gone: half the budget is the linear allowance, 75%
+        // with the catch-up headroom. A campaign already past that sits out.
+        let (kept, throttled) = apply_delivery_pacing(
+            vec![campaign(800, 1_000), campaign(700, 1_000), campaign(0, 1_000)],
+            0.5,
+            true,
+        );
+        assert_eq!(kept.len(), 2);
+        assert_eq!(throttled, 1);
+        assert_eq!(kept.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["c-700", "c-0"]);
+    }
+
+    #[test]
+    fn pacing_disabled_or_end_of_day_passes_everything() {
+        let candidates = vec![campaign(1_000, 1_000)];
+        let (kept, throttled) = apply_delivery_pacing(candidates.clone(), 0.5, false);
+        assert_eq!((kept.len(), throttled), (1, 0));
+        let (kept, throttled) = apply_delivery_pacing(candidates, 1.0, true);
+        assert_eq!((kept.len(), throttled), (1, 0));
+    }
+
+    #[test]
+    fn pacing_ignores_uncapped_campaigns_and_never_goes_negative() {
+        // daily_budget_micros = 0 means uncapped; pacing has nothing to pace.
+        let (kept, _) = apply_delivery_pacing(vec![campaign(9_999, 0)], 0.01, true);
+        assert_eq!(kept.len(), 1);
+        let date = time::Date::from_calendar_date(2026, time::Month::August, 27)
+            .expect("valid date");
+        let fraction = day_fraction(date.with_hms(12, 0, 0).expect("valid time").assume_utc());
+        assert!((fraction - 0.5).abs() < 0.01);
+        // 30 seconds after midnight clamps to the pacing floor.
+        let floor = day_fraction(date.with_hms(0, 0, 30).expect("valid time").assume_utc());
+        assert!((floor - 0.01).abs() < 1e-9);
     }
 }
 

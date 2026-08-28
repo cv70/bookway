@@ -7,6 +7,11 @@ enum MallOrderStatus {
   MALL_ORDER_STATUS_CANCELLED = 2;
   MALL_ORDER_STATUS_EXPIRED = 3;
   MALL_ORDER_STATUS_PAYMENT_PROCESSING = 4;
+  // The payment provider confirmed the money after the order's payment TTL
+  // already expired the order. Money has moved, so the state is honestly
+  // distinct from `paid`: fulfillment and affiliate settlement are NOT started
+  // automatically — operations decides refund vs. fulfill per order.
+  MALL_ORDER_STATUS_PAID_AFTER_EXPIRY = 5;
 }
 
 enum FulfillmentStatus {
@@ -36,6 +41,18 @@ message CreateRequest {
   // Orders originate from an offer shown at a route action node; direct SKU
   // checkout is intentionally not part of the commerce model.
   string node_offer_id = 4;
+  // Ad decision context captured from the creative that led to this
+  // checkout. Recorded on the order and reported to ad-center as a
+  // server-side conversion only when the payment is VERIFIED — the client
+  // can never assert the conversion itself.
+  optional AdAttribution ad_attribution = 5;
+}
+
+message AdAttribution {
+  // Ad decision request id from the served FeedAd/SearchAd.
+  string request_id = 1;
+  // Campaign that owned the served creative.
+  string campaign_id = 2;
 }
 
 message OrderLine {
@@ -66,10 +83,16 @@ message Order {
   string merchant_id = 14;
   FulfillmentStatus fulfillment_status = 15;
   string tracking_number = 16;
+  // Ad decision context this order is attributed to (see CreateRequest).
+  optional AdAttribution ad_attribution = 17;
 }
 
 message OrderListResponse { repeated Order items = 1; }
 message ExpirePendingResponse { uint32 scanned = 1; uint32 expired = 2; uint32 failed = 3; }
+message PromoteAffiliateSettlementsResponse { uint64 promoted = 1; }
+// Payment-provider webhook confirmation: the gateway verifies the provider's
+// signature, then drives the same idempotent Pay state machine by reference.
+message ConfirmByReferenceRequest { string payment_reference = 1; }
 
 message UserRequest { string user_id = 1; }
 message OrderRequest { string user_id = 1; string order_id = 2; }
@@ -106,6 +129,16 @@ message AffiliateSettlementRequest {
   optional string cursor = 3;
   optional uint32 limit = 4;
 }
+// Creator-facing settlement listing. The creator only ever reads rows
+// attributed to their own id (the gateway stamps it from the authenticated
+// identity); every AffiliateSettlement field stays visible, including the
+// merchant_id that tells the creator which shop the share came from.
+message CreatorSettlementRequest {
+  string creator_id = 1;
+  optional AffiliateSettlementStatus status = 2;
+  optional string cursor = 3;
+  optional uint32 limit = 4;
+}
 message AffiliateSettlementListResponse {
   repeated AffiliateSettlement items = 1;
   optional string next_cursor = 2;
@@ -127,8 +160,16 @@ service MallOrder {
   rpc MerchantOrders(MerchantOrderRequest) returns (MerchantOrderListResponse);
   rpc UpdateFulfillment(UpdateFulfillmentRequest) returns (Order);
   rpc AffiliateSettlements(AffiliateSettlementRequest) returns (AffiliateSettlementListResponse);
+  // Creator-facing read of the same ledger, keyed by creator_id. Rows are the
+  // existing AffiliateSettlement messages; no merchant-only actions (settle,
+  // fulfillment) are reachable through it.
+  rpc ListCreatorSettlements(CreatorSettlementRequest) returns (AffiliateSettlementListResponse);
   rpc SettleAffiliate(SettleAffiliateRequest) returns (AffiliateSettlement);
   // Service-to-service hook for the future refund money channel. Reversing is
   // an internal ledger fact, not a merchant dashboard action.
   rpc ReverseAffiliate(ReverseAffiliateRequest) returns (AffiliateSettlement);
+  // Called by the expirer worker: flips pending creator shares whose refund
+  // window has elapsed to eligible, so merchants can pay them out.
+  rpc PromoteAffiliateSettlements(BatchRequest) returns (PromoteAffiliateSettlementsResponse);
+  rpc ConfirmByReference(ConfirmByReferenceRequest) returns (Order);
 }

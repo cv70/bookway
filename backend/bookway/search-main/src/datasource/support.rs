@@ -117,6 +117,9 @@ pub(crate) struct RecallState {
 pub(crate) enum RecallSource {
     Bbs,
     Resource,
+    /// One-shot vector recall over the semantically embedded index. The lane
+    /// has no cursor: one bounded batch, then exhausted.
+    Semantic,
 }
 
 /// The main-search session mixes independently paged recalls without exposing

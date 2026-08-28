@@ -54,10 +54,31 @@ pub(crate) trait OrderDao: Send + Sync {
         status: i32,
         tracking_number: &str,
     ) -> Result<pb::Order, DaoError>;
-    async fn ensure_settlement(&self, order: &pb::Order) -> Result<(), DaoError>;
+    async fn get_by_payment_reference(
+        &self,
+        reference: &str,
+    ) -> Result<Option<(String, String)>, DaoError>;
+    async fn ensure_settlement(
+        &self,
+        order: &pb::Order,
+        hold_days: u32,
+    ) -> Result<(), DaoError>;
+    /// Flips pending creator shares whose refund window has elapsed to
+    /// eligible. Returns how many rows were promoted.
+    async fn promote_eligible_settlements(&self) -> Result<u64, DaoError>;
     async fn settlements(
         &self,
         merchant_id: &str,
+        status: Option<i32>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<pb::AffiliateSettlement>, DaoError>;
+    /// Creator-facing read of the same ledger: identical rows, filtered by
+    /// `creator_id` instead of `merchant_id`. No write capability ships with
+    /// it.
+    async fn creator_settlements(
+        &self,
+        creator_id: &str,
         status: Option<i32>,
         cursor: Option<&str>,
         limit: usize,
@@ -84,6 +105,7 @@ fn status_name(value: i32) -> Result<&'static str, DaoError> {
         Some(pb::MallOrderStatus::Cancelled) => Ok("cancelled"),
         Some(pb::MallOrderStatus::Expired) => Ok("expired"),
         Some(pb::MallOrderStatus::PaymentProcessing) => Ok("payment_processing"),
+        Some(pb::MallOrderStatus::PaidAfterExpiry) => Ok("paid_after_expiry"),
         None => Err(DaoError::Failed("invalid order status".to_string())),
     }
 }
@@ -94,6 +116,7 @@ fn parse_status(value: &str) -> Result<i32, DaoError> {
         "cancelled" => Ok(pb::MallOrderStatus::Cancelled as i32),
         "expired" => Ok(pb::MallOrderStatus::Expired as i32),
         "payment_processing" => Ok(pb::MallOrderStatus::PaymentProcessing as i32),
+        "paid_after_expiry" => Ok(pb::MallOrderStatus::PaidAfterExpiry as i32),
         _ => Err(DaoError::Failed(format!("unknown order status {value}"))),
     }
 }
@@ -198,6 +221,7 @@ mod tests {
 
     fn draft(id: &str) -> pb::Order {
         pb::Order {
+            ad_attribution: None,
             id: id.to_string(),
             user_id: "user-1".to_string(),
             status: pb::MallOrderStatus::PendingPayment as i32,
@@ -402,6 +426,134 @@ mod tests {
         assert_eq!(entry.order_id, "order-ctx");
         assert_eq!(entry.user_id, "user-1");
         assert_eq!(entry.node_offer_id, "offer-1");
+
+        // The pay endpoint re-runs ensure_settlement on every paid replay;
+        // the settlement ledger must stay at exactly one eligible row.
+        let paid_order = dao
+            .get("user-1", "order-ctx")
+            .await
+            .expect("paid order should be readable");
+        dao.ensure_settlement(&paid_order, 0)
+            .await
+            .expect("paid replay should keep the settlement");
+        let settlements = dao
+            .settlements("merchant-1", None, None, 10)
+            .await
+            .expect("list merchant settlements");
+        let ctx_settlements = settlements
+            .iter()
+            .filter(|item| item.order_id == "order-ctx")
+            .count();
+        assert_eq!(ctx_settlements, 1, "pay replay must not duplicate the settlement");
+        assert_eq!(
+            settlements
+                .iter()
+                .find(|item| item.order_id == "order-ctx")
+                .map(|item| item.amount_cents),
+            Some(0),
+            "settlement amount comes from the order commission snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_settlements_are_not_payable_until_promoted_and_reversible_in_window() {
+        let dao = MemoryOrderDao::default();
+        let mut order = draft("order-hold");
+        order.commission_cents = 500;
+        dao.create(NewOrder {
+            order,
+            idempotency_key: "key-hold".to_string(),
+            request_fingerprint: "sku-1:1".to_string(),
+        })
+        .await
+        .expect("order should be created");
+        begin_and_pay(&dao, "order-hold", "payment-hold").await;
+        let paid_order = dao.get("user-1", "order-hold").await.expect("paid order");
+        // The hold keeps the share pending even though the order is paid.
+        dao.ensure_settlement(&paid_order, 7)
+            .await
+            .expect("settlement should exist");
+
+        let pending = dao
+            .settlements("merchant-1", Some(pb::AffiliateSettlementStatus::Eligible as i32), None, 10)
+            .await
+            .expect("list eligible");
+        assert!(
+            pending.is_empty(),
+            "a held share must not be payable during the refund window"
+        );
+
+        // An in-window refund voids the pending share before any payout.
+        let reversed = dao
+            .reverse_affiliate("order-hold")
+            .await
+            .expect("pending share should reverse");
+        assert_eq!(reversed.status, pb::AffiliateSettlementStatus::Reversed as i32);
+
+        // A second order without a hold keeps the legacy immediate eligibility.
+        let mut instant = draft("order-instant");
+        instant.commission_cents = 300;
+        dao.create(NewOrder {
+            order: instant,
+            idempotency_key: "key-instant".to_string(),
+            request_fingerprint: "sku-1:1".to_string(),
+        })
+        .await
+        .expect("order should be created");
+        begin_and_pay(&dao, "order-instant", "payment-instant").await;
+        let instant_order = dao.get("user-1", "order-instant").await.expect("paid order");
+        dao.ensure_settlement(&instant_order, 0)
+            .await
+            .expect("settlement should exist");
+        let eligible = dao
+            .settlements("merchant-1", Some(pb::AffiliateSettlementStatus::Eligible as i32), None, 10)
+            .await
+            .expect("list eligible");
+        assert_eq!(
+            eligible.iter().filter(|item| item.order_id == "order-instant").count(),
+            1,
+            "hold-free shares stay immediately eligible"
+        );
+    }
+
+    #[tokio::test]
+    async fn promotion_flips_only_elapsed_pending_shares() {
+        let dao = MemoryOrderDao::default();
+        let mut order = draft("order-past");
+        order.commission_cents = 100;
+        dao.create(NewOrder {
+            order,
+            idempotency_key: "key-1".to_string(),
+            request_fingerprint: "sku-1:1".to_string(),
+        })
+        .await
+        .expect("order should be created");
+        begin_and_pay(&dao, "order-past", "payment-1").await;
+        let paid_order = dao.get("user-1", "order-past").await.expect("paid order");
+        // hold_days = 0 writes eligible_at = now, so the very next promotion
+        // pass must pick it up.
+        dao.ensure_settlement(&paid_order, 0).await.expect("settlement");
+
+        // Force the row into pending with an elapsed window to exercise the
+        // promotion predicate directly.
+        {
+            let mut settlements = dao.settlements_debug().await;
+            for item in settlements.values_mut() {
+                if item.order_id == "order-past" {
+                    item.status = pb::AffiliateSettlementStatus::Pending as i32;
+                }
+            }
+        }
+        let promoted = dao
+            .promote_eligible_settlements()
+            .await
+            .expect("promotion should run");
+        assert_eq!(promoted, 1);
+        let eligible = dao
+            .settlements("merchant-1", Some(pb::AffiliateSettlementStatus::Eligible as i32), None, 10)
+            .await
+            .expect("list eligible");
+        assert_eq!(eligible.len(), 1);
     }
 
     async fn begin_and_pay(dao: &MemoryOrderDao, id: &str, reference: &str) {
@@ -418,7 +570,7 @@ mod tests {
         let dao = MemoryOrderDao::default();
         let mut paid = draft("order-1");
         paid.commission_cents = 120;
-        dao.ensure_settlement(&paid)
+        dao.ensure_settlement(&paid, 0)
             .await
             .expect("settlement should exist");
 
@@ -445,7 +597,7 @@ mod tests {
         // not this ledger hook, owns clawing funds back.
         let mut settled_order = draft("order-2");
         settled_order.commission_cents = 50;
-        dao.ensure_settlement(&settled_order)
+        dao.ensure_settlement(&settled_order, 0)
             .await
             .expect("second settlement should exist");
         let id = dao
@@ -469,6 +621,153 @@ mod tests {
             dao.reverse_affiliate("order-missing").await,
             Err(DaoError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn expired_order_with_a_claimed_reference_reconciles_to_paid_after_expiry() {
+        let dao = MemoryOrderDao::default();
+        // Crash-recovery style fixture: payment was claimed (the reference is
+        // durable) but the TTL elapsed before inventory committed, so the
+        // expirer marked the order expired.
+        let mut order = draft("order-late");
+        order.status = pb::MallOrderStatus::Expired as i32;
+        order.payment_reference = Some("payment-late".to_string());
+        order.expires_at = "2000-01-01T00:00:00Z".to_string();
+        dao.create(NewOrder {
+            order,
+            idempotency_key: "key-late".to_string(),
+            request_fingerprint: "sku-1:1".to_string(),
+        })
+        .await
+        .expect("expired order should be persisted");
+
+        let reconciled = dao
+            .transition(
+                "order-late",
+                pb::MallOrderStatus::PaidAfterExpiry as i32,
+                None,
+            )
+            .await
+            .expect("a late provider confirmation must reconcile, not fail forever");
+        assert_eq!(
+            reconciled.status,
+            pb::MallOrderStatus::PaidAfterExpiry as i32
+        );
+        assert_eq!(
+            reconciled.payment_reference.as_deref(),
+            Some("payment-late")
+        );
+
+        // Webhook retries replay idempotently on the same durable state.
+        let replay = dao
+            .transition(
+                "order-late",
+                pb::MallOrderStatus::PaidAfterExpiry as i32,
+                None,
+            )
+            .await
+            .expect("replay stays idempotent");
+        assert_eq!(replay.status, pb::MallOrderStatus::PaidAfterExpiry as i32);
+
+        // The reconciliation is a one-way ledger fact: no state may overwrite
+        // it, and it is not a source for any other transition.
+        for forbidden in [
+            pb::MallOrderStatus::Paid,
+            pb::MallOrderStatus::Cancelled,
+            pb::MallOrderStatus::Expired,
+            pb::MallOrderStatus::PendingPayment,
+        ] {
+            let error = dao
+                .transition("order-late", forbidden as i32, None)
+                .await
+                .expect_err("paid_after_expiry is terminal for the service");
+            assert!(matches!(error, DaoError::Failed(_)));
+        }
+        // No affiliate settlement may be created for a paid_after_expiry
+        // order: ensure_settlement is only reachable from the paid paths, and
+        // the ledger here starts empty for this order.
+        let settlements = dao
+            .creator_settlements("creator-1", None, None, 10)
+            .await
+            .expect("creator ledger should read");
+        assert!(
+            settlements.is_empty(),
+            "paid_after_expiry must never mint a settlement row"
+        );
+    }
+
+    #[tokio::test]
+    async fn creator_settlements_list_only_their_own_ledger_rows() {
+        let dao = MemoryOrderDao::default();
+        for (order_id, creator, amount) in [
+            ("order-a", "creator-1", 100_i64),
+            ("order-b", "creator-2", 200_i64),
+            ("order-c", "creator-1", 300_i64),
+        ] {
+            let mut order = draft(order_id);
+            order.affiliate_creator_id = creator.to_string();
+            order.commission_cents = amount;
+            dao.ensure_settlement(&order, 0)
+                .await
+                .expect("settlement should exist");
+        }
+        // Settle order-a so the status filter has something to exclude.
+        let a_id = dao
+            .settlements("merchant-1", None, None, 10)
+            .await
+            .expect("merchant ledger")
+            .into_iter()
+            .find(|item| item.order_id == "order-a")
+            .map(|item| item.id)
+            .expect("settlement for order-a");
+        dao.settle_affiliate("merchant-1", &a_id)
+            .await
+            .expect("merchant settles order-a");
+
+        let all = dao
+            .creator_settlements("creator-1", None, None, 10)
+            .await
+            .expect("creator ledger");
+        assert_eq!(all.len(), 2, "creator-1 sees exactly their own rows");
+        assert!(all.iter().all(|item| item.creator_id == "creator-1"));
+
+        let eligible_only = dao
+            .creator_settlements(
+                "creator-1",
+                Some(pb::AffiliateSettlementStatus::Eligible as i32),
+                None,
+                10,
+            )
+            .await
+            .expect("filtered ledger");
+        assert_eq!(
+            eligible_only
+                .iter()
+                .map(|item| item.order_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["order-c"],
+            "the settled row is excluded by the status filter"
+        );
+
+        // Cursor pagination walks the creator's rows newest-first.
+        let first_page = dao
+            .creator_settlements("creator-1", None, None, 1)
+            .await
+            .expect("first page");
+        assert_eq!(first_page.len(), 1);
+        let next_page = dao
+            .creator_settlements("creator-1", None, Some(first_page[0].id.as_str()), 10)
+            .await
+            .expect("second page");
+        assert_eq!(next_page.len(), 1);
+        assert_ne!(first_page[0].id, next_page[0].id);
+
+        assert!(
+            dao.creator_settlements("creator-unknown", None, None, 10)
+                .await
+                .expect("unknown creator reads an empty ledger")
+                .is_empty()
+        );
     }
 }
 

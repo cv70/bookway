@@ -40,7 +40,8 @@ export function rankAuctionCandidates(
   return campaigns
     .filter(
       (campaign) =>
-        campaign.state === "running" && campaign.binding.id === actionNodeId,
+        campaign.state === "running" &&
+        campaign.binding.actionNodeId === actionNodeId,
     )
     .map((campaign) => ({
       ...campaign,
@@ -88,7 +89,7 @@ export function reRankAuctionCandidates(
       blocked.push(`${candidate.name} 处于活动冷却期`);
       return false;
     }
-    if (consecutiveSameRoute && lastRoute === candidate.binding.route) {
+    if (consecutiveSameRoute && lastRoute === candidate.binding.routeId) {
       blocked.push(`${candidate.name} 触发连续同路线限制`);
       return false;
     }
@@ -100,13 +101,13 @@ export function reRankAuctionCandidates(
       const leftScore =
         left.ecpm *
         left.actionScore *
-        (recentRoutes.has(left.binding.route)
+        (recentRoutes.has(left.binding.routeId)
           ? 1
           : 1 + SIM_EXPLORATION_SHARE / 100);
       const rightScore =
         right.ecpm *
         right.actionScore *
-        (recentRoutes.has(right.binding.route)
+        (recentRoutes.has(right.binding.routeId)
           ? 1
           : 1 + SIM_EXPLORATION_SHARE / 100);
       return rightScore - leftScore;

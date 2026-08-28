@@ -13,7 +13,6 @@ import { Orders } from "./features/orders";
 import { RouteOffers } from "./features/offers";
 import { Inventory, Products } from "./features/catalog";
 import { useMerchantAdmin } from "./features/useMerchantAdmin";
-import { downloadCsv } from "./lib/storage";
 import "../styles.css";
 import "./enhancements.css";
 
@@ -33,17 +32,10 @@ function App() {
     setMenuOpen(false);
     history.replaceState(null, "", `#${next}`);
   };
-  const exportOverview = () =>
-    downloadCsv(
-      `bookway-store-report-${new Date().toISOString().slice(0, 10)}.csv`,
-      ["指标", "数值"],
-      [
-        ["今日成交额", "¥12,680.00"],
-        ["支付订单", "86"],
-        ["访客数", "2,438"],
-        ["转化率", "3.53%"],
-      ],
-    );
+  // 待发货提醒来自服务端订单台账，不再使用写死的“3 条”。
+  const pendingShipments = merchant.orders.filter(
+    (order) => order.status === "待发货",
+  ).length;
   return (
     <div className="app-shell">
       <aside className={`sidebar ${menuOpen ? "open" : ""}`}>
@@ -56,15 +48,15 @@ function App() {
           <span>BOOKWAY</span>
         </a>
         <div className="store-switcher">
-          <span className="store-avatar">青</span>
+          <span className="store-avatar">万</span>
           <span>
-            <strong>青云户外</strong>
-            <small>旗舰店</small>
+            <strong>万卷行</strong>
+            <small>商家中心</small>
           </span>
           <button
             className="icon-button"
             title="切换店铺"
-            onClick={() => notify("当前店铺为青云户外。")}
+            onClick={() => notify("多店铺切换暂未接入。")}
           >
             ⌄
           </button>
@@ -99,14 +91,14 @@ function App() {
             href="#settings"
             onClick={(event) => {
               event.preventDefault();
-              notify("店铺设置已打开，当前账号具备管理员权限。");
+              notify("店铺设置暂未接入。");
             }}
           >
             <span>⚙</span>店铺设置
           </a>
           <div className="help">
             <strong>需要帮助？</strong>
-            <span>商家支持 · 09:00-21:00</span>
+            <span>联系平台商家支持</span>
           </div>
         </div>
       </aside>
@@ -125,39 +117,54 @@ function App() {
             <strong>{titles[view]}</strong>
           </div>
           <div className="top-actions">
-            {merchant.remoteStatus !== "local" && (
-              <span
-                className={`sync-status ${merchant.remoteStatus}`}
-                title={merchant.remoteMessage || "后台数据同步状态"}
-              >
-                {merchant.remoteStatus === "loading"
-                  ? "同步中"
-                  : merchant.remoteStatus === "ready"
-                    ? "已同步"
-                    : merchant.remoteStatus === "auth"
-                      ? "需登录"
+            <span
+              className={`sync-status ${merchant.remoteStatus}`}
+              title={merchant.remoteMessage || "后台数据同步状态"}
+            >
+              {merchant.remoteStatus === "loading"
+                ? "同步中"
+                : merchant.remoteStatus === "ready"
+                  ? "已同步"
+                  : merchant.remoteStatus === "auth"
+                    ? "需登录"
+                    : merchant.remoteStatus === "local"
+                      ? "未连接"
                       : "同步异常"}
-              </span>
-            )}
+            </span>
             <button
               className="icon-button notification"
               title="消息通知"
               onClick={() =>
-                notify("你有 3 条待发货订单提醒，请前往订单中心处理。")
+                notify(
+                  pendingShipments
+                    ? `你有 ${pendingShipments} 笔待发货订单，请前往订单中心处理。`
+                    : "暂无待发货订单。",
+                )
               }
             >
-              ♢<em>3</em>
+              ♢{pendingShipments > 0 && <em>{pendingShipments}</em>}
             </button>
             <button
               className="account"
-              onClick={() => notify("当前登录账号：林青（店铺管理员）。")}
+              onClick={() => notify("账号信息暂未接入，请以网关登录态为准。")}
             >
-              <span className="avatar">林</span>
-              <span>林青</span>
+              <span className="avatar">商</span>
+              <span>商家账号</span>
               <small>⌄</small>
             </button>
           </div>
         </header>
+        {(merchant.remoteStatus === "local" ||
+          merchant.remoteStatus === "error") && (
+          <div className="conn-banner" role="alert">
+            <strong>未连接</strong>
+            <span>
+              {merchant.remoteStatus === "local"
+                ? "未连接商家管理网关，无法读取服务端数据。"
+                : `商家管理网关暂时不可用：${merchant.remoteMessage || "请检查网络连接。"}`}
+            </span>
+          </div>
+        )}
         {view === "overview" && (
           <Overview
             products={merchant.products}
@@ -166,7 +173,6 @@ function App() {
             onNewProduct={() => merchant.setShowProductForm(true)}
             onShip={merchant.beginShip}
             onStock={() => merchant.setShowStockForm(true)}
-            onExport={exportOverview}
           />
         )}
         {view === "products" && (
@@ -204,20 +210,15 @@ function App() {
           <RouteOffers
             offers={merchant.offers}
             products={merchant.products}
-            onToggle={merchant.toggleOffer}
             onCreate={merchant.createOffer}
-            onRemove={merchant.removeOffer}
+            notify={notify}
           />
         )}
         {view === "finance" && (
           <Finance
             affiliates={merchant.affiliateSettlements}
-            affiliateRules={merchant.affiliateRules}
             onPayAffiliate={merchant.payAffiliate}
             onExportAffiliates={merchant.exportAffiliates}
-            onCreateAffiliateRule={merchant.addAffiliateRule}
-            onToggleAffiliateRule={merchant.toggleAffiliateRule}
-            onRemoveAffiliateRule={merchant.removeAffiliateRule}
           />
         )}
       </main>

@@ -1,10 +1,5 @@
-import { FormEvent, useState } from "react";
-import {
-  ActionNodeBinding,
-  Campaign,
-  Creative,
-  formatBinding,
-} from "../domain";
+import { useState } from "react";
+import { Campaign, formatBinding } from "../domain";
 import { calculateEcpm } from "../lib/auction";
 
 export function Campaigns({
@@ -15,11 +10,7 @@ export function Campaigns({
   setStatus,
   open,
   toggle,
-  review,
-  approve,
-  returnToDraft,
   onEdit,
-  notify,
 }: {
   campaigns: Campaign[];
   query: string;
@@ -27,12 +18,8 @@ export function Campaigns({
   setQuery: (value: string) => void;
   setStatus: (value: string) => void;
   open: () => void;
-  toggle: (name: string) => void;
-  review: (name: string) => void;
-  approve: (name: string) => void;
-  returnToDraft: (name: string) => void;
+  toggle: (name: string, nextStatus?: 1 | 2) => void;
   onEdit: (campaign: Campaign) => void;
-  notify: (message: string) => void;
 }) {
   const [selected, setSelected] = useState<Campaign | null>(null);
   return (
@@ -64,7 +51,7 @@ export function Campaigns({
             <option value="all">全部状态</option>
             <option value="running">投放中</option>
             <option value="paused">已暂停</option>
-            <option value="pending">审核中</option>
+            <option value="draft">草稿</option>
           </select>
         </div>
         <table>
@@ -81,7 +68,8 @@ export function Campaigns({
             </tr>
           </thead>
           <tbody>
-            {campaigns.map((campaign) => (
+            {campaigns.length ? (
+              campaigns.map((campaign) => (
               <tr key={campaign.name}>
                 <td>
                   <button
@@ -111,36 +99,19 @@ export function Campaigns({
                     {campaign.state === "draft" ? (
                       <button
                         className="table-action"
-                        onClick={() => review(campaign.name)}
+                        onClick={() => toggle(campaign.name, 1)}
                       >
-                        提交审核
+                        启用投放
                       </button>
-                    ) : campaign.state === "pending" ? (
-                      <>
-                        <button
-                          className="table-action"
-                          onClick={() => approve(campaign.name)}
-                        >
-                          通过审核
-                        </button>
-                        <button
-                          className="table-action danger-action"
-                          onClick={() => returnToDraft(campaign.name)}
-                        >
-                          退回草稿
-                        </button>
-                      </>
                     ) : (
                       <button
                         className="table-action"
-                        onClick={() => {
-                          toggle(campaign.name);
-                          notify(
-                            campaign.state === "running"
-                              ? "广告活动已暂停。"
-                              : "广告活动已恢复投放。",
-                          );
-                        }}
+                        onClick={() =>
+                          toggle(
+                            campaign.name,
+                            campaign.state !== "running" ? 1 : 2,
+                          )
+                        }
                       >
                         {campaign.state === "running" ? "暂停" : "恢复"}
                       </button>
@@ -148,7 +119,16 @@ export function Campaigns({
                   </div>
                 </td>
               </tr>
-            ))}
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={8} className="empty-row">
+                    {status === "all" && !query
+                      ? "暂无广告活动。"
+                      : "没有匹配的广告活动。"}
+                  </td>
+                </tr>
+              )}
           </tbody>
         </table>
       </div>
@@ -169,11 +149,6 @@ export function Campaigns({
 function CampaignStatus({ state }: { state: Campaign["state"] }) {
   return state === "draft" ? (
     <span className="status draft">草稿</span>
-  ) : state === "pending" ? (
-    <span className="status pending">
-      <i />
-      审核中
-    </span>
   ) : (
     <span className={`status ${state}`}>
       <i />
@@ -209,20 +184,18 @@ function CampaignDetails({
             <dd>{campaign.goal}</dd>
           </div>
           <div>
-            <dt>绑定行动节点</dt>
-            <dd>{campaign.binding.node}</dd>
+            <dt>绑定路线 / 行动节点</dt>
+            <dd>
+              {campaign.binding.routeId} / {campaign.binding.actionNodeId}
+            </dd>
           </div>
           <div>
             <dt>场景装备</dt>
             <dd>{campaign.binding.equipment}</dd>
           </div>
           <div>
-            <dt>投放素材</dt>
-            <dd>{campaign.creativeName}</dd>
-          </div>
-          <div>
             <dt>创意标题</dt>
-            <dd>{campaign.title || campaign.creativeName}</dd>
+            <dd>{campaign.title}</dd>
           </div>
           <div>
             <dt>落地页</dt>
@@ -277,24 +250,13 @@ function CampaignDetails({
 
 export function CampaignDialog({
   campaign,
-  creatives,
-  bindings,
   close,
   submit,
 }: {
   campaign?: Campaign;
-  creatives: Creative[];
-  bindings: ActionNodeBinding[];
   close: () => void;
-  submit: (event: FormEvent<HTMLFormElement>) => void;
+  submit: (event: React.FormEvent<HTMLFormElement>) => void;
 }) {
-  const [actionNodeId, setActionNodeId] = useState(
-    campaign?.binding.id || bindings[0]?.id || "",
-  );
-  const matchingCreatives = creatives.filter(
-    (creative) =>
-      creative.status === "已通过" && creative.binding.id === actionNodeId,
-  );
   return (
     <div className="modal-backdrop">
       <form className="modal" onSubmit={submit}>
@@ -348,45 +310,33 @@ export function CampaignDialog({
           </label>
         </div>
         <label>
-          路线行动节点与场景装备
-          <select
-            name="actionNodeId"
-            value={actionNodeId}
-            onChange={(event) => setActionNodeId(event.target.value)}
+          公开路线 ID
+          <input
+            name="routeId"
             required
-          >
-            {bindings.map((binding) => (
-              <option value={binding.id} key={binding.id}>
-                {formatBinding(binding)}
-              </option>
-            ))}
-          </select>
+            disabled={Boolean(campaign)}
+            defaultValue={campaign?.binding.routeId}
+            placeholder="例如：route-weekend-hike（服务端将校验公开状态）"
+          />
         </label>
         <label>
-          已审核投放素材
-          <select
-            key={actionNodeId}
-            name="creativeName"
-            defaultValue={
-              matchingCreatives.some(
-                (creative) => creative.name === campaign?.creativeName,
-              )
-                ? campaign?.creativeName
-                : matchingCreatives[0]?.name
-            }
+          行动节点 ID
+          <input
+            name="actionNodeId"
             required
-            disabled={!matchingCreatives.length}
-          >
-            {matchingCreatives.length ? (
-              matchingCreatives.map((creative) => (
-                <option value={creative.name} key={creative.name}>
-                  {creative.name} · {formatBinding(creative.binding)}
-                </option>
-              ))
-            ) : (
-              <option value="">该节点暂无已通过审核的素材</option>
-            )}
-          </select>
+            disabled={Boolean(campaign)}
+            defaultValue={campaign?.binding.actionNodeId}
+            placeholder="该路线模板中声明的行动节点 ID"
+          />
+        </label>
+        <label>
+          场景装备
+          <input
+            name="equipment"
+            required
+            defaultValue={campaign?.binding.equipment}
+            placeholder="必须与该行动节点声明的场景装备一致"
+          />
         </label>
         <label>
           创意标题
@@ -395,7 +345,7 @@ export function CampaignDialog({
             required
             minLength={4}
             maxLength={60}
-            defaultValue={campaign?.title || campaign?.creativeName}
+            defaultValue={campaign?.title}
             placeholder="在行动节点展示的主标题（4-60 字）"
           />
         </label>
@@ -460,17 +410,15 @@ export function CampaignDialog({
         <div className="frequency">
           <strong>定向说明</strong>
           <p>
-            只能使用平台观察到的公开投送上下文；观察不到地域或设备时，仅投放未做该维度限定的活动。
+            广告只能绑定公开路线的行动节点及其声明的场景装备，服务端在创建、召回与决策时都会校验；
+            观察不到地域或设备时，仅投放未做该维度限定的活动。绑定创建后不可修改。
           </p>
         </div>
         <div className="dialog-actions">
           <button type="button" className="button secondary" onClick={close}>
             取消
           </button>
-          <button
-            className="button primary"
-            disabled={!matchingCreatives.length}
-          >
+          <button className="button primary">
             {campaign ? "保存更改" : "创建活动"}
           </button>
         </div>

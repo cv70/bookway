@@ -18,6 +18,10 @@ message Candidate {
   double p_ctr = 11;
   double p_cvr = 12;
   double p_wegu = 13;
+  // Named feature values the ranker actually used for this candidate, filled
+  // by Recommend Rank so the exposure ledger can train on serving-time
+  // features (never on post-serving aggregates, which would leak the future).
+  map<string, double> feature_snapshot = 14;
 }
 message RecallRequest {
   string user_id = 1;

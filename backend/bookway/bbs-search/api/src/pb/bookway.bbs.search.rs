@@ -27,6 +27,12 @@ pub struct SearchRequest {
     /// Contextual ad placement. When absent Search Main uses "search".
     #[prost(string, optional, tag = "11")]
     pub ad_placement: ::core::option::Option<::prost::alloc::string::String>,
+    /// Delivery context for contextual ad mixing (search-main); ignored by
+    /// the search index itself.
+    #[prost(string, optional, tag = "12")]
+    pub geo_region: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "13")]
+    pub device_os: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -200,6 +206,28 @@ pub struct SuggestionsResponse {
     pub query: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "2")]
     pub items: ::prost::alloc::vec::Vec<Suggestion>,
+}
+/// One-shot semantic recall: nearest documents to the query vector. The
+/// vector comes from the same embedding model the indexer used; empty
+/// responses mean "no vectors indexed yet", not an error.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchSemanticRequest {
+    #[prost(string, tag = "1")]
+    pub q: ::prost::alloc::string::String,
+    #[prost(float, repeated, tag = "2")]
+    pub query_vector: ::prost::alloc::vec::Vec<f32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub limit: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "4")]
+    pub user_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "5")]
+    pub excluded_author_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Constrains recall to one typed surface. Unset recalls the mixed content
+    /// surface; NODES/EQUIPMENT restrict candidates to routes that own action
+    /// nodes and return typed entity results.
+    #[prost(enumeration = "SearchType", optional, tag = "6")]
+    pub search_type: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -428,6 +456,29 @@ pub mod bbs_search_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
+        pub async fn search_semantic(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SearchSemanticRequest>,
+        ) -> std::result::Result<tonic::Response<super::SearchResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/bookway.bbs.search.BbsSearch/SearchSemantic",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("bookway.bbs.search.BbsSearch", "SearchSemantic"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn search(
             &mut self,
             request: impl tonic::IntoRequest<super::SearchRequest>,
@@ -488,6 +539,10 @@ pub mod bbs_search_server {
     /// Generated trait containing gRPC methods that should be implemented for use with BbsSearchServer.
     #[async_trait]
     pub trait BbsSearch: std::marker::Send + std::marker::Sync + 'static {
+        async fn search_semantic(
+            &self,
+            request: tonic::Request<super::SearchSemanticRequest>,
+        ) -> std::result::Result<tonic::Response<super::SearchResponse>, tonic::Status>;
         async fn search(
             &self,
             request: tonic::Request<super::SearchRequest>,
@@ -576,6 +631,51 @@ pub mod bbs_search_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
+                "/bookway.bbs.search.BbsSearch/SearchSemantic" => {
+                    #[allow(non_camel_case_types)]
+                    struct SearchSemanticSvc<T: BbsSearch>(pub Arc<T>);
+                    impl<
+                        T: BbsSearch,
+                    > tonic::server::UnaryService<super::SearchSemanticRequest>
+                    for SearchSemanticSvc<T> {
+                        type Response = super::SearchResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SearchSemanticRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BbsSearch>::search_semantic(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SearchSemanticSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/bookway.bbs.search.BbsSearch/Search" => {
                     #[allow(non_camel_case_types)]
                     struct SearchSvc<T: BbsSearch>(pub Arc<T>);

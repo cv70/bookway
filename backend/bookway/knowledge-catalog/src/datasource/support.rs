@@ -41,10 +41,31 @@ pub(crate) struct RagVectorHit {
     pub(crate) relevance: f64,
 }
 
+/// A validated catalog write. `resource_id` is `None` on create; the DAO
+/// generates the id (or adopts the entry that already owns the URL).
+#[derive(Clone, Debug)]
+pub(crate) struct NewPublicResource {
+    pub(crate) resource_id: Option<String>,
+    pub(crate) title: String,
+    pub(crate) kind: pb::ResourceKind,
+    pub(crate) provider: String,
+    pub(crate) summary: String,
+    pub(crate) url: String,
+    pub(crate) license: String,
+    pub(crate) version: String,
+    pub(crate) citation: String,
+    pub(crate) topics: Vec<String>,
+    pub(crate) status: pb::ResourceStatus,
+}
+
 #[async_trait]
 pub(crate) trait ResourceDao: Send + Sync {
     async fn search(&self, request: &pb::SearchRequest) -> Result<pb::SearchResponse, DaoError>;
     async fn get(&self, resource_id: &str) -> Result<pb::Resource, DaoError>;
+    async fn upsert_public_resource(
+        &self,
+        request: NewPublicResource,
+    ) -> Result<pb::Resource, DaoError>;
     async fn list_node_resources(
         &self,
         route_id: &str,
@@ -208,6 +229,13 @@ fn kind_name(kind: pb::ResourceKind) -> &'static str {
         pb::ResourceKind::Unspecified => "",
     }
 }
+fn status_name(status: pb::ResourceStatus) -> &'static str {
+    match status {
+        pb::ResourceStatus::Published => "published",
+        pb::ResourceStatus::Archived => "archived",
+        pb::ResourceStatus::Unspecified => "",
+    }
+}
 fn attachment_kind_name(kind: pb::AttachmentKind) -> &'static str {
     match kind {
         pb::AttachmentKind::Document => "document",
@@ -265,8 +293,63 @@ fn format_time(value: OffsetDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryResourceDao, ResourceDao};
+    use super::{MemoryResourceDao, NewPublicResource, ResourceDao};
     use bookway_knowledge_catalog_api::pb;
+
+    fn upsert_request(resource_id: Option<String>, url: &str) -> NewPublicResource {
+        NewPublicResource {
+            resource_id,
+            title: "开放工具".to_string(),
+            kind: pb::ResourceKind::Tool,
+            provider: "Open Tools".to_string(),
+            summary: "工具简介".to_string(),
+            url: url.to_string(),
+            license: "MIT".to_string(),
+            version: "2.0".to_string(),
+            citation: "Open Tools. 2026.".to_string(),
+            topics: vec!["工具".to_string()],
+            status: pb::ResourceStatus::Published,
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_upsert_creates_then_updates_in_place_for_duplicate_url() {
+        let dao = MemoryResourceDao::seeded();
+        let created = dao
+            .upsert_public_resource(upsert_request(None, "https://test.example/tool"))
+            .await
+            .expect("create should succeed");
+        assert_eq!(created.status, pb::ResourceStatus::Published as i32);
+
+        // A duplicate canonical URL updates the owning entry; no second row.
+        let updated = dao
+            .upsert_public_resource(upsert_request(
+                Some("caller-chosen-id".to_string()),
+                "https://test.example/tool",
+            ))
+            .await
+            .expect("duplicate url should update");
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.title, "开放工具");
+        let page = dao
+            .search(&pb::SearchRequest {
+                query: "开放工具".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("search should succeed");
+        assert_eq!(page.items.len(), 1);
+
+        // An unknown id with a fresh URL creates a new entry with that id.
+        let caller_id = dao
+            .upsert_public_resource(upsert_request(
+                Some("resource-caller-id".to_string()),
+                "https://test.example/other",
+            ))
+            .await
+            .expect("create with caller id");
+        assert_eq!(caller_id.id, "resource-caller-id");
+    }
 
     #[tokio::test]
     async fn memory_catalog_filters_published_resources_by_kind_and_topic() {

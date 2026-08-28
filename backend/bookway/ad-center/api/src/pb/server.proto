@@ -3,7 +3,9 @@ package bookway.ad.center;
 
 enum CampaignStatus { CAMPAIGN_STATUS_DRAFT = 0; CAMPAIGN_STATUS_ACTIVE = 1; CAMPAIGN_STATUS_PAUSED = 2; CAMPAIGN_STATUS_ENDED = 3; }
 enum PricingModel { PRICING_MODEL_CPM = 0; PRICING_MODEL_CPC = 1; }
-enum EventType { EVENT_TYPE_IMPRESSION = 0; EVENT_TYPE_CLICK = 1; }
+// Conversions are attributed post-impression facts (e.g. an offer purchase
+// after the ad served). They carry no charge: billing is CPM/CPC only.
+enum EventType { EVENT_TYPE_IMPRESSION = 0; EVENT_TYPE_CLICK = 1; EVENT_TYPE_CONVERSION = 2; }
 message StringList { repeated string values = 1; }
 message AdCampaign {
   string id = 1; string advertiser_id = 2; string name = 3; string placement = 4;
@@ -11,6 +13,7 @@ message AdCampaign {
   repeated string target_domains = 9; CampaignStatus status = 10; PricingModel pricing_model = 11;
   int64 bid_micros = 12; int64 daily_budget_micros = 13; int64 spent_today_micros = 14;
   uint32 frequency_cap = 15; uint64 impressions = 16; uint64 clicks = 17;
+  uint64 conversions = 30;
   optional string starts_at = 18; optional string ends_at = 19; string created_at = 20; string updated_at = 21;
   double predicted_ctr = 22; double predicted_cvr = 23; uint32 global_frequency_cap = 24;
   string route_id = 25; string action_node_id = 26;
@@ -53,7 +56,7 @@ message GetDeliveryGuardrailsRequest {}
 // a serving-side effect stay out of the contract instead of pretending.
 message DeliveryGuardrails { uint32 user_daily_total_cap = 1; }
 message AdDeliveryReportRequest { string advertiser_id = 1; string from_date = 2; string to_date = 3; }
-message AdDeliveryReportRow { string campaign_id = 1; string stat_date = 2; int64 impressions = 3; int64 clicks = 4; int64 spent_micros = 5; }
+message AdDeliveryReportRow { string campaign_id = 1; string stat_date = 2; int64 impressions = 3; int64 clicks = 4; int64 spent_micros = 5; int64 conversions = 6; }
 message AdDeliveryReport { repeated AdDeliveryReportRow rows = 1; }
 
 service AdCenter {

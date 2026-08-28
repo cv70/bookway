@@ -21,6 +21,10 @@ message FeedRequest {
   string surface = 6;
   optional string cursor = 7;
   optional FeedActionContext action_context = 8;
+  // Delivery context the gateway derives from edge headers; drives
+  // fail-closed geo/device targeting in contextual ad mixing.
+  string geo_region = 9;
+  string device_os = 10;
 }
 message FeedAd {
   string request_id = 1;

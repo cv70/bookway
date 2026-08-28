@@ -20,30 +20,3 @@ CREATE TABLE IF NOT EXISTS route_node_resource_embeddings (
 CREATE INDEX IF NOT EXISTS idx_route_node_resource_embeddings_scope
     ON route_node_resource_embeddings
         (route_id, action_node_id, embedding_collection, embedding_model);
-
-INSERT INTO route_node_resource_embeddings (
-    attachment_id,
-    route_id,
-    action_node_id,
-    embedding_collection,
-    embedding_model,
-    embedding
-)
-SELECT
-    attachment_id,
-    route_id,
-    action_node_id,
-    embedding_collection,
-    'char-ngram-v1',
-    ARRAY[1.0::REAL, 0.0::REAL, 0.0::REAL, 0.0::REAL, 0.0::REAL, 0.0::REAL, 0.0::REAL, 0.0::REAL]
-FROM (
-    SELECT
-        id AS attachment_id,
-        route_id,
-        action_node_id,
-        embedding_collection
-    FROM route_node_resource_attachments
-    WHERE rag_enabled = TRUE
-      AND archived_at IS NULL
-) existing
-WHERE FALSE;

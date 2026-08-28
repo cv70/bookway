@@ -1,0 +1,17 @@
+# Lifts content-report restrictions whose penalty windows have elapsed.
+[Unit]
+Description=Bookway content report restriction dispatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+ExecStart=/opt/bookway/backend/target/release/bookway-content-report-restriction-dispatcher
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

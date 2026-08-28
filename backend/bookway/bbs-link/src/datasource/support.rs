@@ -98,6 +98,7 @@ fn seed(input: SeedContent<'_>) -> pb::Content {
             is_route: true,
             is_milestone: false,
             is_question: false,
+            fork_count: 0,
         }),
         author_id: input.author_id.to_string(),
         content_type: pb::ContentType::Route as i32,

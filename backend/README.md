@@ -2,7 +2,7 @@
 
 万卷行后端是独立的 Rust workspace，统一使用 Rust 2024、Axum、Tokio、Tower、Serde 和 Reqwest。
 
-当前版本是**生产基础设施接入版本**：在线服务可以独立编译和启动，关键跨服务流程由专用 Worker 协调。核心事实数据可通过 `STORAGE_MODE=postgres` 切换到 SQLx/PostgreSQL；用户事件使用同事务 Outbox 并由 Kafka Relay 发布；Redis 提供限流和特征缓存；OpenSearch、对象存储/CDN、内容审核、特征与模型排序、JWT/服务令牌、Prometheus 指标和 SLO 已形成可运行边界。默认 `memory` 模式仍保留用于无依赖开发。
+当前版本是**生产基础设施接入版本**：在线服务可以独立编译和启动，关键跨服务流程由专用 Worker 协调。核心事实数据可通过 `STORAGE_MODE=postgres` 切换到 SQLx/PostgreSQL；用户事件使用同事务 Outbox 并由 Kafka Relay 发布；Redis 提供限流和特征缓存；OpenSearch、对象存储/CDN、内容审核、特征与模型排序、JWT/服务令牌、Prometheus 指标和 SLO 已形成可运行边界。`STORAGE_MODE` 必须显式设置（`postgres` 或 `memory`）：未设置时服务拒绝启动——内存模式带演示种子数据，生产部署漏配环境变量时静默启用等于端出假数据。`memory` 仅供无依赖本地开发。
 
 ## 微服务拓扑
 
@@ -105,6 +105,10 @@ backend/
 │       ├── src/datasource/
 │       └── src/domain/       # Domain 持有配置、依赖和业务编排
 ├── deploy/docker-compose.yml
+├── deploy/systemd/           # 长驻服务与维护作业的 systemd 单元（索引器/对账/评估）
+├── bookway-py/               # Python 侧作业与服务（job/cronjob/bg 三类）
+│   ├── cronjob/rank_training/  # 排序模型训练（PyTorch：logistic artifact + MiniCPM LoRA）
+│   └── bg/model_serving/       # MiniCPM5-1B 推理常驻服务（embeddings + LLM 打分）
 ├── migrations/
 ├── cmd/
 │   ├── db-migrate/
@@ -168,7 +172,7 @@ Gateway 只请求 `search-main`，由它规范化参数和编排底层 `bbs-sear
 内部搜索由 `search-main` 的 gRPC `search` 和 `suggestions` 方法提供。
 ```
 
-设置 `OPENSEARCH_URL` 后，`bbs-search` 通过 `OPENSEARCH_READ_ALIAS` 使用 OpenSearch 多字段召回并在索引不可用时降级到 `bbs-link`；`bookway-search-indexer` 以内容版本写入 `OPENSEARCH_WRITE_INDEX` 指定的物理 CJK 索引，拒绝把别名当成写目标，并能在重建期间双写 `OPENSEARCH_SHADOW_WRITE_INDEX`。`bookway-search-index-rebuild` 使用可恢复的 keyset Bulk 重建补齐历史内容，`bookway-search-index-reconcile` 只读比对物理索引的逐内容可见性/版本和总数，完整扫描的 `healthy=true` 才可作为发布前完整性证据；`bookway-search-index-alias-switch` 随后原子发布读别名，保留旧索引以便回滚；`bookway-search-index-outbox-recovery` 默认输出并审计死信状态，只有具名、注明原因的恢复运行才会重排死信。已有 PIT 继续使用旧快照，新 PIT 使用新别名。`search-main` 承担 `query rewrite -> recall -> pre-rank -> rank -> rerank` 的产品编排边界：改写词典使用原子活动版本指针热切换，身份/话题查询不扩展，每个曝光保留改写版本而不保存查询明文；`bookway-search-evaluator` 以可信归因回放版本级观察性质量，不能自动推广词典。
+设置 `OPENSEARCH_URL` 后，`bbs-search` 通过 `OPENSEARCH_READ_ALIAS` 使用 OpenSearch 多字段召回并在索引不可用时降级到 `bbs-link`；`bookway-search-indexer` 以内容版本写入 `OPENSEARCH_WRITE_INDEX` 指定的物理 CJK 索引，拒绝把别名当成写目标，并能在重建期间双写 `OPENSEARCH_SHADOW_WRITE_INDEX`。`bookway-search-index-rebuild` 使用可恢复的 keyset Bulk 重建补齐历史内容，`bookway-search-index-reconcile` 只读比对物理索引的逐内容可见性/版本和总数，完整扫描的 `healthy=true` 才可作为发布前完整性证据；`bookway-search-index-alias-switch` 随后原子发布读别名，保留旧索引以便回滚；`bookway-search-index-outbox-recovery` 默认输出并审计死信状态，只有具名、注明原因的恢复运行才会重排死信。已有 PIT 继续使用旧快照，新 PIT 使用新别名。语义召回：`bookway-search-indexer` 配置 `SEMANTIC_VECTOR_DIMS`（并指向 `KNOWLEDGE_CATALOG_GRPC_URL`）后，会把标题/摘要/节点/装备的 embedding 写入 `semantic_vector`（knn_vector, cosinesimil, HNSW/lucene），维度一旦写入不可更改；`bbs-search` 新增 `SearchSemantic`（kNN 一次批量、无游标，查询直接遍历读别名索引的 HNSW 图，发布状态/作者可见性与实体面过滤在 k-NN 子句内下推），`search-main` 在内容型与节点/装备查询上以独立"semantic"召回路接入（60ms 预算×2，任一失败该路静默为空），索引无向量时行为与原先完全一致。`search-main` 承担 `query rewrite -> recall -> pre-rank -> rank -> rerank` 的产品编排边界：改写词典使用原子活动版本指针热切换，身份/话题查询不扩展，每个曝光保留改写版本而不保存查询明文；`bookway-search-evaluator` 以可信归因回放版本级观察性质量，不能自动推广词典。
 
 搜索游标采用 `v2 + 查询/类型指纹 + 短期会话 ID`，不同查询或结果类型之间不可复用，且客户端游标大小受限。会话在服务端保存未消费的混合结果、去重键和源游标；OpenSearch 主路径以 5 分钟 PIT 和 `_score` / 内容 ID 的 `search_after` 续页，不再截断为固定候选集。PIT 或会话过期时返回可识别的前置条件错误，客户端应从第一页重新搜索；索引首次请求不可用时仍会降级到 `bbs-link`。联想词按近 90 天真实查询统计、命中内容和冷启动词合并去重。
 
@@ -310,7 +314,7 @@ cargo run -p bookway-gateway
 
 | 服务 | 监听变量 | 上游变量 |
 | --- | --- | --- |
-| gateway | `GATEWAY_ADDR` | `ACCOUNT_GRPC_URL`、`GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`、`BBS_CREATOR_GRPC_URL`、`BBS_MESSAGE_GRPC_URL`、`COMMENT_GRPC_URL`、`INTERACTION_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、`FEEDBACK_GRPC_URL` |
+| gateway | `GATEWAY_ADDR` | `ACCOUNT_GRPC_URL`、`GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`、`BBS_CREATOR_GRPC_URL`、`BBS_MESSAGE_GRPC_URL`、`COMMENT_GRPC_URL`、`INTERACTION_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、`FEEDBACK_GRPC_URL` 、`PAYMENT_WEBHOOK_SECRET`（支付 webhook HMAC 验签密钥，签名输入为 `{provider}.{raw_body}`，见「支付 Webhook 签名契约」；未配置时 `/payments/webhook/*` 返回 503，绝不无签名放行） |
 | account | `ACCOUNT_ADDR` | 无 |
 | growth | `GROWTH_ADDR` | 无 |
 | bbs | `BBS_ADDR` | 无 |
@@ -330,24 +334,38 @@ cargo run -p bookway-gateway
 | direct-message-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`GROWTH_GRPC_URL`、`DIRECT_MESSAGE_NOTIFICATION_*` |
 | appeal-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`GROWTH_GRPC_URL`、`APPEAL_NOTIFICATION_*` |
 | content-report-restriction-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`REPORT_RESTRICTION_*` |
-| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`AD_MAIN_GRPC_URL`（特征与广告均可降级） |
+| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`（路线 join_count 水合，缺失时保留索引值）、`KNOWLEDGE_CATALOG_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`AD_MAIN_GRPC_URL`（特征与广告均可降级） |
 | media | `MEDIA_ADDR` | `S3_ENDPOINT`、`S3_BUCKET`、`CDN_BASE_URL` |
 | content-audit | `CONTENT_AUDIT_ADDR` | 审核规则与 PostgreSQL |
 | feedback | `FEEDBACK_ADDR` | PostgreSQL；`user_feedback` 状态队列 |
 | feature-main | `FEATURE_MAIN_ADDR` | `REDIS_URL`、PostgreSQL |
-| recommend-recall | `RECOMMEND_RECALL_ADDR` | `BBS_LINK_GRPC_URL`、`RECALL_SOURCE_BLEND`（`balanced-v1` 或 `score-v1`） |
-| recommend-rank | `RECOMMEND_RANK_ADDR` | `RECOMMEND_RANK_MODEL_VERSION` |
-| ad-center | `AD_CENTER_ADDR` | PostgreSQL；活动和投放账本 |
+| recommend-recall | `RECOMMEND_RECALL_ADDR` | `BBS_LINK_GRPC_URL`、`RECALL_SOURCE_BLEND`（`balanced-v1` 或 `score-v1`）、`RECALL_SEMANTIC_BBS_SEARCH_URL` 与 `RECALL_SEMANTIC_KNOWLEDGE_CATALOG_URL`（两者同时配置才注册语义召回源：EmbedTexts 嵌入兴趣文本 + SearchSemantic 最近邻召回；任一缺失时该源不注册，其余来源照常工作） |
+| recommend-rank | `RECOMMEND_RANK_ADDR` | `RECOMMEND_RANK_MODEL_VERSION`、`RECOMMEND_RANK_MODEL_ENDPOINT`（model_serving `/score`，LLM 三目标打分；不可用/未训练时自动降级启发式并如实上报 degraded）、`RECOMMEND_RANK_MODEL_ARTIFACT`（离线 LR 权重 JSON，见 `model-artifact.example.json`；配置后启动时校验加载，覆盖 endpoint） |
+| ad-center | `AD_CENTER_ADDR` | PostgreSQL；活动和投放账本；`AD_CENTER_PACING_ENABLED`（默认开：线性日预算 pacing，1.5x 追赶余量） |
 | ad-recall | `AD_RECALL_ADDR` | `AD_CENTER_GRPC_URL` |
 | ad-rank | `AD_RANK_ADDR` | `AD_RANK_MODEL_VERSION`、`AD_RANK_CALIBRATION` |
 | ad-main | `AD_MAIN_ADDR` | `AD_CENTER_GRPC_URL`、`AD_RECALL_GRPC_URL`、`AD_RANK_GRPC_URL`、`AD_MAIN_IMPRESSION_COOLDOWN_MS`（可选用户级曝光间隔，Redis 故障自动失效） |
 | mall | `MALL_ADDR` | PostgreSQL 商品与 SKU 目录 |
 | mall-inventory | `MALL_INVENTORY_ADDR` | PostgreSQL；`MALL_RESERVATION_TTL_SECONDS` |
-| mall-order | `MALL_ORDER_ADDR` | `MALL_GRPC_URL`、`MALL_INVENTORY_GRPC_URL`、`MALL_PAYMENT_TTL_SECONDS` |
+| mall-order | `MALL_ORDER_ADDR` | `MALL_GRPC_URL`、`MALL_INVENTORY_GRPC_URL`、`MALL_PAYMENT_TTL_SECONDS`、`MALL_AFFILIATE_HOLD_DAYS`（分账冷静期天数，默认 7，0=立即 eligible；晋级由 expirer worker 驱动） |
+| knowledge-catalog | `KNOWLEDGE_CATALOG_ADDR` | PostgreSQL；`RAG_VECTOR_ENABLED` + `RAG_EMBEDDING_ENDPOINT`/`RAG_EMBEDDING_MODEL`/`RAG_EMBEDDING_API_KEY`（OpenAI 兼容 embeddings，通常指向 bookway-py 的 model_serving；缺失时 EmbedTexts fail-closed、RAG 检索如实降级词法）、`BBS_LINK_GRPC_URL` |
+| bbs-search/bg/bbs-indexer | 无监听端口 | `OPENSEARCH_URL`、`KNOWLEDGE_CATALOG_GRPC_URL`、`SEMANTIC_VECTOR_DIMS`（语义向量维度，写入索引后不可改，必须等于基模 hidden size；未设置时不建语义字段） |
+| outbox-relay | 无监听端口 | `DATABASE_URL`、Kafka、`MALL_GRPC_URL`、`USER_EVENT_GRPC_URL`、`AD_CENTER_GRPC_URL`（订单带广告归因时回投广告转化；未配置时此类行进入死信并注明原因）、`OUTBOX_BATCH_SIZE` |
+| bookway-py/bg/model_serving | `8110`（`MODEL_SERVING_PORT`） | `MODEL_NAME`、`MODEL_SOURCE`、`MODEL_DIR`、`MODEL_DEVICE`、`MODEL_CHECKPOINT_PATH`（静态 checkpoint）、`MODEL_REGISTRY_PATH`（训练侧原子发布的注册表，热加载优先于静态路径；两半契约：`scoring_head.pt` + `adapter/` 缺一拒绝服务）、`MODEL_MAX_BATCH`、`MODEL_MAX_INPUT_CHARS` |
+| bookway-py/cronjob/rank_training | 无监听端口 | `DATABASE_URL`、`TRAINER_LLM_OUTPUT_DIR`、`TRAINER_REGISTRY_PATH`（通过门控后原子发布到 model_serving 热加载）、`TRAINER_LLM_MIN_AUC`（holdout AUC 门控，默认 0.55；不达标拒绝发布 exit 非零）、`TRAINER_LLM_*`、`TRAINER_LORA_*` |
 
 全服务共享 `STORAGE_MODE`、`DATABASE_URL`、`SERVICE_AUTH_TOKEN`、`SERVICE_AUTH_REQUIRED`、`AUTH_REQUIRED`、`AUTH_JWT_SECRET`、`HTTP_CONNECT_TIMEOUT_MS` 和 `HTTP_REQUEST_TIMEOUT_MS`。Gateway 的 `CORS_ALLOWED_ORIGINS` 必须列出允许访问 Web API 的精确 `http(s)` Origin，拒绝通配符、路径和自定义 scheme；默认值仅供本机 Expo Web 调试。Redis 连接和命令预算分别由 `REDIS_CONNECT_TIMEOUT_MS`（默认 1000ms）与 `REDIS_COMMAND_TIMEOUT_MS`（默认 100ms）控制，缓存或限流 Redis 故障时会告警并 fail-open。生产环境必须启用两种鉴权：App 的 Bearer JWT 只在 Gateway 解析；非 Gateway 服务的业务端点只接受带服务令牌的内部请求，并信任 Gateway 注入的 `x-user-id`。健康、就绪和指标端点不要求服务令牌。
 
 如果默认端口被占用，可整组使用 `18080-18090` 并显式设置全部 URL；客户端将 `EXPO_PUBLIC_API_URL` 指向新的 Gateway 地址。
+
+### 支付 Webhook 签名契约
+
+`POST /payments/webhook/{provider}` 的签名覆盖 **provider 路径段与原始请求体的拼接**：
+
+- `x-payment-signature` = hex(HMAC-SHA256(key=`PAYMENT_WEBHOOK_SECRET`, message=`"{provider}." + raw_body`))。provider 即 URL 路径段原样字节，网关在服务端拼接 `.` 分隔符后整体验签；针对某 provider 抓取的签名无法在另一 provider 的端点重放。
+- 请求体为 JSON，必须携带非空 `payment_reference`；mall-order 以该流水号驱动与 `Pay` 相同的幂等状态机。
+- 确认到达晚于 `MALL_PAYMENT_TTL_SECONDS` 时，订单如实进入 `paid_after_expiry` 终态（不自动履约、不生成分账，运营决定退款或补履约），provider 不会陷入 failed_precondition 重试循环。
+- `PAYMENT_WEBHOOK_SECRET` 未配置时端点整体返回 503，绝不无签名放行。
 
 ## 已实现的生产能力
 

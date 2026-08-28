@@ -1,0 +1,20 @@
+# Builds RAG node-resource embeddings: claims pending rows (0075 builder
+# state columns), embeds via the model-serving/knowledge-catalog provider,
+# writes vectors back. Without it RAG retrieval silently degrades to the
+# lexical fallback (retrieval_mode says so honestly).
+[Unit]
+Description=Bookway knowledge RAG embedding builder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+ExecStart=/opt/bookway/backend/target/release/bookway-knowledge-embedding-builder
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

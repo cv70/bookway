@@ -34,13 +34,17 @@ impl ExposureDataSource for PostgresExposureDataSource {
         for item in &exposure.items {
             let position = i32::try_from(item.position).unwrap_or(i32::MAX);
             sqlx::query(
-                "INSERT INTO feed_exposure_items (request_id, position, content_id, source, score, reasons) VALUES ($1, $2, $3, $4, $5, $6)",
+                "INSERT INTO feed_exposure_items (request_id, position, content_id, source, score, p_ctr, p_cvr, p_wegu, feature_snapshot, reasons) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             )
             .bind(&exposure.request_id)
             .bind(position)
             .bind(&item.content_id)
             .bind(&item.source)
             .bind(item.score)
+            .bind(item.p_ctr)
+            .bind(item.p_cvr)
+            .bind(item.p_wegu)
+            .bind(&item.feature_snapshot)
             .bind(serde_json::json!(item.reasons))
             .execute(&mut *transaction)
             .await?;

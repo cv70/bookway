@@ -1,42 +1,37 @@
-import { useState } from "react";
 import { Campaign, DeliveryGuardrails, View } from "../domain";
 import { reRankAuctionCandidates } from "../lib/auction";
 
 type Props = {
   campaigns: Campaign[];
-  guardrails: DeliveryGuardrails;
+  guardrails: DeliveryGuardrails | null;
   go: (view: View) => void;
   open: () => void;
-  onApplyBudget: (name: string) => void;
-  notify: (message: string) => void;
 };
 
-export function Overview({
-  campaigns,
-  guardrails,
-  go,
-  open,
-  onApplyBudget,
-}: Props) {
-  const [range, setRange] = useState("过去 7 天");
-  const [applied, setApplied] = useState(false);
+const impressionCount = (campaign: Campaign) =>
+  Number(campaign.impressions.replace(/,/g, "")) || 0;
+
+// 观察点击率只由服务端已验证的展示与点击计算；没有数据时显示 --，
+// 不再用写死的百分比冒充统计。
+const observedCtr = (campaign: Campaign) => {
+  const impressions = impressionCount(campaign);
+  return impressions > 0
+    ? `${((campaign.clicks / impressions) * 100).toFixed(2)}%`
+    : "--";
+};
+
+export function Overview({ campaigns, guardrails, go, open }: Props) {
   return (
     <section className="content">
       <div className="page-heading">
         <div>
-          <p className="eyebrow">2026 年 8 月 12 日 - 8 月 18 日</p>
+          <p className="eyebrow">场景化投放</p>
           <h1>投放概览</h1>
-          <p className="muted">所有数据按已验证展示和点击实时归因</p>
+          <p className="muted">
+            活动与消耗数据来自服务端广告账本，汇总指标请查看报告中心
+          </p>
         </div>
         <div className="heading-actions">
-          <button
-            className="button secondary"
-            onClick={() =>
-              setRange(range === "过去 7 天" ? "过去 30 天" : "过去 7 天")
-            }
-          >
-            ▣ {range}
-          </button>
           <button className="button primary" onClick={open}>
             ＋ 创建广告活动
           </button>
@@ -45,42 +40,67 @@ export function Overview({
       <div className="guardrail">
         <span>✓</span>
         <p>
-          <strong>投放状态健康</strong>
-          所有展示均来自用户主动请求的路线场景，频控和预算保护已生效。
+          <strong>场景化投放</strong>
+          广告仅出现在用户主动进入的公开路线行动节点，频控与预算保护由服务端强制执行。
         </p>
         <button className="link-button" onClick={() => go("audiences")}>
           查看场景策略
         </button>
       </div>
-      <Metrics />
-      <section className="dashboard-grid">
-        <Performance />
-        <Budget />
-      </section>
-      <section className="panel campaign-summary">
+      <CampaignSummary campaigns={campaigns} go={go} />
+      <AuctionPreview campaigns={campaigns} guardrails={guardrails} />
+      <section className="panel">
         <div className="panel-header">
           <div>
-            <h2>广告活动</h2>
-            <p>最近 7 天表现</p>
+            <h2>投放指标</h2>
+            <p>消耗、展示与点击汇总</p>
           </div>
-          <button className="link-button" onClick={() => go("campaigns")}>
-            查看全部
+          <button className="link-button" onClick={() => go("reports")}>
+            前往报告中心
           </button>
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>广告活动</th>
-              <th>状态</th>
-              <th>消耗</th>
-              <th>展示</th>
-              <th>点击率</th>
-              <th>转化</th>
-            </tr>
-          </thead>
-          <tbody>
-            {campaigns.slice(0, 3).map((campaign, index) => (
-              <tr key={campaign.name}>
+        <p className="panel-note">
+          消耗、展示、点击等汇总指标来自 ad-center
+          每日投放账本，请按区间在报告中心查看；转化指标未接入前不做展示。
+        </p>
+      </section>
+    </section>
+  );
+}
+
+function CampaignSummary({
+  campaigns,
+  go,
+}: {
+  campaigns: Campaign[];
+  go: (view: View) => void;
+}) {
+  return (
+    <section className="panel campaign-summary">
+      <div className="panel-header">
+        <div>
+          <h2>广告活动</h2>
+          <p>活动状态与服务端累计投放数据</p>
+        </div>
+        <button className="link-button" onClick={() => go("campaigns")}>
+          查看全部
+        </button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>广告活动</th>
+            <th>状态</th>
+            <th>日预算</th>
+            <th>消耗</th>
+            <th>展示</th>
+            <th>观察点击率</th>
+          </tr>
+        </thead>
+        <tbody>
+          {campaigns.length ? (
+            campaigns.map((campaign) => (
+              <tr key={campaign.id}>
                 <td>
                   {campaign.name}
                   <small>目标：{campaign.goal}</small>
@@ -88,63 +108,21 @@ export function Overview({
                 <td>
                   <Status state={campaign.state} />
                 </td>
+                <td>{campaign.budget}</td>
                 <td>{campaign.spent}</td>
                 <td>{campaign.impressions}</td>
-                <td>{["4.16%", "3.51%", "2.78%"][index]}</td>
-                <td>{[234, 96, 46][index]}</td>
+                <td>{observedCtr(campaign)}</td>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-      <AuctionPreview campaigns={campaigns} guardrails={guardrails} />
-      <section className="lower-grid">
-        <article className="panel">
-          <div className="panel-header">
-            <div>
-              <h2>高效场景</h2>
-              <p>基于已验证转化的路线节点</p>
-            </div>
-          </div>
-          {["周末轻徒步入门", "城市骑行第一课", "夏日露营清单"].map(
-            (name, index) => (
-              <div className="scene-row" key={name}>
-                <span className="scene-icon green">⌁</span>
-                <div>
-                  <strong>{name}</strong>
-                  <small>装备准备 · 路线节点</small>
-                </div>
-                <b>{["6.8%", "5.4%", "4.1%"][index]}</b>
-                <span>转化率</span>
-              </div>
-            ),
+            ))
+          ) : (
+            <tr>
+              <td colSpan={6} className="empty-row">
+                暂无广告活动。
+              </td>
+            </tr>
           )}
-        </article>
-        <article className="panel">
-          <div className="panel-header">
-            <div>
-              <h2>投放建议</h2>
-              <p>基于近 7 日表现</p>
-            </div>
-          </div>
-          <div className="recommendation">
-            <span>↗</span>
-            <div>
-              <strong>增加「秋日徒步装备推广」日预算</strong>
-              <p>转化成本低于账户平均 23%，剩余预算充足。</p>
-              <button
-                className="link-button"
-                onClick={() => {
-                  setApplied(true);
-                  onApplyBudget("秋日徒步装备推广");
-                }}
-              >
-                {applied ? "已应用" : "应用建议"}
-              </button>
-            </div>
-          </div>
-        </article>
-      </section>
+        </tbody>
+      </table>
     </section>
   );
 }
@@ -154,13 +132,16 @@ function AuctionPreview({
   guardrails,
 }: {
   campaigns: Campaign[];
-  guardrails: DeliveryGuardrails;
+  guardrails: DeliveryGuardrails | null;
 }) {
   const nodes = Array.from(
     new Map(
       campaigns
         .filter((campaign) => campaign.state === "running")
-        .map((campaign) => [campaign.binding.id, campaign.binding]),
+        .map((campaign) => [
+          `${campaign.binding.routeId}/${campaign.binding.actionNodeId}`,
+          campaign.binding,
+        ]),
     ).values(),
   );
   return (
@@ -173,12 +154,14 @@ function AuctionPreview({
           </p>
         </div>
       </div>
-      {nodes.length ? (
+      {!guardrails ? (
+        <p className="empty-row">未读取到服务端护栏，暂无法预览节点竞价。</p>
+      ) : nodes.length ? (
         <div className="auction-list">
           {nodes.map((binding) => {
             const result = reRankAuctionCandidates(
               campaigns,
-              binding.id,
+              binding.actionNodeId,
               guardrails,
               {
                 evaluatedAt: Date.now(),
@@ -190,10 +173,13 @@ function AuctionPreview({
               },
             );
             return (
-              <div className="auction-row" key={binding.id}>
+              <div
+                className="auction-row"
+                key={`${binding.routeId}/${binding.actionNodeId}`}
+              >
                 <div>
                   <strong>
-                    {binding.route} · {binding.node}
+                    {binding.routeId} · {binding.actionNodeId}
                   </strong>
                   <small>{binding.equipment}</small>
                 </div>
@@ -218,89 +204,9 @@ function AuctionPreview({
   );
 }
 
-function Metrics() {
-  return (
-    <section className="metric-grid">
-      {[
-        ["消耗", "¥8,426.75", "↑ 14.2%", "up"],
-        ["展示", "128,640", "↑ 8.5%", "up"],
-        ["点击", "4,918", "↑ 10.1%", "up"],
-        ["点击率", "3.82%", "↓ 0.1%", "down"],
-        ["转化", "376", "↑ 17.8%", "up"],
-      ].map(([label, value, delta, tone]) => (
-        <article className="metric-card" key={label}>
-          <p>{label}</p>
-          <strong>{value}</strong>
-          <span className={tone}>{delta}</span>
-          <small>环比</small>
-        </article>
-      ))}
-    </section>
-  );
-}
-function Performance() {
-  return (
-    <article className="panel performance-panel">
-      <div className="panel-header">
-        <div>
-          <h2>投放表现</h2>
-          <p>消耗与转化趋势</p>
-        </div>
-      </div>
-      <div className="bar-chart">
-        <div className="scale">
-          <span>¥1.6k</span>
-          <span>¥800</span>
-          <span>¥0</span>
-        </div>
-        <div className="chart-bars">
-          {[48, 63, 55, 76, 60, 88, 73].map((height, index) => (
-            <div className="bar-set" key={index}>
-              <i style={{ height: `${height}%` }} />
-              <small>{12 + index} 日</small>
-            </div>
-          ))}
-        </div>
-      </div>
-    </article>
-  );
-}
-function Budget() {
-  return (
-    <article className="panel budget-panel">
-      <div className="panel-header">
-        <div>
-          <h2>预算消耗</h2>
-          <p>本月账户预算</p>
-        </div>
-      </div>
-      <div className="budget-ring">
-        <div>
-          <strong>42%</strong>
-          <small>已消耗</small>
-        </div>
-      </div>
-      <div className="budget-total">
-        <span>
-          <small>本月预算</small>
-          <strong>¥20,000.00</strong>
-        </span>
-        <span>
-          <small>剩余可用</small>
-          <strong>¥11,573.25</strong>
-        </span>
-      </div>
-    </article>
-  );
-}
 function Status({ state }: { state: Campaign["state"] }) {
   return state === "draft" ? (
     <span className="status draft">草稿</span>
-  ) : state === "pending" ? (
-    <span className="status pending">
-      <i />
-      审核中
-    </span>
   ) : (
     <span className={`status ${state}`}>
       <i />

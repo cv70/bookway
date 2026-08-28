@@ -1,0 +1,26 @@
+{
+  "_comment": "RECOMMEND_RANK_MODEL_ARTIFACT 示例：离线拟合的 logistic 多目标头。weights 键名固定为 predictor.rs 的 evidence 特征集，未知键拒绝启动；version 会进入 model_version 与曝光账本。",
+  "version": "lr-example-v1",
+  "bias": { "ctr": -3.2, "cvr": -4.6, "wegu": -2.5 },
+  "weights": {
+    "ctr": {
+      "observed_ctr": 1.4,
+      "domain_affinity": 0.8,
+      "author_affinity": 0.5,
+      "impression_fatigue": -0.6,
+      "direct_negative_feedback": -1.8
+    },
+    "cvr": {
+      "observed_cvr": 1.2,
+      "route_completion": 0.6,
+      "impression_fatigue": -0.3
+    },
+    "wegu": {
+      "observed_wegu": 1.6,
+      "route_completion": 1.1,
+      "domain_affinity": 0.5,
+      "impression_fatigue": -0.4,
+      "direct_negative_feedback": -2.0
+    }
+  }
+}

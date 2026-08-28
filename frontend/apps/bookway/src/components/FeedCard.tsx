@@ -20,6 +20,7 @@ export function FeedCard({
   onHide,
   onJoin,
   onOpen,
+  onAdPress,
 }: {
   item: FeedItem;
   liked?: boolean;
@@ -32,6 +33,7 @@ export function FeedCard({
   onHide?: (postId: string, context?: FeedItem['recommendation_context']) => void;
   onJoin?: (post: NonNullable<FeedItem['post']>, context?: FeedItem['recommendation_context']) => void;
   onOpen?: (item: FeedItem) => void;
+  onAdPress?: (ad: NonNullable<FeedItem['ad']>) => void;
 }) {
   const post = item.post;
   const attribution = item.recommendation_context;
@@ -49,7 +51,7 @@ export function FeedCard({
       attributionSource,
     );
   }, [attribution?.position, attribution?.request_id, attribution?.surface, impressionComponent, post?.id]);
-  if (item.ad && !post) return <ContextualAdCard ad={item.ad} />;
+  if (item.ad && !post) return <ContextualAdCard ad={item.ad} onOpen={onAdPress} />;
   if (!post) return null;
   const canJoinRoute = post.is_route ?? Boolean(post.route_title.trim());
   return (
@@ -122,12 +124,21 @@ export function FeedCard({
   );
 }
 
-function ContextualAdCard({ ad }: { ad: NonNullable<FeedItem['ad']> }) {
+function ContextualAdCard({
+  ad,
+  onOpen,
+}: {
+  ad: NonNullable<FeedItem['ad']>;
+  onOpen?: (ad: NonNullable<FeedItem['ad']>) => void;
+}) {
   useEffect(() => {
     reportAdEvent(ad, 'impression').catch(() => undefined);
   }, [ad]);
   const open = () => {
     reportAdEvent(ad, 'click').catch(() => undefined);
+    // Lets the screen remember which ad decision led to the node context, so
+    // a subsequent order there can carry the ad attribution.
+    onOpen?.(ad);
     Linking.openURL(ad.landing_url).catch(() => undefined);
   };
   return (

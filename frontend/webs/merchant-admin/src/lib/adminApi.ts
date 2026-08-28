@@ -70,6 +70,24 @@ export type CreateNodeOffer = {
   sku_id: string;
   creator_id: string;
   commission_bps: number;
+  // Must be one of the scene equipments the action node itself declares; the
+  // mall service revalidates this against bbs-link on attach.
+  scene_equipment: string;
+};
+
+// Public route content as exposed by GET /v1/posts/{id}: only the fields the
+// offer mounting flow needs.
+export type PublicRouteAction = {
+  id: string;
+  title: string;
+  scene_equipment: string[];
+};
+export type PublicRouteContent = {
+  id: string;
+  author_id: string;
+  content_type: number;
+  status: number;
+  route_template?: { actions: PublicRouteAction[] } | null;
 };
 
 export type MerchantOrder = {
@@ -135,6 +153,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const merchantAdminApi = {
+  getPublicContent: (contentId: string) =>
+    request<PublicRouteContent>(`/v1/posts/${encodeURIComponent(contentId)}`),
   listProducts: () =>
     request<{ items: MallProduct[] }>("/v1/admin/mall/products?limit=100"),
   createProduct: (product: CreateMallProduct) =>

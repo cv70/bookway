@@ -260,6 +260,86 @@ impl SearchSource for OpenSearchSource {
         })
     }
 
+    async fn search_semantic(
+        &self,
+        query_vector: &[f32],
+        limit: usize,
+        excluded_author_ids: &[String],
+        entity_bias: Option<EntityBias>,
+    ) -> Result<SearchSourceResult, SearchSourceError> {
+        let k = limit.clamp(1, 100);
+        let mut filters = vec![serde_json::json!({ "term": { "status": "published" } })];
+        // Entity surfaces only make sense over content that actually owns
+        // route action nodes; the exists guard keeps stray docs out even when
+        // the type filter alone would.
+        if entity_bias.is_some() {
+            filters.push(serde_json::json!({ "exists": { "field": "route_action_ids" } }));
+        }
+        let mut knn_filter = serde_json::json!({ "filter": filters });
+        if !excluded_author_ids.is_empty() {
+            knn_filter["must_not"] = serde_json::json!([
+                { "terms": { "author_id": excluded_author_ids } }
+            ]);
+        }
+        // The read alias exposes the same published corpus the lexical lanes
+        // see, and the k-NN query traverses the HNSW graph the indexer
+        // provisions (cosinesimil, lucene engine) instead of rescoring the
+        // whole index. Visibility filters ride inside the k-NN clause so the
+        // traversal only counts visible documents toward k.
+        let body = serde_json::json!({
+            "size": k,
+            "query": {
+                "knn": {
+                    "semantic_vector": {
+                        "vector": query_vector,
+                        "k": k,
+                        "filter": { "bool": knn_filter }
+                    }
+                }
+            },
+            "sort": [{ "_score": "desc" }, { "id.keyword": "asc" }]
+        });
+        let response = self
+            .client
+            .post(resource_url(&self.base_url, &[&self.read_alias, "_search"])?)
+            .json(&body)
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) if response.status().is_success() => response,
+            Ok(_) | Err(_) => return Err(SearchSourceError::SemanticUnavailable),
+        };
+        let payload: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|error| SearchSourceError::Request(error.to_string()))?;
+        let hits = payload
+            .get("hits")
+            .and_then(|value| value.get("hits"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .ok_or_else(|| SearchSourceError::Request("OpenSearch hits missing".to_string()))?;
+        let items = hits
+            .iter()
+            .filter_map(|hit| hit.get("_source").cloned())
+            .map(|source| {
+                serde_json::from_value(source)
+                    .map_err(|error| SearchSourceError::Request(error.to_string()))
+            })
+            .collect::<Result<Vec<bbs_link_pb::Content>, SearchSourceError>>()?;
+        let total = items.len() as u64;
+        Ok(SearchSourceResult {
+            page: bbs_link_pb::ContentPage {
+                next_cursor: None,
+                total_estimate: total,
+                items,
+            },
+            degraded: false,
+            // kNN similarity order IS the relevance order for this lane.
+            source_ranked: true,
+        })
+    }
+
     async fn release_search_cursor(&self, cursor: &str) {
         if let Ok(cursor) = decode_pit_cursor(cursor) {
             self.close_pit(&cursor.id).await;

@@ -3,7 +3,7 @@
 mod domain;
 pub(crate) mod pipeline;
 
-use self::pipeline::FeedPipeline;
+use self::pipeline::{FeedPipeline, ServedFeed};
 use super::api::pb;
 use bookway_ad_main_api::pb::{self as ad_pb, ad_main_client::AdMainClient};
 use bookway_commercial_mix::{MixPolicy, MixedItem};
@@ -41,19 +41,30 @@ impl FeedService {
         let action_context = request.action_context.clone();
         let limit = request.limit.unwrap_or(20).clamp(1, 100) as usize;
         let page_key = cacheable_cold_start_page(&request).then(|| cold_start_page_key(&request));
-        let mut response = match (&self.page_cache, &page_key) {
-            (Some(cache), Some(key)) => self.cold_start_page(&request, cache, key).await,
+        let mut served = match (&self.page_cache, &page_key) {
+            (Some(cache), Some(key)) => ServedFeed {
+                response: self.cold_start_page(&request, cache, key).await,
+                // Cold-start pages are anonymous-only by the cacheable check:
+                // there is no exposure row and no guard increment to attach.
+                exposure: None,
+                rendered_ids: Vec::new(),
+                geo_region: request.geo_region.clone(),
+                device_os: request.device_os.clone(),
+            },
             _ => self.pipeline.execute(request.clone()).await,
         };
+        let (geo_region, device_os) = (served.geo_region.clone(), served.device_os.clone());
         let Some(context) = action_context.filter(valid_action_context) else {
-            return response;
+            self.persist_served(&mut served).await;
+            return served.response;
         };
         // Skip the decision RPC entirely when the mix schedule offers no slot
         // (short pages, tiny limits) or the recall is too thin to guarantee a
         // useful organic experience.
         let ad_slots = FEED_AD_POLICY.ad_slots_for(limit);
-        if ad_slots == 0 || response.items.len() < FEED_AD_POLICY.min_natural_results {
-            return response;
+        if ad_slots == 0 || served.response.items.len() < FEED_AD_POLICY.min_natural_results {
+            self.persist_served(&mut served).await;
+            return served.response;
         }
 
         let ad_request = match service_request(ad_pb::DecisionRequest {
@@ -64,33 +75,52 @@ impl FeedService {
             route_id: context.route_id.clone(),
             action_node_id: context.action_node_id.clone(),
             scene_equipment: context.scene_equipment.clone(),
-            // No observable delivery context reaches feed mixing yet; unknown
-            // context serves unrestricted campaigns only (fail-closed).
-            geo_region: String::new(),
-            device_os: String::new(),
+            // Edge-derived delivery context; empty values fail closed to
+            // unrestricted campaigns only (ad-center matching rule).
+            geo_region,
+            device_os,
         }) {
             Ok(request) => request,
             Err(error) => {
                 tracing::warn!(%error, "contextual ad request setup degraded; serving organic feed");
-                if let Some(meta) = &mut response.meta {
+                if let Some(meta) = &mut served.response.meta {
                     meta.degraded = true;
                 }
-                return response;
+                self.persist_served(&mut served).await;
+                return served.response;
             }
         };
         let mut ad_main = self.ad_main.clone();
         match ad_main.decide(ad_request).await {
             Ok(decision) => {
-                mix_contextual_ad(&mut response, decision.into_inner(), &context, limit)
+                mix_contextual_ad(&mut served.response, decision.into_inner(), &context, limit)
             }
             Err(error) => {
                 tracing::warn!(%error, "contextual ad decision degraded; serving organic feed");
-                if let Some(meta) = &mut response.meta {
+                if let Some(meta) = &mut served.response.meta {
                     meta.degraded = true;
                 }
             }
         }
-        response
+        self.persist_served(&mut served).await;
+        served.response
+    }
+
+    /// Exposure persistence runs ONCE per request, after commercial mixing:
+    /// displaced organics are cut from the ledger and the frequency guard,
+    /// which otherwise learn "served" facts about content that never rendered.
+    async fn persist_served(&self, served: &mut ServedFeed) {
+        served.rendered_ids = served
+            .response
+            .items
+            .iter()
+            .filter_map(|item| item.post.as_ref().map(|post| post.id.clone()))
+            .collect();
+        if self.pipeline.persist(served).await
+            && let Some(meta) = &mut served.response.meta
+        {
+            meta.degraded = true;
+        }
     }
 }
 
@@ -159,14 +189,14 @@ impl FeedService {
         }
         let guard = cache.refresh_lock(key).await;
         let page = if guard.peer_holds_lease() {
-            self.pipeline.execute(request.clone()).await
+            self.pipeline.execute(request.clone()).await.response
         } else {
             match cache.load(key).await.and_then(CachedFeedPage::into_response) {
                 Some(page) => {
                     guard.release().await;
                     return page;
                 }
-                None => self.pipeline.execute(request.clone()).await,
+                None => self.pipeline.execute(request.clone()).await.response,
             }
         };
         cache
@@ -182,9 +212,9 @@ impl FeedService {
 /// the requested route, node, placement and scene equipment are dropped
 /// before the mix, so a mismatched campaign can never buy its way in.
 ///
-/// Naturals displaced past the page limit are dropped here: they were already
-/// exposure-persisted by the pipeline and remain visible through the served-
-/// history logic, so the ad cannot push an unrenderable item into pagination.
+/// Naturals displaced past the page limit are dropped here and stay invisible
+/// for this response; the caller persists exposure only AFTER this mixing, so
+/// a displaced item never enters the ledger or the frequency guard.
 fn mix_contextual_ad(
     response: &mut pb::FeedResponse,
     decision: ad_pb::DecisionResponse,
@@ -227,9 +257,9 @@ fn mix_contextual_ad(
     let organics = std::mem::take(&mut response.items);
     let (mixed, overflow) =
         bookway_commercial_mix::mix_page(organics, ads, limit, FEED_AD_POLICY);
-    // Displaced tail organics stay invisible for this response; their
-    // exposure records were written before the mix, which is exactly the
-    // "seen but yielded" case the selector is designed to tolerate.
+    // Displaced tail organics stay invisible for this response. Exposure
+    // persistence happens after this function, filtering by rendered ids,
+    // so they are never recorded as served.
     drop(overflow);
     let mut items = Vec::with_capacity(mixed.len());
     for slot in mixed {
@@ -249,8 +279,7 @@ fn mix_contextual_ad(
         }
     }
     response.items = items;
-    // Organic selection is persisted before contextual mixing. Refresh the
-    // response count here so clients can reconcile the actual rendered page
+    // Refresh the rendered count so clients can reconcile the actual page
     // (including the ads) without treating ads as organic candidates.
     if let Some(meta) = &mut response.meta {
         meta.selected = u32::try_from(response.items.len()).unwrap_or(u32::MAX);

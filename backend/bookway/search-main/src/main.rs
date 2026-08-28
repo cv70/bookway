@@ -4,6 +4,7 @@ pub(crate) mod datasource;
 pub(crate) mod domain;
 
 use bookway_ad_main_api::pb::ad_main_client::AdMainClient;
+use bookway_bbs_api::pb::bbs_client::BbsClient;
 use bookway_bbs_link_api::pb::bbs_link_client::BbsLinkClient;
 use bookway_bbs_search_api::pb::bbs_search_client::BbsSearchClient;
 use bookway_feature_main_api::pb::feature_main_client::FeatureMainClient;
@@ -20,6 +21,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let knowledge_catalog = KnowledgeCatalogClient::new(
         bookway_runtime::grpc_channel(&config.knowledge_catalog_url).await?,
     );
+    let bbs = match bookway_runtime::grpc_channel(&config.bbs_url).await {
+        Ok(channel) => Some(BbsClient::new(channel)),
+        Err(error) => {
+            tracing::warn!(%error, "bbs unavailable; search serves stored join counts");
+            None
+        }
+    };
     let feature_main = match bookway_runtime::grpc_channel(&config.feature_main_url).await {
         Ok(channel) => Some(FeatureMainClient::new(channel)),
         Err(error) => {
@@ -39,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config,
             bbs_search,
             bbs_link,
+            bbs,
             knowledge_catalog,
             feature_main,
             ad_main,

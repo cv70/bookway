@@ -106,6 +106,7 @@ pub(crate) struct DeliveryReportRow {
     pub(crate) impressions: i64,
     pub(crate) clicks: i64,
     pub(crate) spent_micros: i64,
+    pub(crate) conversions: i64,
 }
 
 #[derive(Clone)]
@@ -129,7 +130,7 @@ struct MemoryDecision {
 
 fn campaign_select(where_clause: &str) -> String {
     format!(
-        "SELECT c.id,c.advertiser_id,c.name,c.placement,c.route_id,c.action_node_id,c.scene_equipment,c.title,c.body,c.image_url,c.landing_url,c.target_domains,c.status,c.pricing_model,c.bid_micros,c.daily_budget_micros,COALESCE(stats.spent_micros,0) AS spent_today_micros,c.frequency_cap,c.predicted_ctr,c.predicted_cvr,c.global_frequency_cap,c.impressions,c.clicks,c.starts_at,c.ends_at,c.created_at,c.updated_at FROM ad_campaigns c LEFT JOIN ad_campaign_daily_stats stats ON stats.campaign_id=c.id AND stats.stat_date=current_date {where_clause}"
+        "SELECT c.id,c.advertiser_id,c.name,c.placement,c.route_id,c.action_node_id,c.scene_equipment,c.title,c.body,c.image_url,c.landing_url,c.target_domains,c.status,c.pricing_model,c.bid_micros,c.daily_budget_micros,COALESCE(stats.spent_micros,0) AS spent_today_micros,c.frequency_cap,c.predicted_ctr,c.predicted_cvr,c.global_frequency_cap,c.impressions,c.clicks,c.conversions,c.starts_at,c.ends_at,c.created_at,c.updated_at FROM ad_campaigns c LEFT JOIN ad_campaign_daily_stats stats ON stats.campaign_id=c.id AND stats.stat_date=current_date {where_clause}"
     )
 }
 
@@ -201,6 +202,7 @@ fn new_campaign(request: pb::CreateCampaignRequest) -> pb::AdCampaign {
         global_frequency_cap: request.global_frequency_cap,
         impressions: 0,
         clicks: 0,
+        conversions: 0,
         starts_at: request.starts_at,
         ends_at: request.ends_at,
         created_at: timestamp(now),
@@ -340,6 +342,7 @@ fn event_name(value: i32) -> &'static str {
     match pb::EventType::try_from(value).unwrap_or(pb::EventType::Impression) {
         pb::EventType::Impression => "impression",
         pb::EventType::Click => "click",
+        pb::EventType::Conversion => "conversion",
     }
 }
 fn parse_status(value: &str) -> Result<pb::CampaignStatus, DaoError> {
@@ -1165,6 +1168,21 @@ mod tests {
             );
         }
         let today = date_key(OffsetDateTime::now_utc());
+        assert!(
+            dao.record_event(
+                "user-1",
+                pb::RecordEventRequest {
+                    user_id: "user-1".to_string(),
+                    event_id: "conversion-1".to_string(),
+                    request_id: "request-1".to_string(),
+                    campaign_id: campaign.id.clone(),
+                    event_type: pb::EventType::Conversion as i32,
+                },
+            )
+            .await
+            .expect("conversion should be recorded")
+            .accepted
+        );
         let rows = dao
             .delivery_report(DeliveryReportQuery {
                 advertiser_id: "advertiser-1",
@@ -1178,6 +1196,7 @@ mod tests {
         assert_eq!(rows[0].stat_date, today);
         assert_eq!(rows[0].impressions, 2);
         assert_eq!(rows[0].clicks, 0);
+        assert_eq!(rows[0].conversions, 1);
         // CPC impressions carry no charge.
         assert_eq!(rows[0].spent_micros, 0);
 

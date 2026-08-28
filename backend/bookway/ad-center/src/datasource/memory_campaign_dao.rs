@@ -231,7 +231,7 @@ impl CampaignDao for MemoryCampaignDao {
             .values()
             .filter(|campaign| campaign.advertiser_id == query.advertiser_id)
         {
-            let mut by_day: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+            let mut by_day: BTreeMap<String, (i64, i64, i64)> = BTreeMap::new();
             for event in events.values().filter(|event| event.campaign_id == campaign.id) {
                 let day = date_key(event.occurred_at);
                 if day.as_str() < query.from_date || day.as_str() > query.to_date {
@@ -242,6 +242,8 @@ impl CampaignDao for MemoryCampaignDao {
                     entry.0 += 1;
                 } else if event.event_type == pb::EventType::Click as i32 {
                     entry.1 += 1;
+                } else if event.event_type == pb::EventType::Conversion as i32 {
+                    entry.2 += 1;
                 }
             }
             for (campaign_id, day) in daily_spend.keys() {
@@ -253,13 +255,14 @@ impl CampaignDao for MemoryCampaignDao {
                 }
                 by_day.entry(day.clone()).or_default();
             }
-            for (day, (impressions, clicks)) in by_day {
+            for (day, (impressions, clicks, conversions)) in by_day {
                 rows.push(DeliveryReportRow {
                     campaign_id: campaign.id.clone(),
                     spent_micros: *daily_spend.get(&(campaign.id.clone(), day.clone())).unwrap_or(&0),
                     stat_date: day,
                     impressions,
                     clicks,
+                    conversions,
                 });
             }
         }

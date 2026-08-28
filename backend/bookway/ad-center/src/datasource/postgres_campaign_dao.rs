@@ -28,6 +28,7 @@ struct CampaignRow {
     global_frequency_cap: i32,
     impressions: i64,
     clicks: i64,
+    conversions: i64,
     starts_at: Option<OffsetDateTime>,
     ends_at: Option<OffsetDateTime>,
     created_at: OffsetDateTime,
@@ -63,6 +64,7 @@ impl CampaignRow {
             global_frequency_cap: u32::try_from(self.global_frequency_cap).unwrap_or_default(),
             impressions: u64::try_from(self.impressions).unwrap_or_default(),
             clicks: u64::try_from(self.clicks).unwrap_or_default(),
+            conversions: u64::try_from(self.conversions).unwrap_or_default(),
             starts_at: self.starts_at.map(timestamp),
             ends_at: self.ends_at.map(timestamp),
             created_at: timestamp(self.created_at),
@@ -294,8 +296,8 @@ impl CampaignDao for PostgresCampaignDao {
         &self,
         query: DeliveryReportQuery<'_>,
     ) -> Result<Vec<DeliveryReportRow>, DaoError> {
-        let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
-            "SELECT s.campaign_id, to_char(s.stat_date, 'YYYY-MM-DD'), s.impressions, s.clicks, s.spent_micros FROM ad_campaign_daily_stats s JOIN ad_campaigns c ON c.id = s.campaign_id WHERE c.advertiser_id = $1 AND s.stat_date BETWEEN $2 AND $3 ORDER BY s.stat_date DESC, s.campaign_id ASC",
+        let rows: Vec<(String, String, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT s.campaign_id, to_char(s.stat_date, 'YYYY-MM-DD'), s.impressions, s.clicks, s.spent_micros, s.conversions FROM ad_campaign_daily_stats s JOIN ad_campaigns c ON c.id = s.campaign_id WHERE c.advertiser_id = $1 AND s.stat_date BETWEEN $2 AND $3 ORDER BY s.stat_date DESC, s.campaign_id ASC",
         )
         .bind(query.advertiser_id)
         .bind(query.from_date)
@@ -306,12 +308,15 @@ impl CampaignDao for PostgresCampaignDao {
         Ok(rows
             .into_iter()
             .map(
-                |(campaign_id, stat_date, impressions, clicks, spent_micros)| DeliveryReportRow {
-                    campaign_id,
-                    stat_date,
-                    impressions,
-                    clicks,
-                    spent_micros,
+                |(campaign_id, stat_date, impressions, clicks, spent_micros, conversions)| {
+                    DeliveryReportRow {
+                        campaign_id,
+                        stat_date,
+                        impressions,
+                        clicks,
+                        spent_micros,
+                        conversions,
+                    }
                 },
             )
             .collect())
@@ -580,7 +585,9 @@ impl CampaignDao for PostgresCampaignDao {
                 duplicate: false,
             });
         }
-        if request.event_type == pb::EventType::Click as i32 {
+        if request.event_type == pb::EventType::Click as i32
+            || request.event_type == pb::EventType::Conversion as i32
+        {
             let has_accepted_impression: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM ad_delivery_events WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND event_type='impression')",
             )
@@ -695,19 +702,21 @@ impl CampaignDao for PostgresCampaignDao {
             .execute(&mut *tx)
             .await
             .map_err(database)?;
-        sqlx::query("UPDATE ad_campaign_daily_stats SET spent_micros=spent_micros+$3, impressions=impressions+$4, clicks=clicks+$5 WHERE campaign_id=$1 AND stat_date=$2")
+        sqlx::query("UPDATE ad_campaign_daily_stats SET spent_micros=spent_micros+$3, impressions=impressions+$4, clicks=clicks+$5, conversions=conversions+$6 WHERE campaign_id=$1 AND stat_date=$2")
             .bind(&campaign.id)
             .bind(day)
             .bind(cost)
             .bind(if request.event_type == pb::EventType::Impression as i32 { 1_i64 } else { 0 })
             .bind(if request.event_type == pb::EventType::Click as i32 { 1_i64 } else { 0 })
+            .bind(if request.event_type == pb::EventType::Conversion as i32 { 1_i64 } else { 0 })
             .execute(&mut *tx)
             .await
             .map_err(database)?;
-        sqlx::query("UPDATE ad_campaigns SET impressions=impressions+$2, clicks=clicks+$3, updated_at=now() WHERE id=$1")
+        sqlx::query("UPDATE ad_campaigns SET impressions=impressions+$2, clicks=clicks+$3, conversions=conversions+$4, updated_at=now() WHERE id=$1")
             .bind(&campaign.id)
             .bind(if request.event_type == pb::EventType::Impression as i32 { 1_i64 } else { 0 })
             .bind(if request.event_type == pb::EventType::Click as i32 { 1_i64 } else { 0 })
+            .bind(if request.event_type == pb::EventType::Conversion as i32 { 1_i64 } else { 0 })
             .execute(&mut *tx)
             .await
             .map_err(database)?;

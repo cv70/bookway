@@ -459,6 +459,7 @@ fn valid_event_type(value: &str) -> bool {
             | "report"
             | "search_submit"
             | "purchase"
+            | "route_fork"
     )
 }
 
@@ -625,6 +626,7 @@ mod tests {
         assert!(super::valid_event_type("follow"));
         assert!(super::valid_event_type("report"));
         assert!(super::valid_event_type("purchase"));
+        assert!(super::valid_event_type("route_fork"));
     }
 
     #[test]

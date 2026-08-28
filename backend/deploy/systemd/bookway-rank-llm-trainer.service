@@ -1,0 +1,17 @@
+# GPU-host LoRA fine-tune of the MiniCPM ranker. Publish is gate-controlled:
+# train_llm.py only writes TRAINER_REGISTRY_PATH when every evaluable holdout
+# AUC clears TRAINER_LLM_MIN_AUC; model_serving hot-reloads that registry.
+# Schedule manually or with a timer on the training host — it needs the GPU
+# and a read replica DATABASE_URL, not the serving machines.
+[Unit]
+Description=Bookway MiniCPM ranker LoRA training (gated registry publish)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=bookway
+WorkingDirectory=/opt/bookway/backend/bookway-py/cronjob/rank_training
+EnvironmentFile=/etc/bookway/trainer.env
+# trAINER.env carries DATABASE_URL, TRAINER_LLM_OUTPUT_DIR, TRAINER_REGISTRY_PATH
+# (same file as model_serving's MODEL_REGISTRY_PATH), TRAINER_LLM_MIN_AUC.
+ExecStart=/opt/bookway/backend/bookway-py/cronjob/rank_training/.venv/bin/python train_llm.py

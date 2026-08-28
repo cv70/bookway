@@ -58,6 +58,25 @@ message SearchResponse {
 
 message GetRequest { string resource_id = 1; }
 
+// Admin-managed catalog write path. An empty resource_id creates a new entry;
+// a known id updates it. A URL that already belongs to another entry updates
+// that entry instead of creating a duplicate (the canonical URL is the
+// catalog's identity anchor).
+message UpsertPublicResourceRequest {
+  string resource_id = 1;
+  string title = 2;
+  ResourceKind kind = 3;
+  string provider = 4;
+  string summary = 5;
+  string url = 6;
+  string license = 7;
+  string version = 8;
+  string citation = 9;
+  repeated string topics = 10;
+  ResourceStatus status = 11;  // UNSPECIFIED defaults to published.
+  string operator_id = 12;
+}
+
 message RouteNodeResourceAttachment {
   string id = 1;
   string route_id = 2;
@@ -167,9 +186,15 @@ message RagVectorHit {
 }
 message SearchRagEmbeddingsResponse { repeated RagVectorHit hits = 1; }
 
+message EmbedTextsRequest { repeated string texts = 1; }
+message TextEmbedding { repeated float values = 1; }
+message EmbedTextsResponse { string model = 1; repeated TextEmbedding embeddings = 2; }
+
 service KnowledgeCatalog {
+  rpc EmbedTexts(EmbedTextsRequest) returns (EmbedTextsResponse);
   rpc Search(SearchRequest) returns (SearchResponse);
   rpc Get(GetRequest) returns (Resource);
+  rpc UpsertPublicResource(UpsertPublicResourceRequest) returns (Resource);
   rpc ListNodeResources(ListNodeResourcesRequest) returns (ListNodeResourcesResponse);
   rpc AttachNodeResource(AttachNodeResourceRequest) returns (RouteNodeResourceAttachment);
   rpc DetachNodeResource(DetachNodeResourceRequest) returns (DetachNodeResourceResponse);

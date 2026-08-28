@@ -1,16 +1,11 @@
 import { useMemo, useState } from "react";
-import {
-  ActionNodeBinding,
-  Campaign,
-  DeliveryGuardrails,
-  Scene,
-} from "../domain";
+import { ActionNodeBinding, Campaign, DeliveryGuardrails } from "../domain";
 import { DeliveryHistory, reRankAuctionCandidates } from "../lib/auction";
 
 type Props = {
   campaigns: Campaign[];
   guardrails: DeliveryGuardrails;
-  scenes: Scene[];
+  bindings: ActionNodeBinding[];
 };
 
 const emptyHistory: DeliveryHistory = {
@@ -22,25 +17,23 @@ const emptyHistory: DeliveryHistory = {
   recentRoutes: [],
 };
 
-export function DeliveryLab({ campaigns, guardrails, scenes }: Props) {
-  const bindings = scenes
-    .filter((scene) => scene.enabled)
-    .map<ActionNodeBinding>((scene) => ({
-      id: scene.id,
-      routeId: scene.id,
-      route: scene.name,
-      node: scene.node,
-      equipment: scene.equipment,
-    }));
-  const [selectedId, setSelectedId] = useState(bindings[0]?.id || "");
+export function DeliveryLab({ campaigns, guardrails, bindings }: Props) {
+  const [selectedId, setSelectedId] = useState(
+    bindings[0]?.actionNodeId || "",
+  );
   const [history, setHistory] = useState<DeliveryHistory>(emptyHistory);
   const binding =
-    bindings.find((item) => item.id === selectedId) || bindings[0];
+    bindings.find((item) => item.actionNodeId === selectedId) || bindings[0];
   const result = useMemo(
     () =>
       binding
-        ? reRankAuctionCandidates(campaigns, binding.id, guardrails, history)
-        : { candidates: [], blocked: ["没有启用的路线行动节点"] },
+        ? reRankAuctionCandidates(
+            campaigns,
+            binding.actionNodeId,
+            guardrails,
+            history,
+          )
+        : { candidates: [], blocked: ["暂无广告活动绑定路线行动节点"] },
     [binding, campaigns, guardrails, history],
   );
   const simulate = () => {
@@ -61,7 +54,7 @@ export function DeliveryLab({ campaigns, guardrails, scenes }: Props) {
       recentCampaignNames: [...current.recentCampaignNames, winner.name].slice(
         -8,
       ),
-      recentRoutes: [...current.recentRoutes, winner.binding.route].slice(-8),
+      recentRoutes: [...current.recentRoutes, winner.binding.routeId].slice(-8),
     }));
   };
   return (
@@ -82,15 +75,15 @@ export function DeliveryLab({ campaigns, guardrails, scenes }: Props) {
         <label>
           路线行动节点
           <select
-            value={binding?.id || ""}
+            value={binding?.actionNodeId || ""}
             onChange={(event) => {
               setSelectedId(event.target.value);
               setHistory(emptyHistory);
             }}
           >
             {bindings.map((item) => (
-              <option value={item.id} key={item.id}>
-                {item.route} · {item.node} · {item.equipment}
+              <option value={item.actionNodeId} key={`${item.routeId}/${item.actionNodeId}`}>
+                {item.routeId} · {item.actionNodeId} · {item.equipment}
               </option>
             ))}
           </select>

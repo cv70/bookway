@@ -77,8 +77,10 @@ Feed 保持两个语义清晰的面：`home` 是探索型个性化发现，`foll
 语义向量采用可插拔的外部 embedding provider：`knowledge-catalog` 的
 OpenAI-compatible `/embeddings` 客户端在 provider 配置就绪后即启用，`RAG`
 节点上下文按节点是否存在向量自动选择 vector 或词法模式，provider 失败或未配置
-时词法兜底行为与此前完全一致——这是已落地的降级设计，不是等待项。搜索结果页的
-向量召回扩展仍按老规矩走离线评估、灰度加一键回滚后再开。
+时词法兜底行为与此前完全一致——这是已落地的降级设计，不是等待项。路线/节点/装备
+的语义搜索已按同一条 provider 接线落地：`EmbedTexts` RPC 供索引器在索引期嵌入
+文档、`search-main` 在查询期嵌入问题，`bbs-search` 的 kNN 召回作为独立一次性
+召回路并入融合排序；任一环节缺配置或失败时整条路静默为空，词法链路不受影响。
 
 排序特征把 `click`、`bookmark/save_knowledge`、路线采用后的 `complete`（WEGU）和
 已归因购买分别建模。行动完成率的权重高于点击率；所有比率只从已核验曝光和服务端
@@ -104,6 +106,9 @@ Action Node 和该节点声明的 `scene_equipment`，召回、竞价、决策�
 上下文；`ad-main` 仅编排召回和投放，`ad-rank` 以受版本控制的 `bid * pCTR * pCVR` 排序。
 Campaign 同时有用户级和
 全局日频控：每次曝光回执在 Campaign 锁内复核两个上限和预算，失败回执不消耗预算。
+线性日预算 pacing（1.5x 追赶余量，`AD_CENTER_PACING_ENABLED`）让早段流量烧不完
+当日预算；转化事件（`EVENT_TYPE_CONVERSION`，0083）在已受理曝光前提下入账且不
+计费，`ad-rank` 的校准口径据此对 pCVR 做与 pCTR 对称的后验校准。
 广告只能由显式广告位请求并带可验证的 `request_id` 回执，不能覆盖基础行动、私密
 记录或数据导出路径。
 
@@ -163,6 +168,11 @@ Side Effect 的可测试边界。它已经足以承载新候选源和排序特�
 
 数据平台下一步是后台数据产品，而非同步业务 RPC：
 
+0. 排序模型的**训练-服务闭环**已成形：曝光账本留痕服务时刻特征（0085）→
+   `backend/bookway-py/cronjob/rank_training`（PyTorch，时间切分 holdout，正样本护栏）
+   拟合三目标 logistic 并导出版本化 artifact → `recommend-rank` 以
+   `RECOMMEND_RANK_MODEL_ARTIFACT` 加载，版本号写回曝光账本供回归追踪；
+   坏文件拒绝上线，缺省仍为确定性启发式。
 1. 从 `user-event` Kafka Outbox 消费已验证事件，构建可回放的行为宽表与隐私删除
    投影；不得以日志抓取替代事件契约。
 2. `feature-main/job/feature-snapshot` 已先落地用户行为快照：从已验证事件和公开

@@ -957,9 +957,11 @@ dependencies = [
  "bookway-runtime",
  "bookway-search-main-api",
  "bookway-user-event-api",
+ "hmac",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror 2.0.20",
  "time",
@@ -1104,6 +1106,7 @@ dependencies = [
  "tonic",
  "tonic-health",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1328,6 +1331,7 @@ dependencies = [
 name = "bookway-outbox-relay"
 version = "0.1.0"
 dependencies = [
+ "bookway-ad-center-api",
  "bookway-data",
  "bookway-event",
  "bookway-mall-api",
@@ -1418,7 +1422,9 @@ dependencies = [
  "bookway-recommend-recall-api",
  "bookway-runtime",
  "prost",
+ "reqwest",
  "serde",
+ "serde_json",
  "tokio",
  "tonic",
  "tonic-health",
@@ -1445,6 +1451,8 @@ dependencies = [
  "axum 0.8.9",
  "bookway-api",
  "bookway-bbs-link-api",
+ "bookway-bbs-search-api",
+ "bookway-knowledge-catalog-api",
  "bookway-recommend-recall-api",
  "bookway-runtime",
  "futures",
@@ -1617,12 +1625,14 @@ name = "bookway-search-indexer"
 version = "0.1.0"
 dependencies = [
  "bookway-data",
+ "bookway-knowledge-catalog-api",
  "bookway-runtime",
  "reqwest",
  "serde_json",
  "sqlx",
  "time",
  "tokio",
+ "tonic",
  "tracing",
  "uuid",
 ]
@@ -1635,6 +1645,7 @@ dependencies = [
  "axum 0.8.9",
  "bookway-ad-main-api",
  "bookway-api",
+ "bookway-bbs-api",
  "bookway-bbs-link-api",
  "bookway-bbs-search-api",
  "bookway-commercial-mix",

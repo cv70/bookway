@@ -1,0 +1,19 @@
+# Event outbox relay: drains transactional outbox rows to the event bus.
+# Verified downstream facts (feature-main ranking inputs, analytics) depend
+# on it; a stalled relay stalls attribution silently.
+[Unit]
+Description=Bookway event outbox relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+ExecStart=/opt/bookway/backend/target/release/bookway-outbox-relay
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

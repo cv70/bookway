@@ -158,7 +158,13 @@ impl Domain {
         &self,
         request: pb::RouteContextRequest,
     ) -> Result<pb::RouteParticipationContext, BbsError> {
-        validate_user_id(&request.user_id)?;
+        // Participant counts are public aggregate facts, so an empty user_id
+        // is a legitimate anonymous counts-only read; it only skips the
+        // joined-route enrichment that requires an identity.
+        let user_id = request.user_id.trim().to_string();
+        if !user_id.is_empty() {
+            validate_user_id(&user_id)?;
+        }
         if request.route_ids.len() > 500 {
             return Err(BbsError::Validation("单次最多查询 500 条路线".to_string()));
         }
@@ -172,7 +178,7 @@ impl Domain {
         }
         route_ids.sort();
         route_ids.dedup();
-        Ok(self.dao.route_context(&request.user_id, &route_ids).await?)
+        Ok(self.dao.route_context(&user_id, &route_ids).await?)
     }
 
     pub(crate) async fn set_route_participation(
@@ -500,6 +506,48 @@ mod tests {
             .await
             .expect("hot route context");
         assert_eq!(context.participant_counts.get("route-hot"), Some(&256));
+    }
+
+    #[tokio::test]
+    async fn anonymous_route_context_returns_counts_without_joined_enrichment() {
+        let domain = domain();
+        let joined = domain
+            .set_route_participation(pb::RouteParticipationRequest {
+                user_id: "walker".to_string(),
+                route_id: "route-a".to_string(),
+                active: true,
+                private_journey_id: None,
+                intent_version: None,
+            })
+            .await
+            .expect("seed one joined route");
+
+        let anonymous = domain
+            .route_context(pb::RouteContextRequest {
+                user_id: String::new(),
+                route_ids: vec!["route-a".to_string()],
+            })
+            .await
+            .expect("anonymous context read");
+        assert_eq!(anonymous.participant_counts.get("route-a"), Some(&1));
+        assert!(
+            anonymous.joined_route_ids.is_empty(),
+            "anonymous reads carry no identity-bound enrichment"
+        );
+
+        let identified = domain
+            .route_context(pb::RouteContextRequest {
+                user_id: "walker".to_string(),
+                route_ids: vec!["route-a".to_string()],
+            })
+            .await
+            .expect("identified context read");
+        assert_eq!(
+            identified.joined_route_ids,
+            vec!["route-a".to_string()],
+            "identified reads keep joined-route enrichment (journey {})",
+            joined.private_journey_id.as_deref().unwrap_or_default()
+        );
     }
 
     #[tokio::test]

@@ -2,17 +2,18 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   ActionNodeBinding,
   Campaign,
-  Creative,
   DeliveryGuardrails,
-  guardrailSeed,
-  Scene,
-  sceneSeed,
-  seed,
-  creativeSeed,
 } from "../domain";
-import { readAsset, useStoredState } from "../lib/storage";
 import { AdminApiError, adAdminApi, isAdAdminApiConfigured } from "../lib/adminApi";
-import { campaignsFromRemote, updateRemoteCampaign } from "../lib/adminMappers";
+import {
+  campaignFromRemote,
+  campaignsFromRemote,
+  createRemoteCampaign,
+  updateRemoteCampaign,
+} from "../lib/adminMappers";
+
+// Honest-guardrail wording: with no gateway there is no server truth to show.
+const GATEWAY_DISCONNECTED = "未连接广告管理网关，无法读写服务端广告数据。";
 
 // Mirrors the backend targeting normal form: trimmed, lower-cased slugs,
 // blanks dropped. The server still revalidates shape and bounds.
@@ -23,23 +24,10 @@ const parseTargeting = (value: FormDataEntryValue | null) =>
     .filter(Boolean);
 
 export function useAdPlatform(notify: (message: string) => void) {
-  const [campaigns, setCampaigns] = useStoredState<Campaign[]>(
-    "ad-campaigns-v5",
-    seed,
-  );
-  const [creatives, setCreatives] = useStoredState<Creative[]>(
-    "ad-creatives-v6",
-    creativeSeed,
-  );
-  const [scenes, setScenes] = useStoredState<Scene[]>(
-    "ad-scenes-v5",
-    sceneSeed,
-  );
-  // Server guardrails; seeds only until the gateway answers (or when no
-  // gateway is configured, where the sandbox value matches migration 0078).
-  const [guardrails, setGuardrails] = useState<DeliveryGuardrails>(
-    guardrailSeed,
-  );
+  // 广告活动与投放护栏只来自服务端网关；内存态从空开始，
+  // 不落 localStorage，也不在未连接时用本地数据冒充服务端事实。
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [guardrails, setGuardrails] = useState<DeliveryGuardrails | null>(null);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [dialog, setDialog] = useState(false);
@@ -85,23 +73,26 @@ export function useAdPlatform(notify: (message: string) => void) {
         setGuardrails({ userDailyCap: user_daily_total_cap });
       })
       .catch(() => {
-        // Keep the seeded default; the authoritative cap stays server-side.
+        // Leave the guardrail unread; audiences surfaces the unknown state
+        // instead of guessing the server value.
+        setGuardrails(null);
       });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const sceneBindings: ActionNodeBinding[] = scenes.map((scene) => ({
-    id: scene.id,
-    routeId: scene.id,
-    route: scene.name,
-    node: scene.node,
-    equipment: scene.equipment,
-  }));
-  const activeBindings = sceneBindings.filter((binding) =>
-    scenes.some((scene) => scene.id === binding.id && scene.enabled),
-  );
+  // Delivery-lab and dialog options come from the campaigns' own scene
+  // bindings — the only bindings that actually exist server-side.
+  const activeBindings = useMemo(() => {
+    const unique = new Map<string, ActionNodeBinding>();
+    for (const campaign of campaigns) {
+      const key = `${campaign.binding.routeId}/${campaign.binding.actionNodeId}`;
+      if (!unique.has(key)) unique.set(key, campaign.binding);
+    }
+    return [...unique.values()];
+  }, [campaigns]);
+
   const filteredCampaigns = useMemo(
     () =>
       campaigns.filter(
@@ -111,109 +102,55 @@ export function useAdPlatform(notify: (message: string) => void) {
       ),
     [campaigns, query, status],
   );
-  const isBindingActive = (binding: Campaign["binding"]) =>
-    activeBindings.some((active) => active.id === binding.id);
-  const hasApprovedCreative = (
-    campaign: Pick<Campaign, "binding" | "creativeName">,
-  ) =>
-    creatives.some(
-      (creative) =>
-        creative.name === campaign.creativeName &&
-        creative.status === "已通过" &&
-        creative.binding.id === campaign.binding.id,
-    );
 
-  const toggleCampaign = (name: string) => {
+  const replaceLocalCampaign = (name: string, next: Campaign) => {
+    setCampaigns((current) =>
+      current.map((campaign) => (campaign.name === name ? next : campaign)),
+    );
+  };
+
+  // Activates (status ACTIVE) or pauses (status PAUSED) a campaign; without
+  // an explicit target the action flips the current serving state. Draft
+  // campaigns always activate. Server-first: local state only updates after
+  // the gateway confirms, so the row never shows an unconfirmed status.
+  const toggleCampaign = async (name: string, nextStatus?: 1 | 2) => {
     const campaign = campaigns.find((item) => item.name === name);
     if (!campaign) return;
-    if (
-      campaign?.state === "paused" &&
-      (!isBindingActive(campaign.binding) || !hasApprovedCreative(campaign))
-    ) {
-      notify("关联场景未启用或素材未通过审核，不能恢复投放。");
+    if (!isAdAdminApiConfigured()) {
+      notify(GATEWAY_DISCONNECTED);
       return;
     }
-    const nextState = campaign.state === "running" ? "paused" : "running";
-    setCampaigns((current) =>
-      current.map((campaign) =>
-        campaign.name === name
-          ? {
-              ...campaign,
-              state: nextState,
-            }
-          : campaign,
-      ),
-    );
-    if (isAdAdminApiConfigured() && campaign) {
-      void adAdminApi
-        .updateCampaign(
-          campaign.id,
-          updateRemoteCampaign({ ...campaign, state: nextState }),
-        )
-        .catch((error: unknown) => {
-          const apiError = error instanceof AdminApiError ? error : undefined;
-          setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
-          setRemoteMessage(apiError?.message || "活动状态同步失败。");
-          notify(apiError?.message || "活动状态同步失败。");
-        });
+    const running = nextStatus ? nextStatus === 1 : campaign.state !== "running";
+    try {
+      const remote = await adAdminApi.updateCampaign(
+        campaign.id,
+        updateRemoteCampaign(campaign, running ? 1 : 2),
+      );
+      replaceLocalCampaign(name, campaignFromRemote(remote));
+      setRemoteStatus("ready");
+    } catch (error) {
+      const apiError = error instanceof AdminApiError ? error : undefined;
+      setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
+      setRemoteMessage(apiError?.message || "活动状态同步失败。");
+      notify(apiError?.message || "活动状态同步失败。");
     }
   };
-  const submitReview = (name: string) => {
-    const campaign = campaigns.find((item) => item.name === name);
-    if (
-      !campaign ||
-      !isBindingActive(campaign.binding) ||
-      !hasApprovedCreative(campaign)
-    ) {
-      notify("请先启用关联行动节点场景，并关联已通过的同场景素材，再提交审核。");
-      return;
-    }
-    setCampaigns((current) =>
-      current.map((campaign) =>
-        campaign.name === name ? { ...campaign, state: "pending" } : campaign,
-      ),
-    );
-    notify("广告活动已提交审核，审核通过后才会参与竞价。");
-  };
-  const approveCampaign = (name: string) => {
-    const campaign = campaigns.find((item) => item.name === name);
-    if (
-      !campaign ||
-      !isBindingActive(campaign.binding) ||
-      !hasApprovedCreative(campaign)
-    ) {
-      notify("关联场景未启用或素材未通过审核，不能通过审核。");
-      return;
-    }
-    setCampaigns((current) =>
-      current.map((item) =>
-        item.name === name && item.state === "pending"
-          ? { ...item, state: "running" }
-          : item,
-      ),
-    );
-    notify("活动已审核通过，已在绑定行动节点参与投放。");
-  };
-  const returnCampaignToDraft = (name: string) => {
-    setCampaigns((current) =>
-      current.map((item) =>
-        item.name === name && item.state === "pending"
-          ? { ...item, state: "draft" }
-          : item,
-      ),
-    );
-    notify("活动已退回草稿，请完善素材和场景相关性后重新提交。");
-  };
-  const saveCampaign = (event: FormEvent<HTMLFormElement>) => {
+
+  const saveCampaign = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!isAdAdminApiConfigured()) {
+      notify(GATEWAY_DISCONNECTED);
+      return;
+    }
     const data = new FormData(event.currentTarget);
     const name = String(data.get("name"));
     const budget = Number(data.get("budget"));
     const bid = Number(data.get("bid"));
-    const binding = sceneBindings.find(
-      (node) => node.id === data.get("actionNodeId"),
-    );
-    const creativeName = String(data.get("creativeName") || "");
+    const binding: ActionNodeBinding = {
+      routeId: String(data.get("routeId") || "").trim(),
+      actionNodeId: String(data.get("actionNodeId") || "").trim(),
+      equipment: String(data.get("equipment") || "").trim(),
+    };
     const frequencyCap = Number(data.get("frequencyCap"));
     const geoRegions = parseTargeting(data.get("geoRegions"));
     const deviceOs = parseTargeting(data.get("deviceOs"));
@@ -223,13 +160,18 @@ export function useAdPlatform(notify: (message: string) => void) {
     const landingUrl = String(data.get("landingUrl") || "").trim();
     const invalidLanding =
       landingUrl.length > 0 && !/^https?:\/\//i.test(landingUrl);
+    // Without a gateway answer the local bound stays the form default (30);
+    // the authoritative cap is enforced server-side either way.
+    const capBound = guardrails?.userDailyCap ?? 30;
     if (
-      !binding ||
+      !binding.routeId ||
+      !binding.actionNodeId ||
+      !binding.equipment ||
       !Number.isFinite(bid) ||
       bid < 0.1 ||
       !Number.isInteger(frequencyCap) ||
       frequencyCap < 1 ||
-      frequencyCap > guardrails.userDailyCap ||
+      frequencyCap > capBound ||
       geoRegions.length > 20 ||
       deviceOs.length > 20 ||
       title.length < 4 ||
@@ -238,116 +180,58 @@ export function useAdPlatform(notify: (message: string) => void) {
       invalidLanding
     ) {
       notify(
-        `请补全有效的路线节点、出价、创意标题（4-60 字）与频控（1 到 ${guardrails.userDailyCap} 次）；落地页链接需以 http(s) 开头。`,
+        `请补全公开路线 ID、行动节点 ID、场景装备、出价与频控（1 到 ${capBound} 次${guardrails ? "" : "，服务端护栏未读取到"}）；创意标题需 4-60 字，落地页需以 http(s) 开头。`,
       );
       return;
     }
-    const creative = creatives.find((item) => item.name === creativeName);
-    if (
-      !creative ||
-      creative.status !== "已通过" ||
-      creative.binding.id !== binding.id
-    ) {
-      notify("请选择同一行动节点且已通过审核的素材。");
-      return;
+    const draft: Campaign = {
+      ...(editing ?? {
+        id: `campaign-${crypto.randomUUID()}`,
+        spent: "¥0.00",
+        impressions: "0",
+        clicks: 0,
+        state: "draft",
+        color: "gray",
+      }),
+      name,
+      goal: String(data.get("goal")),
+      budget: `¥${budget.toLocaleString()}`,
+      binding,
+      title,
+      body,
+      imageUrl,
+      landingUrl,
+      frequencyCap,
+      bid,
+      geoRegions,
+      deviceOs,
+      predictions: editing?.predictions ?? { pctr: 0.03, pcvr: 0.1, pwegu: 0.05 },
+    };
+
+    try {
+      const remote = editing
+        ? await adAdminApi.updateCampaign(editing.id, updateRemoteCampaign(draft))
+        : await adAdminApi.createCampaign(createRemoteCampaign(draft));
+      if (editing) {
+        replaceLocalCampaign(name, campaignFromRemote(remote));
+      } else {
+        // 新建成功后把服务端返回的活动插入列表顶部，无需整页刷新。
+        setCampaigns((current) => [campaignFromRemote(remote), ...current]);
+      }
+      setRemoteStatus("ready");
+      setDialog(false);
+      setEditing(null);
+      notify(
+        editing
+          ? `“${name}”已更新（服务端已保存）。`
+          : `“${name}”已创建为草稿（服务端已保存），启用后参与投放。`,
+      );
+    } catch (error) {
+      const apiError = error instanceof AdminApiError ? error : undefined;
+      setRemoteStatus(apiError?.requiresAuthentication ? "auth" : "error");
+      setRemoteMessage(apiError?.message || "广告活动保存失败，请稍后重试。");
+      notify(apiError?.message || "广告活动保存失败，请检查路线节点绑定后重试。");
     }
-    if (!scenes.some((scene) => scene.id === binding.id && scene.enabled)) {
-      notify("该行动节点场景未启用，不能创建或恢复投放活动。");
-      return;
-    }
-    setCampaigns((current) =>
-      editing
-        ? current.map((campaign) =>
-            campaign.name === editing.name
-              ? {
-                  ...campaign,
-                  goal: String(data.get("goal")),
-                  budget: `¥${budget.toLocaleString()}`,
-                  binding,
-                  creativeName,
-                  title,
-                  body,
-                  imageUrl,
-                  landingUrl,
-                  frequencyCap,
-                  bid,
-                  geoRegions,
-                  deviceOs,
-                }
-              : campaign,
-          )
-        : [
-            {
-              id: `campaign-${crypto.randomUUID()}`,
-              name,
-              goal: String(data.get("goal")),
-              budget: `¥${budget.toLocaleString()}`,
-              spent: "¥0.00",
-              impressions: "0",
-              state: "draft",
-              color: "gray",
-              binding,
-              creativeName,
-              title,
-              body,
-              imageUrl,
-              landingUrl,
-              frequencyCap,
-              bid,
-              geoRegions,
-              deviceOs,
-              predictions: { pctr: 0.03, pcvr: 0.1, pwegu: 0.05 },
-            },
-            ...current,
-          ],
-    );
-    setDialog(false);
-    setEditing(null);
-    notify(editing ? `“${name}”已更新。` : `“${name}”已创建，提交审核后即可开始投放。`);
-  };
-  const addCreative = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const file = data.get("asset");
-    if (!(file instanceof File) || !file.size) {
-      notify("请选择素材文件后再提交。");
-      return;
-    }
-    if (file.size > 2 * 1024 * 1024) {
-      notify("素材文件不能超过 2MB。");
-      return;
-    }
-    const assetData = await readAsset(file);
-    const binding = sceneBindings.find(
-      (node) => node.id === data.get("actionNodeId"),
-    );
-    const contextNote = String(data.get("contextNote") || "").trim();
-    const prohibitedCopy = ["限时", "最低价", "立即购买", "全网", "抢购"];
-    if (
-      contextNote.length < 12 ||
-      contextNote.length > 140 ||
-      prohibitedCopy.some((phrase) => contextNote.includes(phrase))
-    ) {
-      notify("请填写 12 到 140 字的行动节点说明，且不要使用强促销文案。");
-      return;
-    }
-    if (!binding) {
-      notify("请选择有效的路线行动节点与场景装备。");
-      return;
-    }
-    setCreatives((current) => [
-      {
-        name: String(data.get("name")),
-        format: String(data.get("format")),
-        binding,
-        contextNote,
-        status: "审核中",
-        updated: "刚刚",
-        assetData,
-      },
-      ...current,
-    ]);
-    notify(`“${String(data.get("name"))}”已提交审核。`);
   };
 
   const saveUserDailyCap = async (cap: number) => {
@@ -367,8 +251,6 @@ export function useAdPlatform(notify: (message: string) => void) {
 
   return {
     campaigns,
-    creatives,
-    scenes,
     guardrails,
     query,
     status,
@@ -380,16 +262,9 @@ export function useAdPlatform(notify: (message: string) => void) {
     setStatus,
     setDialog,
     setEditing,
-    setCampaigns,
-    setCreatives,
-    setScenes,
     saveUserDailyCap,
     toggleCampaign,
-    submitReview,
-    approveCampaign,
-    returnCampaignToDraft,
     saveCampaign,
-    addCreative,
     remoteStatus,
     remoteMessage,
   };

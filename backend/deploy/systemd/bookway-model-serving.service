@@ -1,0 +1,20 @@
+[Unit]
+Description=Bookway MiniCPM5-1B model serving (embeddings + LLM scorer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend/bookway-py/bg/model_serving
+EnvironmentFile=/etc/bookway/model-serving.env
+# MODEL_NAME / MODEL_SOURCE / MODEL_CHECKPOINT_PATH live in model-serving.env.
+# First start downloads the base snapshot from ModelScope (~2-3 GB).
+ExecStart=/opt/bookway/backend/bookway-py/bg/model_serving/run.sh
+Restart=always
+RestartSec=3
+# A 1B model on CPU comfortably stays within 4G; raise for GPU hosts.
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target

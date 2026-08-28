@@ -23,6 +23,18 @@ impl BbsSearch for GrpcServer {
         Ok(Response::new(response))
     }
 
+    async fn search_semantic(
+        &self,
+        request: Request<pb::SearchSemanticRequest>,
+    ) -> Result<Response<pb::SearchResponse>, Status> {
+        let response = self
+            .domain
+            .search_semantic(request.into_inner())
+            .await
+            .map_err(internal_error)?;
+        Ok(Response::new(response))
+    }
+
     async fn suggestions(
         &self,
         request: Request<pb::SuggestionsRequest>,

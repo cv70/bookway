@@ -1,6 +1,13 @@
 use super::*;
 use sqlx::PgPool;
 
+/// Payment-webhook lookups target the real orders table. SQL passed to
+/// runtime `sqlx::query` is never type-checked, so a typo'd table here
+/// turns every provider confirmation into a 42P01 after the money has
+/// already moved (regression: this once read `FROM orders`).
+const PAYMENT_REFERENCE_LOOKUP_SQL: &str =
+    "SELECT id, user_id FROM mall_orders WHERE payment_reference = $1";
+
 #[derive(sqlx::FromRow)]
 struct OrderRow {
     id: String,
@@ -18,6 +25,8 @@ struct OrderRow {
     merchant_id: String,
     fulfillment_status: String,
     tracking_number: String,
+    ad_request_id: Option<String>,
+    ad_campaign_id: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -51,6 +60,7 @@ struct SettlementRow {
 }
 
 fn order_from_row(row: OrderRow, items: Vec<OrderLineRow>) -> Result<pb::Order, DaoError> {
+    let ad_attribution = zip_attribution(&row);
     Ok(pb::Order {
         id: row.id,
         user_id: row.user_id,
@@ -83,8 +93,19 @@ fn order_from_row(row: OrderRow, items: Vec<OrderLineRow>) -> Result<pb::Order, 
         merchant_id: row.merchant_id,
         fulfillment_status: parse_fulfillment_status(&row.fulfillment_status)?,
         tracking_number: row.tracking_number,
+        ad_attribution,
     })
 }
+
+/// Stored as two nullable columns so a partial write can never surface as a
+/// one-sided attribution.
+fn zip_attribution(row: &OrderRow) -> Option<pb::AdAttribution> {
+    Some(pb::AdAttribution {
+        request_id: row.ad_request_id.clone()?,
+        campaign_id: row.ad_campaign_id.clone()?,
+    })
+}
+
 
 fn settlement_from_row(row: SettlementRow) -> Result<pb::AffiliateSettlement, DaoError> {
     Ok(pb::AffiliateSettlement {
@@ -111,9 +132,9 @@ impl PostgresOrderDao {
     }
     async fn load(&self, user_id: Option<&str>, id: &str) -> Result<pb::Order, DaoError> {
         let row = if let Some(user_id) = user_id {
-            sqlx::query_as::<_, OrderRow>("SELECT id,user_id,status,currency,total_cents,payment_reference,expires_at,created_at,updated_at,node_offer_id,affiliate_creator_id,commission_cents,merchant_id,fulfillment_status,tracking_number FROM mall_orders WHERE id=$1 AND user_id=$2").bind(id).bind(user_id).fetch_optional(&self.pool).await.map_err(database)?
+            sqlx::query_as::<_, OrderRow>("SELECT id,user_id,status,currency,total_cents,payment_reference,expires_at,created_at,updated_at,node_offer_id,affiliate_creator_id,commission_cents,merchant_id,fulfillment_status,tracking_number,ad_request_id,ad_campaign_id FROM mall_orders WHERE id=$1 AND user_id=$2").bind(id).bind(user_id).fetch_optional(&self.pool).await.map_err(database)?
         } else {
-            sqlx::query_as::<_, OrderRow>("SELECT id,user_id,status,currency,total_cents,payment_reference,expires_at,created_at,updated_at,node_offer_id,affiliate_creator_id,commission_cents,merchant_id,fulfillment_status,tracking_number FROM mall_orders WHERE id=$1").bind(id).fetch_optional(&self.pool).await.map_err(database)?
+            sqlx::query_as::<_, OrderRow>("SELECT id,user_id,status,currency,total_cents,payment_reference,expires_at,created_at,updated_at,node_offer_id,affiliate_creator_id,commission_cents,merchant_id,fulfillment_status,tracking_number,ad_request_id,ad_campaign_id FROM mall_orders WHERE id=$1").bind(id).fetch_optional(&self.pool).await.map_err(database)?
         };
         let row = row.ok_or_else(|| DaoError::NotFound(id.to_string()))?;
         let items = sqlx::query_as::<_, OrderLineRow>("SELECT sku_id,product_id,title,quantity,unit_price_cents,currency,line_total_cents FROM mall_order_items WHERE order_id=$1 ORDER BY sku_id").bind(id).fetch_all(&self.pool).await.map_err(database)?;
@@ -149,7 +170,7 @@ impl OrderDao for PostgresOrderDao {
     }
     async fn create(&self, draft: NewOrder) -> Result<CreateResult, DaoError> {
         let mut tx = self.pool.begin().await.map_err(database)?;
-        let inserted = sqlx::query_scalar::<_, String>("INSERT INTO mall_orders (id,user_id,idempotency_key,request_fingerprint,status,currency,total_cents,expires_at,node_offer_id,affiliate_creator_id,commission_cents,merchant_id,fulfillment_status,tracking_number) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (user_id,idempotency_key) DO NOTHING RETURNING id").bind(&draft.order.id).bind(&draft.order.user_id).bind(&draft.idempotency_key).bind(&draft.request_fingerprint).bind(status_name(draft.order.status)?).bind(&draft.order.currency).bind(draft.order.total_cents).bind(parse_timestamp(&draft.order.expires_at)?).bind(&draft.order.node_offer_id).bind(&draft.order.affiliate_creator_id).bind(draft.order.commission_cents).bind(&draft.order.merchant_id).bind(fulfillment_name(draft.order.fulfillment_status)?).bind(&draft.order.tracking_number).fetch_optional(&mut *tx).await.map_err(database)?;
+        let inserted = sqlx::query_scalar::<_, String>("INSERT INTO mall_orders (id,user_id,idempotency_key,request_fingerprint,status,currency,total_cents,expires_at,node_offer_id,affiliate_creator_id,commission_cents,merchant_id,fulfillment_status,tracking_number,ad_request_id,ad_campaign_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT (user_id,idempotency_key) DO NOTHING RETURNING id").bind(&draft.order.id).bind(&draft.order.user_id).bind(&draft.idempotency_key).bind(&draft.request_fingerprint).bind(status_name(draft.order.status)?).bind(&draft.order.currency).bind(draft.order.total_cents).bind(parse_timestamp(&draft.order.expires_at)?).bind(&draft.order.node_offer_id).bind(&draft.order.affiliate_creator_id).bind(draft.order.commission_cents).bind(&draft.order.merchant_id).bind(fulfillment_name(draft.order.fulfillment_status)?).bind(&draft.order.tracking_number).bind(draft.order.ad_attribution.as_ref().map(|attribution| attribution.request_id.clone())).bind(draft.order.ad_attribution.as_ref().map(|attribution| attribution.campaign_id.clone())).fetch_optional(&mut *tx).await.map_err(database)?;
         let id = if let Some(id) = inserted {
             for line in &draft.order.items {
                 sqlx::query("INSERT INTO mall_order_items (order_id,sku_id,product_id,title,quantity,unit_price_cents,currency,line_total_cents) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)").bind(&id).bind(&line.sku_id).bind(&line.product_id).bind(&line.title).bind(i64::from(line.quantity)).bind(line.unit_price_cents).bind(&line.currency).bind(line.line_total_cents).execute(&mut *tx).await.map_err(database)?;
@@ -270,6 +291,12 @@ impl OrderDao for PostgresOrderDao {
             value if value == pb::MallOrderStatus::Expired as i32 => {
                 "status IN ('pending_payment','payment_processing')"
             }
+            // Expiry reconciliation: a provider confirmation that lands after
+            // the TTL flips the expired order to paid_after_expiry. Money has
+            // moved, so this is durable state — not an error. Replays (the row
+            // is already paid_after_expiry) fall through to the equal-status
+            // idempotent branch below.
+            value if value == pb::MallOrderStatus::PaidAfterExpiry as i32 => "status='expired'",
             _ => "FALSE",
         };
         let statement = format!(
@@ -301,7 +328,7 @@ impl OrderDao for PostgresOrderDao {
         // unattributed carts, and replays land on ON CONFLICT DO NOTHING.
         if status == pb::MallOrderStatus::Paid as i32 {
             sqlx::query(
-                "INSERT INTO purchase_event_outbox (order_id,user_id,node_offer_id) SELECT o.id,o.user_id,o.node_offer_id FROM mall_orders o WHERE o.id=$1 AND o.node_offer_id<>'' ON CONFLICT (order_id) DO NOTHING",
+                "INSERT INTO purchase_event_outbox (order_id,user_id,node_offer_id,ad_request_id,ad_campaign_id) SELECT o.id,o.user_id,o.node_offer_id,o.ad_request_id,o.ad_campaign_id FROM mall_orders o WHERE o.id=$1 AND o.node_offer_id<>'' ON CONFLICT (order_id) DO NOTHING",
             )
             .bind(id)
             .execute(&mut *tx)
@@ -376,19 +403,46 @@ impl OrderDao for PostgresOrderDao {
         }
         self.load(None, order_id).await
     }
-    async fn ensure_settlement(&self, order: &pb::Order) -> Result<(), DaoError> {
+    async fn get_by_payment_reference(
+        &self,
+        reference: &str,
+    ) -> Result<Option<(String, String)>, DaoError> {
+        sqlx::query_as::<_, (String, String)>(PAYMENT_REFERENCE_LOOKUP_SQL)
+            .bind(reference)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(database)
+    }
+    async fn ensure_settlement(
+        &self,
+        order: &pb::Order,
+        hold_days: u32,
+    ) -> Result<(), DaoError> {
+        // With a hold the share starts `pending` and becomes payable only
+        // after the refund window; without one the legacy immediate
+        // eligibility applies.
         sqlx::query(
-            "INSERT INTO mall_affiliate_settlements (id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at) VALUES ($1,$2,$3,$4,$5,'eligible',now()) ON CONFLICT (order_id) DO NOTHING",
+            "INSERT INTO mall_affiliate_settlements (id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at) VALUES ($1,$2,$3,$4,$5,CASE WHEN $6>0 THEN 'pending' ELSE 'eligible' END,now()+make_interval(days=>$6)) ON CONFLICT (order_id) DO NOTHING",
         )
         .bind(uuid::Uuid::now_v7().to_string())
         .bind(&order.id)
         .bind(&order.merchant_id)
         .bind(&order.affiliate_creator_id)
         .bind(order.commission_cents)
+        .bind(i32::try_from(hold_days).unwrap_or(i32::MAX))
         .execute(&self.pool)
         .await
         .map_err(database)?;
         Ok(())
+    }
+    async fn promote_eligible_settlements(&self) -> Result<u64, DaoError> {
+        let promoted = sqlx::query(
+            "UPDATE mall_affiliate_settlements SET status='eligible',updated_at=now() WHERE status='pending' AND eligible_at<=now()",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(database)?;
+        Ok(promoted.rows_affected())
     }
     async fn settlements(
         &self,
@@ -402,6 +456,26 @@ impl OrderDao for PostgresOrderDao {
             "SELECT id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at,settled_at,created_at FROM mall_affiliate_settlements WHERE merchant_id=$1 AND ($2::text IS NULL OR status=$2) AND ($3='' OR id < $3) ORDER BY id DESC LIMIT $4",
         )
         .bind(merchant_id)
+        .bind(status)
+        .bind(cursor.unwrap_or_default())
+        .bind(i64::try_from(limit.clamp(1, 100)).unwrap_or(100))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database)?;
+        rows.into_iter().map(settlement_from_row).collect()
+    }
+    async fn creator_settlements(
+        &self,
+        creator_id: &str,
+        status: Option<i32>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<pb::AffiliateSettlement>, DaoError> {
+        let status = status.map(settlement_status_name).transpose()?;
+        let rows = sqlx::query_as::<_, SettlementRow>(
+            "SELECT id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at,settled_at,created_at FROM mall_affiliate_settlements WHERE creator_id=$1 AND ($2::text IS NULL OR status=$2) AND ($3='' OR id < $3) ORDER BY id DESC LIMIT $4",
+        )
+        .bind(creator_id)
         .bind(status)
         .bind(cursor.unwrap_or_default())
         .bind(i64::try_from(limit.clamp(1, 100)).unwrap_or(100))
@@ -436,7 +510,9 @@ impl OrderDao for PostgresOrderDao {
     }
     async fn reverse_affiliate(&self, order_id: &str) -> Result<pb::AffiliateSettlement, DaoError> {
         let reversed = sqlx::query_as::<_, SettlementRow>(
-            "UPDATE mall_affiliate_settlements SET status='reversed',updated_at=now() WHERE order_id=$1 AND status='eligible' RETURNING id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at,settled_at,created_at",
+            // A refund inside the refund window voids the pending share
+            // before any payout; a settled share stays out of reach here.
+            "UPDATE mall_affiliate_settlements SET status='reversed',updated_at=now() WHERE order_id=$1 AND status IN ('eligible','pending') RETURNING id,order_id,merchant_id,creator_id,amount_cents,status,eligible_at,settled_at,created_at",
         )
         .bind(order_id)
         .fetch_optional(&self.pool)
@@ -459,5 +535,19 @@ impl OrderDao for PostgresOrderDao {
             return settlement_from_row(row);
         }
         Err(DaoError::State("settlement is not reversible".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PAYMENT_REFERENCE_LOOKUP_SQL;
+
+    /// Runtime SQL is invisible to the compiler; pin the webhook lookup's
+    /// table so a rename cannot silently reintroduce the `FROM orders`
+    /// regression that 42P01'd every provider confirmation.
+    #[test]
+    fn payment_reference_lookup_targets_the_mall_orders_table() {
+        assert!(PAYMENT_REFERENCE_LOOKUP_SQL.contains("FROM mall_orders"));
+        assert!(!PAYMENT_REFERENCE_LOOKUP_SQL.contains("FROM orders"));
     }
 }

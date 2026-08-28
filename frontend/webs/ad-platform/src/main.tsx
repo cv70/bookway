@@ -2,7 +2,6 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Audiences } from "./features/audiences";
 import { CampaignDialog, Campaigns } from "./features/campaigns";
-import { Creatives } from "./features/creatives";
 import { Overview } from "./features/overview";
 import { Reports } from "./features/reports";
 import { useAdPlatform } from "./features/useAdPlatform";
@@ -27,6 +26,16 @@ function App() {
     setMenu(false);
     history.replaceState(null, "", `#${next}`);
   };
+  const statusLabel =
+    platform.remoteStatus === "loading"
+      ? "同步中"
+      : platform.remoteStatus === "ready"
+        ? "已连接网关"
+        : platform.remoteStatus === "auth"
+          ? "需登录"
+          : platform.remoteStatus === "local"
+            ? "未连接网关"
+            : "网关异常";
   return (
     <div className="app-shell">
       <aside className={`sidebar ${menu ? "open" : ""}`}>
@@ -37,10 +46,10 @@ function App() {
           </span>
         </a>
         <div className="workspace">
-          <span className="workspace-logo">N</span>
+          <span className="workspace-logo">广</span>
           <span>
-            <strong>Northland</strong>
-            <small>广告账户 · 482019</small>
+            <strong>广告主账户</strong>
+            <small>Bookway Ads</small>
           </span>
         </div>
         <nav>
@@ -65,7 +74,7 @@ function App() {
             href="#"
             onClick={(event) => {
               event.preventDefault();
-              notify("账单中心暂无待处理账单。");
+              notify("账单中心暂未接入。");
             }}
           >
             <span>▣</span>账单与付款
@@ -75,16 +84,19 @@ function App() {
             href="#"
             onClick={(event) => {
               event.preventDefault();
-              notify("账户设置已保存。");
+              notify("账户设置暂未接入。");
             }}
           >
             <span>⚙</span>账户设置
           </a>
-          <div className="account-status">
+          <div
+            className={`account-status ${platform.remoteStatus === "ready" ? "" : "alert"}`}
+            title={platform.remoteMessage || "广告管理网关连接状态"}
+          >
             <i />
             <span>
-              <strong>账户状态正常</strong>
-              <small>余额 ¥24,580.00</small>
+              <strong>{statusLabel}</strong>
+              <small>广告管理网关</small>
             </span>
           </div>
         </div>
@@ -103,20 +115,20 @@ function App() {
             <strong>{titles[view]}</strong>
           </div>
           <div className="top-actions">
-            {platform.remoteStatus !== "local" && (
-              <span
-                className={`sync-status ${platform.remoteStatus}`}
-                title={platform.remoteMessage || "广告后台同步状态"}
-              >
-                {platform.remoteStatus === "loading"
-                  ? "同步中"
-                  : platform.remoteStatus === "ready"
-                    ? "已同步"
-                    : platform.remoteStatus === "auth"
-                      ? "需登录"
+            <span
+              className={`sync-status ${platform.remoteStatus}`}
+              title={platform.remoteMessage || "广告后台同步状态"}
+            >
+              {platform.remoteStatus === "loading"
+                ? "同步中"
+                : platform.remoteStatus === "ready"
+                  ? "已同步"
+                  : platform.remoteStatus === "auth"
+                    ? "需登录"
+                    : platform.remoteStatus === "local"
+                      ? "未连接"
                       : "同步异常"}
-              </span>
-            )}
+            </span>
             <button
               className="help-button"
               onClick={() => notify("请联系商家支持获取投放帮助。")}
@@ -125,33 +137,33 @@ function App() {
             </button>
             <button
               className="icon-button"
-              onClick={() => notify("暂无新的审核通知。")}
+              onClick={() => notify("通知中心暂未接入。")}
             >
               ♧
             </button>
             <button className="user-button">
-              <span className="avatar">陈</span>
-              <span>陈铭</span>
+              <span className="avatar">广</span>
+              <span>广告主账号</span>
             </button>
           </div>
         </header>
+        {(platform.remoteStatus === "local" ||
+          platform.remoteStatus === "error") && (
+          <div className="conn-banner" role="alert">
+            <strong>未连接</strong>
+            <span>
+              {platform.remoteStatus === "local"
+                ? "未连接广告管理网关，无法读取服务端广告账本。"
+                : `广告管理网关暂时不可用：${platform.remoteMessage || "请检查网络连接。"}`}
+            </span>
+          </div>
+        )}
         {view === "overview" && (
           <Overview
             campaigns={platform.campaigns}
             guardrails={platform.guardrails}
             go={go}
             open={() => platform.setDialog(true)}
-            onApplyBudget={(name) => {
-              platform.setCampaigns((current) =>
-                current.map((campaign) =>
-                  campaign.name === name
-                    ? { ...campaign, budget: "¥1,400" }
-                    : campaign,
-                ),
-              );
-              notify(`建议已应用：${name} 日预算调整为 ¥1,400。`);
-            }}
-            notify={notify}
           />
         )}
         {view === "campaigns" && (
@@ -163,65 +175,17 @@ function App() {
             setStatus={platform.setStatus}
             open={() => platform.setDialog(true)}
             toggle={platform.toggleCampaign}
-            review={platform.submitReview}
-            approve={platform.approveCampaign}
-            returnToDraft={platform.returnCampaignToDraft}
             onEdit={platform.setEditing}
-            notify={notify}
-          />
-        )}
-        {view === "ads" && (
-          <Creatives
-            creatives={platform.creatives}
-            bindings={platform.activeBindings}
-            addCreative={platform.addCreative}
-            reviewCreative={(name, creativeStatus) => {
-              platform.setCreatives((current) =>
-                current.map((creative) =>
-                  creative.name === name && creative.status === "审核中"
-                    ? { ...creative, status: creativeStatus, updated: "刚刚" }
-                    : creative,
-                ),
-              );
-              notify(
-                creativeStatus === "已通过"
-                  ? "素材已审核通过，可供关联活动使用。"
-                  : "素材已退回修改，请补充与场景装备的关联说明。",
-              );
-            }}
-            onRemove={(name) => {
-              platform.setCreatives((current) =>
-                current.filter((creative) => creative.name !== name),
-              );
-              notify("素材已从审核队列移除。");
-            }}
-            notify={notify}
           />
         )}
         {view === "audiences" && (
           <Audiences
-            scenes={platform.scenes}
             campaigns={platform.campaigns}
+            bindings={platform.activeBindings}
             guardrails={platform.guardrails}
-            toggle={(id) =>
-              platform.setScenes((current) =>
-                current.map((scene) =>
-                  scene.id === id
-                    ? { ...scene, enabled: !scene.enabled }
-                    : scene,
-                ),
-              )
-            }
-            onAdd={(scene) => platform.setScenes((current) => [scene, ...current])}
-            onRemove={(id) =>
-              platform.setScenes((current) =>
-                current.filter((scene) => scene.id !== id),
-              )
-            }
             onSaveCap={(cap) => {
               void platform.saveUserDailyCap(cap);
             }}
-            notify={notify}
           />
         )}
         {view === "reports" && (
@@ -231,15 +195,6 @@ function App() {
       {(platform.dialog || platform.editing) && (
         <CampaignDialog
           campaign={platform.editing || undefined}
-          creatives={platform.creatives}
-          bindings={
-            platform.editing &&
-            !platform.activeBindings.some(
-              (binding) => binding.id === platform.editing?.binding.id,
-            )
-              ? [platform.editing.binding, ...platform.activeBindings]
-              : platform.activeBindings
-          }
           close={() => {
             platform.setDialog(false);
             platform.setEditing(null);

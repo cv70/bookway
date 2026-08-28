@@ -258,6 +258,7 @@ impl ContentDao for MemoryContentDao {
             .find(|item| item.id == content.id)
             .ok_or_else(|| DaoError::NotFound(content.id.clone()))?;
         *existing = content.clone();
+        bump_source_fork_count(&mut state, &content);
         Ok(content)
     }
 
@@ -307,5 +308,27 @@ impl ContentDao for MemoryContentDao {
             .ok_or_else(|| DaoError::NotFound(content.id.clone()))?;
         *existing = content.clone();
         Ok(content)
+    }
+}
+
+/// Mirrors the Postgres publish transaction: a published fork increments its
+/// source route's fork_count so local mode stays consistent with production.
+fn bump_source_fork_count(state: &mut State, fork: &pb::Content) {
+    let Some(source_route_id) = fork
+        .route_fork
+        .as_ref()
+        .map(|fork| fork.source_route_id.clone())
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    if let Some(source) = state
+        .contents
+        .iter_mut()
+        .find(|item| item.id == source_route_id)
+    {
+        if let Some(post) = source.post.as_mut() {
+            post.fork_count = post.fork_count.saturating_add(1);
+        }
     }
 }

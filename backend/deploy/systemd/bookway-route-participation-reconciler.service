@@ -1,0 +1,18 @@
+# Reconciles route participation facts (join/quit drift) so bbs counts stay
+# honest read-time facts rather than drifting stored duplicates.
+[Unit]
+Description=Bookway route participation reconciler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bookway
+WorkingDirectory=/opt/bookway/backend
+EnvironmentFile=/etc/bookway/backend.env
+ExecStart=/opt/bookway/backend/target/release/bookway-route-participation-reconciler
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

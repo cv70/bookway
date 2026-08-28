@@ -1,0 +1,4 @@
+torch>=2.2
+psycopg[binary]>=3.1
+# train_llm.py additionally needs the serving stack's transformers/peft:
+#   pip install -r ../../bg/model_serving/requirements.txt peft

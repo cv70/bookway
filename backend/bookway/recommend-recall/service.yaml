@@ -5,5 +5,7 @@ port: 8095
 healthcheck: grpc
 dependencies:
   - bookway-bbs-link
+  - bookway-bbs-search
+  - bookway-knowledge-catalog
 contracts:
   - src/api/pb/server.proto

@@ -60,6 +60,7 @@ import {
   MallOrder,
   MallOrderItemInput,
   NodeOfferList,
+  MallOrderList,
   RouteNodeResourcePage,
 } from '../types';
 import { localScheduleContext } from '../utils/scheduling';
@@ -305,21 +306,58 @@ export function getRouteNodeResources(routeId: string, actionNodeId: string): Pr
   return request(`/v1/routes/${encodeURIComponent(routeId)}/nodes/${encodeURIComponent(actionNodeId)}/resources`);
 }
 
-export function createMallOrder(nodeOfferId: string, items: MallOrderItemInput[]): Promise<MallOrder> {
+export interface MallOrderAdAttribution {
+  request_id: string;
+  campaign_id: string;
+}
+
+export function createMallOrder(
+  nodeOfferId: string,
+  items: MallOrderItemInput[],
+  adAttribution?: MallOrderAdAttribution,
+): Promise<MallOrder> {
   const normalizedItems = items
     .map((item) => ({ sku_id: item.sku_id.trim(), quantity: Math.max(1, Math.floor(item.quantity)) }))
     .filter((item) => item.sku_id);
-  const fingerprint = JSON.stringify([nodeOfferId.trim(), normalizedItems]);
+  // Attribution rides only as a complete pair; the server rejects one-sided
+  // contexts and the conversion itself is verified server-side after payment.
+  const normalizedAttribution = adAttribution && {
+    request_id: adAttribution.request_id.trim(),
+    campaign_id: adAttribution.campaign_id.trim(),
+  };
+  const body: Record<string, unknown> = { node_offer_id: nodeOfferId.trim(), items: normalizedItems };
+  if (normalizedAttribution) body.ad_attribution = normalizedAttribution;
+  const fingerprint = JSON.stringify([nodeOfferId.trim(), normalizedItems, normalizedAttribution ?? null]);
   const idempotencyKey = mallOrderIdempotencyKeys.get(fingerprint)
     ?? `mall-order-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   mallOrderIdempotencyKeys.set(fingerprint, idempotencyKey);
   return request<MallOrder>('/v1/orders', {
     method: 'POST',
     headers: { 'Idempotency-Key': idempotencyKey },
-    body: JSON.stringify({ node_offer_id: nodeOfferId.trim(), items: normalizedItems }),
+    body: JSON.stringify(body),
   }).then((order) => {
     mallOrderIdempotencyKeys.delete(fingerprint);
     return order;
+  });
+}
+
+// The buyer's own orders. Statuses mirror mall-order's state machine:
+// 0 pending_payment, 1 payment_processing, 2 paid, 3 cancelled, 4 expired.
+export function listMyOrders(): Promise<MallOrderList> {
+  return request<MallOrderList>('/v1/orders');
+}
+
+// Marks an order paid with the payment provider's receipt. The reference is
+// issued by the PSP after real money movement — this client never fabricates
+// one; until a provider SDK is integrated, orders stay honestly `待支付`.
+export function payMallOrder(orderId: string, paymentReference: string): Promise<MallOrder> {
+  const reference = paymentReference.trim();
+  if (!reference) {
+    return Promise.reject(new Error('payment_reference is required'));
+  }
+  return request<MallOrder>(`/v1/orders/${encodeURIComponent(orderId)}/pay`, {
+    method: 'POST',
+    body: JSON.stringify({ payment_reference: reference }),
   });
 }
 
