@@ -133,11 +133,16 @@ export function PostDetailModal({
   const isQuestion = Boolean(post.is_question);
   const templateStages = template?.stages ?? [];
   const templateActions = template?.actions ?? [];
-  const unassignedTemplateActions = templateActions.filter((action) => !Number.isInteger(action.stage_index)
-    || action.stage_index === undefined
-    || action.stage_index < 0
-    || action.stage_index >= templateStages.length);
-  const hasRoute = post.is_route ?? Boolean(post.route_title.trim() || template);
+  const templateStageIds = new Set(templateStages.map((stage) => stage.id));
+  const unassignedTemplateActions = templateActions.filter(
+    (action) => !action.stage_id || !templateStageIds.has(action.stage_id),
+  );
+  // The server-derived content type is the only route discriminator. Do not
+  // infer adoptability from legacy route metadata or a partial template.
+  const hasRoute = post.is_route === true;
+  // Absent means the participation fact was not read this request, so the
+  // detail sheet says so rather than showing a count of zero.
+  const companionCount = joinCount ?? post.join_count ?? undefined;
   const routeTitle = post.route_title.trim() || post.title;
   const routeDuration = post.route_duration.trim();
   const submitComment = async () => {
@@ -259,15 +264,15 @@ export function PostDetailModal({
           })}</View> : null}
           <View style={styles.tags}>{post.tags.map((tag) => <Text key={tag} style={styles.tag}>#{tag}</Text>)}</View>
           {topics.length ? <View style={styles.topics}><Text style={styles.topicsLabel}>相关话题</Text>{topics.map((topic) => <Text key={topic} style={styles.topic}>#{topic}</Text>)}</View> : null}
-          {milestone ? <View style={styles.milestone}><Text style={styles.milestoneTitle}>阶段成果 · {milestone.route_title}</Text><Text style={styles.milestoneStage}>阶段 {milestone.stage_index + 1} · {milestone.stage_title}</Text><MilestoneField label="投入" value={milestone.effort_summary} /><MilestoneField label="结果" value={milestone.outcome_summary} />{milestone.adjustment_summary.trim() ? <MilestoneField label="调整" value={milestone.adjustment_summary} /> : null}<MilestoneField label="证据范围" value={milestone.evidence_scope} /></View> : null}
-          {questionContext ? <View style={styles.questionContext}><Text style={styles.questionContextLabel}>关联执行上下文</Text><Text style={styles.questionContextTitle}>{questionContext.route_title}</Text>{questionContext.stage_index !== undefined && questionContext.stage_index !== null ? <Text style={styles.questionContextStage}>阶段 {questionContext.stage_index + 1}{questionContext.stage_title ? ` · ${questionContext.stage_title}` : ''}</Text> : <Text style={styles.questionContextStage}>路线整体执行中</Text>}</View> : null}
+          {milestone ? <View style={styles.milestone}><Text style={styles.milestoneTitle}>阶段成果 · {milestone.route_title}</Text><Text style={styles.milestoneStage}>阶段 · {milestone.stage_title}</Text><MilestoneField label="投入" value={milestone.effort_summary} /><MilestoneField label="结果" value={milestone.outcome_summary} />{milestone.adjustment_summary.trim() ? <MilestoneField label="调整" value={milestone.adjustment_summary} /> : null}<MilestoneField label="证据范围" value={milestone.evidence_scope} /></View> : null}
+          {questionContext ? <View style={styles.questionContext}><Text style={styles.questionContextLabel}>关联执行上下文</Text><Text style={styles.questionContextTitle}>{questionContext.route_title}</Text>{questionContext.stage_title ? <Text style={styles.questionContextStage}>阶段 · {questionContext.stage_title}</Text> : <Text style={styles.questionContextStage}>路线整体执行中</Text>}</View> : null}
           {template ? <View style={styles.template}>
             <Text style={styles.templateTitle}>路线方法</Text>
             {template.intent.trim() ? <TemplateField label="这条路线想达成什么" value={template.intent} /> : null}
             {template.completion_criteria.trim() ? <TemplateField label="完成标准" value={template.completion_criteria} /> : null}
             {templateStages.length ? <View style={styles.templateSection}><Text style={styles.templateSectionTitle}>阶段安排</Text>{templateStages.map((stage, stageIndex) => {
-              const stageActions = templateActions.filter((action) => action.stage_index === stageIndex);
-              return <View key={`${stage.title}-${stageIndex}`} style={styles.stageCard}>
+              const stageActions = templateActions.filter((action) => action.stage_id === stage.id);
+              return <View key={stage.id || `${stage.title}-${stageIndex}`} style={styles.stageCard}>
                 <Text style={styles.stageTitle}>阶段 {stageIndex + 1} · {stage.title || '未命名阶段'}</Text>
                 {stage.detail.trim() ? <Text style={styles.stageDetail}>{stage.detail}</Text> : null}
                 {stage.completion_criteria.trim() ? <Text style={styles.stageCriteria}>完成：{stage.completion_criteria}</Text> : null}
@@ -279,7 +284,7 @@ export function PostDetailModal({
           {hasRoute ? <>
             <Pressable disabled={joined || joining} onPress={() => onJoin(post)} style={({ pressed }) => [styles.route, joined && styles.routeJoined, pressed && styles.pressed]}>
               <Route color={colors.evergreen} size={20} />
-              <View style={styles.routeCopy}><Text numberOfLines={1} style={styles.routeTitle}>{routeTitle}</Text><Text style={styles.routeMeta}>{routeDuration ? `${routeDuration} · ` : ''}{(joinCount ?? post.join_count).toLocaleString()} 人加入</Text></View>
+              <View style={styles.routeCopy}><Text numberOfLines={1} style={styles.routeTitle}>{routeTitle}</Text><Text style={styles.routeMeta}>{routeDuration ? `${routeDuration} · ` : ''}{companionCount === undefined ? '同行人数未同步' : `${companionCount.toLocaleString()} 人加入`}</Text></View>
               <Text style={styles.join}>{joining ? '加入中' : joined ? '已加入' : '加入路线'}</Text>
             </Pressable>
             {canForkRoute && onForkRoute ? <Pressable accessibilityLabel="分叉这条路线" onPress={() => onForkRoute(post)} style={({ pressed }) => [styles.forkRoute, pressed && styles.pressed]}><GitFork color={colors.evergreen} size={17} /><Text style={styles.forkRouteText}>分叉路线，创建自己的版本</Text></Pressable> : null}

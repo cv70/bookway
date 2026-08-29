@@ -291,9 +291,152 @@ async fn service_auth(service: &'static str, request: Request, next: Next) -> Re
 #[derive(serde::Deserialize)]
 struct Claims {
     sub: String,
-    exp: usize,
+    #[serde(rename = "exp")]
+    _exp: usize,
     #[serde(default)]
     roles: Vec<String>,
+}
+
+#[derive(Clone)]
+struct JwksSnapshot {
+    url: String,
+    fetched_at: std::time::Instant,
+    keys: jsonwebtoken::jwk::JwkSet,
+}
+
+static JWKS_SNAPSHOT: tokio::sync::RwLock<Option<JwksSnapshot>> =
+    tokio::sync::RwLock::const_new(None);
+
+fn configured_auth_value(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn jwks_cache_ttl() -> std::time::Duration {
+    let seconds = configured_auth_value("AUTH_JWKS_CACHE_SECONDS")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(300);
+    std::time::Duration::from_secs(seconds.min(86_400))
+}
+
+fn auth_validation() -> jsonwebtoken::Validation {
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    // A JWKS issuer should never be accepted with an algorithm chosen by the
+    // token. Keep the allow-list explicit and independent of key metadata.
+    validation.algorithms = vec![
+        jsonwebtoken::Algorithm::RS256,
+        jsonwebtoken::Algorithm::RS384,
+        jsonwebtoken::Algorithm::RS512,
+        jsonwebtoken::Algorithm::ES256,
+        jsonwebtoken::Algorithm::ES384,
+        jsonwebtoken::Algorithm::EdDSA,
+    ];
+    if let Some(issuer) = configured_auth_value("AUTH_ISSUER") {
+        validation.set_issuer(&[issuer]);
+        validation.required_spec_claims.insert("iss".to_string());
+    }
+    if let Some(audience) = configured_auth_value("AUTH_AUDIENCE") {
+        validation.set_audience(&[audience]);
+        validation.required_spec_claims.insert("aud".to_string());
+    }
+    validation
+}
+
+async fn fetch_jwks(url: &str) -> Result<jsonwebtoken::jwk::JwkSet, ()> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|_| ())?;
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| ())?
+        .error_for_status()
+        .map_err(|_| ())?
+        .json::<jsonwebtoken::jwk::JwkSet>()
+        .await
+        .map_err(|_| ())
+}
+
+async fn jwks_key(kid: &str, force_refresh: bool) -> Option<jsonwebtoken::DecodingKey> {
+    let url = configured_auth_value("AUTH_JWKS_URL")?;
+    let now = std::time::Instant::now();
+    let cached = JWKS_SNAPSHOT.read().await.clone();
+    let needs_refresh = force_refresh
+        || cached
+            .as_ref()
+            .is_none_or(|snapshot| {
+                snapshot.url != url
+                    || now.duration_since(snapshot.fetched_at) >= jwks_cache_ttl()
+            });
+    if needs_refresh {
+        // Serialize refreshes so a key rotation cannot stampede the identity
+        // provider when many requests arrive with the new `kid`.
+        let mut guard = JWKS_SNAPSHOT.write().await;
+        let still_fresh = guard.as_ref().is_some_and(|snapshot| {
+            !force_refresh
+                && snapshot.url == url
+                && now.duration_since(snapshot.fetched_at) < jwks_cache_ttl()
+        });
+        if !still_fresh {
+            let fetched = fetch_jwks(&url).await.ok()?;
+            *guard = Some(JwksSnapshot {
+                url: url.clone(),
+                fetched_at: std::time::Instant::now(),
+                keys: fetched,
+            });
+        }
+    }
+    let guard = JWKS_SNAPSHOT.read().await;
+    guard
+        .as_ref()?
+        .keys
+        .find(kid)
+        .and_then(|jwk| jsonwebtoken::DecodingKey::from_jwk(jwk).ok())
+}
+
+async fn decode_bearer(token: &str) -> Option<Claims> {
+    if configured_auth_value("AUTH_JWKS_URL").is_some() {
+        let header = jsonwebtoken::decode_header(token).ok()?;
+        let kid = header.kid.as_deref()?;
+        let key = match jwks_key(kid, false).await {
+            Some(key) => key,
+            None => jwks_key(kid, true).await?,
+        };
+        let mut validation = auth_validation();
+        validation
+            .algorithms
+            .retain(|algorithm| *algorithm == header.alg);
+        if validation.algorithms.is_empty() {
+            return None;
+        }
+        jsonwebtoken::decode::<Claims>(token, &key, &validation)
+            .ok()
+            .map(|data| data.claims)
+    } else {
+        let secret = configured_auth_value("AUTH_JWT_SECRET")?;
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+        if let Some(issuer) = configured_auth_value("AUTH_ISSUER") {
+            validation.set_issuer(&[issuer]);
+            validation.required_spec_claims.insert("iss".to_string());
+        }
+        if let Some(audience) = configured_auth_value("AUTH_AUDIENCE") {
+            validation.set_audience(&[audience]);
+            validation.required_spec_claims.insert("aud".to_string());
+        }
+        jsonwebtoken::decode::<Claims>(
+            token,
+            &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
+            &validation,
+        )
+        .ok()
+        .map(|data| data.claims)
+    }
 }
 
 async fn auth_user(service: &'static str, mut request: Request, next: Next) -> Response {
@@ -308,16 +451,15 @@ async fn auth_user(service: &'static str, mut request: Request, next: Next) -> R
     // Authenticated identity is the only trusted source for these internal headers.
     request.headers_mut().remove("x-user-id");
     request.headers_mut().remove("x-user-roles");
-    let Some(secret) = env::var("AUTH_JWT_SECRET")
-        .ok()
-        .filter(|value| !value.is_empty())
-    else {
+    if configured_auth_value("AUTH_JWKS_URL").is_none()
+        && configured_auth_value("AUTH_JWT_SECRET").is_none()
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "AUTH_JWT_SECRET is required\n",
+            "AUTH_JWT_SECRET or AUTH_JWKS_URL is required\n",
         )
             .into_response();
-    };
+    }
     let Some(token) = request
         .headers()
         .get("authorization")
@@ -326,16 +468,10 @@ async fn auth_user(service: &'static str, mut request: Request, next: Next) -> R
     else {
         return (StatusCode::UNAUTHORIZED, "bearer token required\n").into_response();
     };
-    let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
-    let claims = match jsonwebtoken::decode::<Claims>(
-        token,
-        &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    ) {
-        Ok(data) if !data.claims.sub.trim().is_empty() => data.claims,
+    let claims = match decode_bearer(token).await {
+        Some(claims) if !claims.sub.trim().is_empty() => claims,
         _ => return (StatusCode::UNAUTHORIZED, "invalid bearer token\n").into_response(),
     };
-    let _expires_at = claims.exp;
     let user_id = match HeaderValue::try_from(claims.sub) {
         Ok(value) => value,
         Err(_) => return (StatusCode::UNAUTHORIZED, "invalid bearer token\n").into_response(),

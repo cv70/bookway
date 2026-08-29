@@ -1,5 +1,5 @@
 mod candidate;
-mod semantic;
+pub(crate) mod semantic;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -748,10 +748,10 @@ mod tests {
     use crate::{
         api::pb,
         conf::{Config, SourceBlend},
-        datasource::semantic::SemanticRecallDataSource,
+        domain::recall::semantic::SemanticRecallClients,
     };
 
-    fn recall_domain(bbs_link_url: &str, semantic: Option<SemanticRecallDataSource>) -> Domain {
+    fn recall_domain(bbs_link_url: &str, semantic: Option<SemanticRecallClients>) -> Domain {
         Domain {
             config: Config {
                 listen_addr: "127.0.0.1:0".parse().expect("valid address"),
@@ -1477,8 +1477,8 @@ mod tests {
         format!("http://{address}")
     }
 
-    fn semantic_clients(catalog_url: &str, search_url: &str) -> SemanticRecallDataSource {
-        SemanticRecallDataSource {
+    fn semantic_clients(catalog_url: &str, search_url: &str) -> SemanticRecallClients {
+        SemanticRecallClients {
             catalog: lazy_client(catalog_url, KnowledgeCatalogClient::new),
             search: lazy_client(search_url, BbsSearchClient::new),
         }

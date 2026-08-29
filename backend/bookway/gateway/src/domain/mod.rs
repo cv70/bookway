@@ -872,11 +872,19 @@ impl Domain {
         &self,
         mut request: search_pb::SearchRequest,
     ) -> Result<SearchDiscovery, UpstreamError> {
+        // Keep anonymous requests anonymous all the way through the search
+        // graph. A synthetic identity would create a shared visibility bucket
+        // and could attach another visitor's participation facts.
         let user_id = request
             .user_id
-            .clone()
-            .unwrap_or_else(|| "anonymous".to_string());
-        let excluded_author_ids = self.visibility(&user_id).await?;
+            .take()
+            .filter(|user_id| !user_id.trim().is_empty())
+            .map(|user_id| user_id.trim().to_string());
+        request.user_id = user_id.clone();
+        let excluded_author_ids = match user_id.as_deref() {
+            Some(user_id) => self.visibility(user_id).await?,
+            None => Vec::new(),
+        };
         request.excluded_author_ids = excluded_author_ids.clone();
         let mut response = grpc_call!(self, search_main, "search-main", search, request)?;
         let creator_profiles = self
@@ -895,7 +903,10 @@ impl Domain {
                 bbs,
                 "bbs",
                 route_context,
-                bbs_pb::RouteContextRequest { user_id, route_ids }
+                bbs_pb::RouteContextRequest {
+                    user_id: user_id.unwrap_or_default(),
+                    route_ids,
+                }
             );
             match context {
                 Ok(context) => {
@@ -904,16 +915,14 @@ impl Domain {
                         .iter_mut()
                         .filter_map(|item| item.post.as_mut())
                     {
-                        post.join_count = post.join_count.saturating_add(
-                            u32::try_from(
-                                context
-                                    .participant_counts
-                                    .get(&post.id)
-                                    .copied()
-                                    .unwrap_or_default(),
-                            )
-                            .unwrap_or(u32::MAX),
-                        );
+                        // BBS owns participation. The count is assigned from
+                        // the fact just read, never accumulated onto whatever
+                        // the search index happened to carry.
+                        post.join_count = context
+                            .participant_counts
+                            .get(&post.id)
+                            .copied()
+                            .map(|count| u32::try_from(count).unwrap_or(u32::MAX));
                     }
                 }
                 Err(error) => {
@@ -933,6 +942,11 @@ impl Domain {
         user_id: String,
         query: String,
     ) -> Result<search_pb::SuggestionsResponse, UpstreamError> {
+        let viewer_id = (!user_id.trim().is_empty()).then_some(user_id.clone());
+        let excluded_author_ids = match viewer_id.as_deref() {
+            Some(user_id) => self.visibility(user_id).await?,
+            None => Vec::new(),
+        };
         grpc_call!(
             self,
             search_main,
@@ -940,8 +954,8 @@ impl Domain {
             suggestions,
             search_pb::SuggestionsRequest {
                 q: query,
-                user_id: Some(user_id.clone()),
-                excluded_author_ids: self.visibility(&user_id).await?,
+                user_id: viewer_id,
+                excluded_author_ids,
             }
         )
     }
@@ -1784,6 +1798,12 @@ impl Domain {
     }
 
     async fn visibility(&self, user_id: &str) -> Result<Vec<String>, UpstreamError> {
+        // Public reads are available to anonymous viewers. BBS visibility is
+        // identity-scoped and rejects an empty user id, so skip that lookup
+        // instead of manufacturing a shared sentinel identity.
+        if user_id.trim().is_empty() {
+            return Ok(Vec::new());
+        }
         let visibility = grpc_call!(
             self,
             bbs,
@@ -2547,6 +2567,26 @@ fn route_journey_request(
             completion_criteria: stage.completion_criteria.clone(),
         })
         .collect();
+    // Public stages carry stable ids; the private Journey mints its own. The
+    // position below is only a pointer into the `stages` payload of this very
+    // request, which Growth creates in order — it is never stored as identity.
+    let stage_positions = template
+        .stages
+        .iter()
+        .enumerate()
+        .filter_map(|(position, stage)| {
+            u32::try_from(position)
+                .ok()
+                .map(|position| (stage.id.trim(), position))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let stage_position = |action: &bbs_link_pb::RouteTemplateAction| {
+        action
+            .stage_id
+            .as_deref()
+            .map(str::trim)
+            .and_then(|stage_id| stage_positions.get(stage_id).copied())
+    };
     let additional_actions = template
         .actions
         .iter()
@@ -2556,7 +2596,7 @@ fn route_journey_request(
             detail: action.detail.clone(),
             estimated_minutes: action.estimated_minutes,
             scheduled_label: action.scheduled_label.clone(),
-            stage_index: action.stage_index,
+            stage_index: stage_position(action),
         })
         .collect();
     Ok(growth_pb::CreateRouteJourneyRequest {
@@ -2577,7 +2617,7 @@ fn route_journey_request(
             first_action_scheduled_label: Some(first_action.scheduled_label.clone()),
             first_action_scheduled_for: None,
             first_action_scheduled_timezone: None,
-            first_action_stage_index: first_action.stage_index,
+            first_action_stage_index: stage_position(first_action),
             first_action_recurrence: None,
             idempotency_key: None,
         }),
@@ -3044,11 +3084,13 @@ mod tests {
                 completion_criteria: "完成四次主题阅读和一次回望".to_string(),
                 stages: vec![
                     bbs_link_pb::RouteTemplateStage {
+                        id: "stage-topic".to_string(),
                         title: "选题".to_string(),
                         detail: "选择一个真实问题".to_string(),
                         completion_criteria: "确定阅读问题".to_string(),
                     },
                     bbs_link_pb::RouteTemplateStage {
+                        id: "stage-review".to_string(),
                         title: "回望".to_string(),
                         detail: "把结论写成自己的话".to_string(),
                         completion_criteria: "写下一次调整".to_string(),
@@ -3061,7 +3103,7 @@ mod tests {
                         detail: "只选最相关的一本".to_string(),
                         estimated_minutes: 15,
                         scheduled_label: "今天".to_string(),
-                        stage_index: Some(0),
+                        stage_id: Some("stage-topic".to_string()),
                         scene_equipment: vec!["阅读清单".to_string()],
                     },
                     bbs_link_pb::RouteTemplateAction {
@@ -3070,7 +3112,7 @@ mod tests {
                         detail: "记录这个方法是否适合自己".to_string(),
                         estimated_minutes: 20,
                         scheduled_label: "第四周".to_string(),
-                        stage_index: Some(1),
+                        stage_id: Some("stage-review".to_string()),
                         scene_equipment: vec!["复盘笔记本".to_string()],
                     },
                 ],
@@ -3086,6 +3128,102 @@ mod tests {
         assert_eq!(journey.first_action_stage_index, Some(0));
         assert_eq!(request.additional_actions.len(), 1);
         assert_eq!(request.additional_actions[0].stage_index, Some(1));
+    }
+
+    /// Stage identity is the author-declared id, so reordering the public
+    /// stages must carry each action to the same stage in the private plan.
+    /// Positional identity would have silently swapped the two actions here.
+    #[test]
+    fn reordered_public_stages_keep_each_action_on_its_own_stage() {
+        let stage_topic = bbs_link_pb::RouteTemplateStage {
+            id: "stage-topic".to_string(),
+            title: "选题".to_string(),
+            detail: "选择一个真实问题".to_string(),
+            completion_criteria: "确定阅读问题".to_string(),
+        };
+        let stage_review = bbs_link_pb::RouteTemplateStage {
+            id: "stage-review".to_string(),
+            title: "回望".to_string(),
+            detail: "把结论写成自己的话".to_string(),
+            completion_criteria: "写下一次调整".to_string(),
+        };
+        let actions = vec![
+            bbs_link_pb::RouteTemplateAction {
+                id: "reading-start".to_string(),
+                title: "选一本起步书".to_string(),
+                detail: "只选最相关的一本".to_string(),
+                estimated_minutes: 15,
+                scheduled_label: "今天".to_string(),
+                stage_id: Some("stage-topic".to_string()),
+                scene_equipment: Vec::new(),
+            },
+            bbs_link_pb::RouteTemplateAction {
+                id: "reading-reflect".to_string(),
+                title: "写一段回望".to_string(),
+                detail: "记录这个方法是否适合自己".to_string(),
+                estimated_minutes: 20,
+                scheduled_label: "第四周".to_string(),
+                stage_id: Some("stage-review".to_string()),
+                scene_equipment: Vec::new(),
+            },
+        ];
+        let template = |stages: Vec<bbs_link_pb::RouteTemplateStage>| bbs_link_pb::RouteTemplate {
+            intent: "建立不焦虑的阅读节奏".to_string(),
+            completion_criteria: "完成四次主题阅读和一次回望".to_string(),
+            stages,
+            actions: actions.clone(),
+            journey_type: bbs_link_pb::RouteTemplateKind::Habit as i32,
+        };
+
+        let reordered = route_journey_request(
+            "user-1",
+            "route-content",
+            &public_route_content(Some(template(vec![
+                stage_review.clone(),
+                stage_topic.clone(),
+            ]))),
+        )
+        .expect("public route template should be joinable");
+
+        let journey = reordered.journey.expect("journey request is populated");
+        assert_eq!(journey.stages[0].title, "回望");
+        // The first action still belongs to 选题, now at position 1.
+        assert_eq!(journey.first_action_stage_index, Some(1));
+        assert_eq!(reordered.additional_actions[0].stage_index, Some(0));
+    }
+
+    /// A stage reference that no longer resolves must degrade to "no stage"
+    /// rather than fall through to whatever occupies that array position.
+    #[test]
+    fn removed_public_stage_drops_the_reference_instead_of_repointing_it() {
+        let request = route_journey_request(
+            "user-1",
+            "route-content",
+            &public_route_content(Some(bbs_link_pb::RouteTemplate {
+                intent: "建立不焦虑的阅读节奏".to_string(),
+                completion_criteria: "完成四次主题阅读".to_string(),
+                stages: vec![bbs_link_pb::RouteTemplateStage {
+                    id: "stage-review".to_string(),
+                    title: "回望".to_string(),
+                    detail: "把结论写成自己的话".to_string(),
+                    completion_criteria: "写下一次调整".to_string(),
+                }],
+                actions: vec![bbs_link_pb::RouteTemplateAction {
+                    id: "reading-start".to_string(),
+                    title: "选一本起步书".to_string(),
+                    detail: "只选最相关的一本".to_string(),
+                    estimated_minutes: 15,
+                    scheduled_label: "今天".to_string(),
+                    stage_id: Some("stage-topic".to_string()),
+                    scene_equipment: Vec::new(),
+                }],
+                journey_type: bbs_link_pb::RouteTemplateKind::Habit as i32,
+            })),
+        )
+        .expect("public route template should be joinable");
+
+        let journey = request.journey.expect("journey request is populated");
+        assert_eq!(journey.first_action_stage_index, None);
     }
 
     #[test]

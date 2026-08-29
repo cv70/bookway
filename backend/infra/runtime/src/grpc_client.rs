@@ -43,10 +43,7 @@ pub async fn grpc_channel(url: &str) -> Result<Channel, ConnectFailure> {
         .await
         .map_err(|source| {
             warn!(%url, %source, "grpc upstream connect failed");
-            ConnectFailure::Connect {
-                url: owned,
-                source,
-            }
+            ConnectFailure::Connect { url: owned, source }
         })
 }
 
@@ -74,15 +71,15 @@ impl CircuitBreaker {
         let threshold = std::env::var("GRPC_BREAKER_THRESHOLD")
             .ok()
             .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
             .unwrap_or(5);
-        let cooldown =
-            env_duration("GRPC_BREAKER_COOLDOWN_MS", 5_000);
+        let cooldown = env_duration("GRPC_BREAKER_COOLDOWN_MS", 5_000);
         Self::new(threshold, cooldown)
     }
 
     pub fn new(threshold: usize, cooldown: Duration) -> Self {
         Self {
-            threshold,
+            threshold: threshold.max(1),
             cooldown,
             state: Mutex::new(BreakerState::default()),
             probing: AtomicBool::new(false),
@@ -147,12 +144,18 @@ impl CircuitBreaker {
 
     #[cfg(test)]
     fn failures(&self) -> usize {
-        self.state.lock().map(|state| state.consecutive_failures).unwrap_or(0)
+        self.state
+            .lock()
+            .map(|state| state.consecutive_failures)
+            .unwrap_or(0)
     }
 
     #[cfg(test)]
     fn is_open(&self) -> bool {
-        self.state.lock().map(|state| state.opened_at.is_some()).unwrap_or(false)
+        self.state
+            .lock()
+            .map(|state| state.opened_at.is_some())
+            .unwrap_or(false)
     }
 }
 
@@ -193,6 +196,13 @@ mod tests {
         assert!(!breaker.is_open());
         assert!(breaker.execute(ok_call()).await.is_ok());
         assert_eq!(breaker.failures(), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_threshold_is_clamped_to_one() {
+        let breaker = CircuitBreaker::new(0, Duration::from_millis(50));
+        let _ = breaker.execute(fail_call()).await;
+        assert!(breaker.is_open());
     }
 
     #[tokio::test]

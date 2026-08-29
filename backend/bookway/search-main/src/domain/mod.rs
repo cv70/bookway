@@ -398,11 +398,12 @@ impl Domain {
             .await;
         session.delivered_count += page.len();
         let mut ad_degraded = false;
-        // Search ads are a first-page contextual mix. Organic exposure is
-        // persisted above so ad delivery never becomes a fake search result
-        // in attribution or pagination state. Displaced organic tail items
-        // go back to the pending buffer head in order, so the next page
-        // resumes exactly where this one's commercial slots cut it short.
+        // Search ads are a first-page contextual mix. The exposure ledger below
+        // filters ads out of its item rows, while retaining each organic result's
+        // visual position, so ad delivery never becomes a fake search result in
+        // attribution or pagination state. Displaced organic tail items go back
+        // to the pending buffer head in order, so the next page resumes exactly
+        // where this one's commercial slots cut it short.
         let ad_slots = SEARCH_AD_POLICY.ad_slots_for(limit);
         if request.cursor.is_none()
             && ad_slots > 0
@@ -483,41 +484,50 @@ impl Domain {
             None
         };
         let request_id = Uuid::now_v7().to_string();
-        let user_id = request
+        // Anonymous searches still receive a request id for client tracing,
+        // but never write a shared synthetic identity to the attribution
+        // ledger. A common "anonymous" row would let unrelated visitors
+        // collide on session/result checks and pollute training data.
+        let exposure_degraded = if let Some(user_id) = request
             .user_id
-            .clone()
-            .unwrap_or_else(|| "anonymous".to_string());
-        let tracking_session_id = request
-            .session_id
-            .clone()
-            .filter(|session_id| !session_id.trim().is_empty())
-            .unwrap_or_else(|| "anonymous-search-session".to_string());
-        let exposure = SearchExposure {
-            request_id: request_id.clone(),
-            user_id,
-            session_id: tracking_session_id,
-            query_hash: format!("{:016x}", stable_hash(&plan.original_query)),
-            query_rewrite_version: session.query_rewrite_version.clone(),
-            degraded: session.degraded,
-            items: page
-                .iter()
-                .enumerate()
-                .filter(|(_, result)| result.ad.is_none())
-                .map(|(position, result)| SearchExposureItem {
-                    position,
-                    result_id: result.id.clone(),
-                    result_type: pb::SearchResultType::try_from(result.result_type)
-                        .map_or("unknown", |result_type| result_type.as_str_name())
-                        .to_string(),
-                })
-                .collect(),
-        };
-        let exposure_degraded = match self.exposures.record(exposure).await {
-            Ok(()) => false,
-            Err(error) => {
-                tracing::warn!(%error, request_id = %request_id, "search exposure persistence degraded");
-                true
+            .as_deref()
+            .map(str::trim)
+            .filter(|user_id| !user_id.is_empty())
+        {
+            let tracking_session_id = request
+                .session_id
+                .clone()
+                .filter(|session_id| !session_id.trim().is_empty())
+                .unwrap_or_else(|| "anonymous-search-session".to_string());
+            let exposure = SearchExposure {
+                request_id: request_id.clone(),
+                user_id: user_id.to_string(),
+                session_id: tracking_session_id,
+                query_hash: format!("{:016x}", stable_hash(&plan.original_query)),
+                query_rewrite_version: session.query_rewrite_version.clone(),
+                degraded: session.degraded,
+                items: page
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, result)| result.ad.is_none())
+                    .map(|(position, result)| SearchExposureItem {
+                        position,
+                        result_id: result.id.clone(),
+                        result_type: pb::SearchResultType::try_from(result.result_type)
+                            .map_or("unknown", |result_type| result_type.as_str_name())
+                            .to_string(),
+                    })
+                    .collect(),
+            };
+            match self.exposures.record(exposure).await {
+                Ok(()) => false,
+                Err(error) => {
+                    tracing::warn!(%error, request_id = %request_id, "search exposure persistence degraded");
+                    true
+                }
             }
+        } else {
+            false
         };
         tracing::debug!(
             query_hash = format_args!("{:016x}", stable_hash(&plan.original_query)),
@@ -945,11 +955,12 @@ impl Domain {
         reconcile_pending_results(candidates, summaries)
     }
 
-    /// Replaces the index-stored join counts on route results with the live
-    /// participation facts owned by BBS. The read is counts-only (anonymous
-    /// when the searcher is not signed in) and fails open: a degraded BBS
-    /// keeps whatever the authoritative summary already carried instead of
-    /// blocking the response.
+    /// Attaches the live participation facts owned by BBS to route results.
+    /// The index never stores a companion count, so the field is absent until
+    /// this read fills it. The read is counts-only (anonymous when the searcher
+    /// is not signed in) and fails open: a degraded BBS leaves the count
+    /// absent — which the client renders as unknown, not as zero companions —
+    /// instead of blocking the response.
     async fn hydrate_route_join_counts(
         &self,
         page: &mut [pb::SearchResult],
@@ -987,9 +998,11 @@ impl Domain {
                     let Some(post) = item.post.as_mut() else {
                         continue;
                     };
-                    if let Some(live_count) = context.participant_counts.get(&item.id) {
-                        post.join_count = u32::try_from(*live_count).unwrap_or(u32::MAX);
-                    }
+                    post.join_count = context
+                        .participant_counts
+                        .get(&item.id)
+                        .copied()
+                        .map(|count| u32::try_from(count).unwrap_or(u32::MAX));
                 }
             }
             Ok(Err(error)) => {
@@ -1061,19 +1074,34 @@ impl Domain {
     }
 }
 
+/// The public content id a result must be revalidated against, or `None` when
+/// the result does not stand for a content item at all (users, topics,
+/// resources). Node and equipment results are keyed by the action-node or gear
+/// label, not by a content id — but they carry the enclosing route's card, so
+/// they must be revalidated against THAT route. Skipping them let a deleted or
+/// restricted route keep rendering, complete with title, cover and author, in
+/// the Nodes and Equipment tabs.
+fn revalidation_content_id(candidate: &pb::SearchResult) -> Option<&str> {
+    match pb::SearchResultType::try_from(candidate.result_type) {
+        Ok(pb::SearchResultType::Post | pb::SearchResultType::Journey) => Some(&candidate.id),
+        Ok(pb::SearchResultType::ActionNode | pb::SearchResultType::SceneEquipment) => candidate
+            .post
+            .as_ref()
+            .map(|post| post.id.as_str()),
+        _ => None,
+    }
+}
+
 fn pending_content_ids(
     candidates: &[pb::SearchResult],
 ) -> Result<BTreeSet<String>, SearchMainError> {
     let mut ids = BTreeSet::new();
     for candidate in candidates {
-        if !matches!(
-            pb::SearchResultType::try_from(candidate.result_type),
-            Ok(pb::SearchResultType::Post | pb::SearchResultType::Journey)
-        ) {
+        let Some(content_id) = revalidation_content_id(candidate) else {
             continue;
-        }
-        let id = candidate.id.trim();
-        if id.is_empty() || id != candidate.id {
+        };
+        let id = content_id.trim();
+        if id.is_empty() || id != content_id {
             return Err(SearchMainError::InvalidContentSummary);
         }
         ids.insert(id.to_string());
@@ -1183,16 +1211,47 @@ fn reconcile_pending_results(
 
     Ok(candidates
         .into_iter()
-        .filter_map(
-            |candidate| match pb::SearchResultType::try_from(candidate.result_type) {
-                Ok(pb::SearchResultType::Post | pb::SearchResultType::Journey) => authoritative
-                    .get(&candidate.id)
-                    .map(|summary| search_result_from_summary(candidate, summary)),
-                // User and topic candidates do not represent a public content item.
-                _ => Some(candidate),
-            },
-        )
+        .filter_map(|candidate| {
+            let Some(content_id) = revalidation_content_id(&candidate).map(str::to_string) else {
+                // Users, topics and catalog resources do not stand for a public
+                // content item and have nothing to revalidate against.
+                return Some(candidate);
+            };
+            let summary = authoritative.get(&content_id)?;
+            match pb::SearchResultType::try_from(candidate.result_type) {
+                Ok(pb::SearchResultType::ActionNode | pb::SearchResultType::SceneEquipment) => {
+                    // The node/gear identity is the result's own; only the route
+                    // card it carries is refreshed from the authoritative read,
+                    // and the whole result is dropped when the route is gone.
+                    Some(refresh_carried_route_card(candidate, summary))
+                }
+                _ => Some(search_result_from_summary(candidate, summary)),
+            }
+        })
         .collect())
+}
+
+/// Replaces the enclosing route card on a node or equipment result with the
+/// authoritative summary, leaving the node's own identity, title and score
+/// untouched. Only routes carry nodes, so a summary whose content type is not
+/// a route means the index is stale about this result's shape.
+fn refresh_carried_route_card(
+    mut candidate: pb::SearchResult,
+    summary: &bbs_link_pb::PublicContentSummary,
+) -> pb::SearchResult {
+    let post = summary
+        .post
+        .as_ref()
+        .expect("authoritative summaries are validated before rebuilding results");
+    candidate.author_id = Some(summary.author_id.clone());
+    candidate.author_name = Some(post.author_name.clone());
+    candidate.cover_url = non_empty(&post.cover_url);
+    candidate.domain = Some(search_growth_domain(post.domain));
+    candidate.post = Some(search_post_summary(
+        post.clone(),
+        summary.route_actions.clone(),
+    ));
+    candidate
 }
 
 fn search_result_from_summary(
@@ -2060,6 +2119,17 @@ mod tests {
     }
 
     async fn service(source: Arc<RecordingSearchSource>) -> Domain {
+        service_with_exposure_store(
+            source,
+            Arc::new(MemorySearchExposureStore::default()),
+        )
+        .await
+    }
+
+    async fn service_with_exposure_store(
+        source: Arc<RecordingSearchSource>,
+        exposures: SharedSearchExposureStore,
+    ) -> Domain {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("allocate test server port");
         let address = listener.local_addr().expect("read test server address");
         drop(listener);
@@ -2078,7 +2148,7 @@ mod tests {
                 return Domain::with_test_dependencies(
                     search_client,
                     Arc::new(MemorySearchSessionStore::default()),
-                    Arc::new(MemorySearchExposureStore::default()),
+                    exposures.clone(),
                 );
             }
             sleep(Duration::from_millis(10)).await;
@@ -2247,6 +2317,78 @@ mod tests {
         }
     }
 
+    /// Node and equipment results are keyed by the action-node id or the gear
+    /// label, so they used to slip past revalidation entirely — a deleted or
+    /// restricted route kept rendering its title, cover and author in the Nodes
+    /// and Equipment tabs. They must be revalidated against the route card they
+    /// carry, and dropped with it.
+    #[tokio::test]
+    async fn node_and_equipment_results_are_revalidated_against_their_route() {
+        let carried = |result_type: pb::SearchResultType, id: &str, route_id: &str| {
+            pb::SearchResult {
+                id: id.to_string(),
+                result_type: result_type as i32,
+                title: "索引里的节点标题".to_string(),
+                snippet: "索引快照".to_string(),
+                cover_url: Some("https://cdn.example/stale.jpg".to_string()),
+                author_id: Some("stale-author".to_string()),
+                author_name: Some("索引里的作者".to_string()),
+                domain: Some(pb::GrowthDomain::Learning as i32),
+                score: 3.5,
+                highlights: vec!["节点命中".to_string()],
+                post: Some(pb::PostSummary {
+                    id: route_id.to_string(),
+                    title: "索引里的路线标题".to_string(),
+                    ..Default::default()
+                }),
+                resource: None,
+                ad: None,
+            }
+        };
+
+        let reconciled = reconcile_pending_results(
+            vec![
+                carried(pb::SearchResultType::ActionNode, "node-1", "route-live"),
+                carried(
+                    pb::SearchResultType::SceneEquipment,
+                    "跑鞋",
+                    "route-withdrawn",
+                ),
+            ],
+            bbs_link_pb::PublicContentSummaries {
+                items: vec![public_summary(
+                    "route-live",
+                    "route-author",
+                    bbs_link_pb::ContentType::Route,
+                    "当前路线标题",
+                    "当前路线摘要",
+                    bbs_link_pb::GrowthDomain::Travel,
+                )],
+            },
+        )
+        .expect("reconciliation should accept a valid authoritative read");
+
+        assert_eq!(
+            reconciled.len(),
+            1,
+            "a node whose route is no longer public must be dropped"
+        );
+        let node = &reconciled[0];
+        // The node keeps its own identity, title and score...
+        assert_eq!(node.id, "node-1");
+        assert_eq!(node.result_type, pb::SearchResultType::ActionNode as i32);
+        assert_eq!(node.title, "索引里的节点标题");
+        assert!((node.score - 3.5).abs() < f64::EPSILON);
+        // ...while the route card it carries comes from the authoritative read.
+        assert_eq!(node.author_id.as_deref(), Some("route-author"));
+        assert_eq!(node.author_name.as_deref(), Some("当前作者-route-live"));
+        assert_eq!(node.domain, Some(pb::GrowthDomain::Travel as i32));
+        assert_eq!(
+            node.post.as_ref().map(|post| post.title.as_str()),
+            Some("当前路线标题")
+        );
+    }
+
     fn public_summary(
         id: &str,
         author_id: &str,
@@ -2267,7 +2409,7 @@ mod tests {
                 cover_url: format!("https://cdn.example/{id}.jpg"),
                 route_title: "当前路线".to_string(),
                 route_duration: "30 分钟".to_string(),
-                join_count: 12,
+                join_count: None,
                 like_count: 34,
                 freshness: 0.8,
                 tags: vec!["当前标签".to_string()],
@@ -2902,6 +3044,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anonymous_search_does_not_write_a_shared_exposure_identity() {
+        let source = Arc::new(RecordingSearchSource::default());
+        source
+            .respond(
+                "阅读",
+                None,
+                response(vec![item("post-1", "阅读笔记", 1.0)], None),
+            )
+            .await;
+        let exposures = Arc::new(MemorySearchExposureStore::default());
+        let service = service_with_exposure_store(source, exposures.clone()).await;
+
+        let search_response = service
+            .search(request("阅读"))
+            .await
+            .expect("anonymous search works");
+        assert!(!search_response.request_id.is_empty());
+        assert_eq!(
+            exposures.len().await,
+            0,
+            "anonymous traffic must not share one synthetic attribution row"
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_attribution_positions_outside_the_persistence_range() {
         let service = service(Arc::new(RecordingSearchSource::default())).await;
 
@@ -3199,13 +3366,13 @@ mod tests {
         panic!("connect to bbs participation test server");
     }
 
-    fn route_result(id: &str, stored_join_count: u32) -> pb::SearchResult {
+    fn route_result(id: &str) -> pb::SearchResult {
         pb::SearchResult {
             id: id.to_string(),
             result_type: pb::SearchResultType::Journey as i32,
             post: Some(pb::PostSummary {
                 id: id.to_string(),
-                join_count: stored_join_count,
+                join_count: None,
                 is_route: true,
                 ..Default::default()
             }),
@@ -3228,7 +3395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hydration_replaces_stored_join_counts_with_live_participation_facts() {
+    async fn hydration_attaches_live_participation_facts_and_leaves_the_rest_absent() {
         let (client, source) = participation_client(HashMap::from([(
             "route-live".to_string(),
             256,
@@ -3242,14 +3409,14 @@ mod tests {
         domain.bbs_client = Some(client);
 
         let mut page = vec![
-            route_result("route-live", 12),
-            route_result("route-absent", 12),
+            route_result("route-live"),
+            route_result("route-absent"),
             pb::SearchResult {
                 id: "post-plain".to_string(),
                 result_type: pb::SearchResultType::Post as i32,
                 post: Some(pb::PostSummary {
                     id: "post-plain".to_string(),
-                    join_count: 3,
+                    join_count: Some(3),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -3257,11 +3424,20 @@ mod tests {
         ];
         domain.hydrate_route_join_counts(&mut page, Some("walker")).await;
 
-        assert_eq!(page[0].post.as_ref().map(|post| post.join_count), Some(256));
-        assert_eq!(page[1].post.as_ref().map(|post| post.join_count), Some(12),
-            "routes without live facts keep their authoritative summary value");
-        assert_eq!(page[2].post.as_ref().map(|post| post.join_count), Some(3),
-            "non-route results are never hydrated");
+        assert_eq!(
+            page[0].post.as_ref().and_then(|post| post.join_count),
+            Some(256)
+        );
+        assert_eq!(
+            page[1].post.as_ref().and_then(|post| post.join_count),
+            None,
+            "a route BBS did not answer for claims no companion count at all"
+        );
+        assert_eq!(
+            page[2].post.as_ref().and_then(|post| post.join_count),
+            Some(3),
+            "non-route results are never hydrated"
+        );
         assert_eq!(source.last_seen_user_id().await.as_deref(), Some("walker"));
     }
 
@@ -3274,8 +3450,12 @@ mod tests {
         );
         domain.bbs_client = None;
 
-        let mut page = vec![route_result("route-live", 12)];
+        let mut page = vec![route_result("route-live")];
         domain.hydrate_route_join_counts(&mut page, None).await;
-        assert_eq!(page[0].post.as_ref().map(|post| post.join_count), Some(12));
+        assert_eq!(
+            page[0].post.as_ref().and_then(|post| post.join_count),
+            None,
+            "without BBS the response must not invent a companion count"
+        );
     }
 }

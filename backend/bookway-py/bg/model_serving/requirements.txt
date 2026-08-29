@@ -4,6 +4,10 @@ transformers>=4.44
 peft>=0.12
 accelerate>=0.33
 modelscope>=1.18
+# transformers 5.x converts MiniCPM's slow tokenizer at load time and refuses
+# to start without a converter. Without this the real snapshot fails to load
+# with "You need to have sentencepiece or tiktoken installed".
+sentencepiece>=0.2
 fastapi>=0.111
 uvicorn[standard]>=0.30
 pydantic>=2.7

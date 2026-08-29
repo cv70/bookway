@@ -44,21 +44,28 @@ impl Domain {
     }
 
     pub(crate) async fn features(&self, request: pb::FeaturesRequest) -> pb::FeaturesResponse {
+        let user_id = request.user_id.trim().to_string();
         let content_ids = normalize_content_ids(&request.content_ids);
+        // Empty identity is the anonymous lane. Never use it as a cache or
+        // database key: doing so would share one user's feature namespace with
+        // every anonymous request. Anonymous callers receive only safe priors.
+        if user_id.is_empty() {
+            return anonymous_features_response(&self.model_version);
+        }
         let mut values = HashMap::from([
             ("user_interest_strength".to_string(), 0.5),
             ("recent_positive_rate".to_string(), 0.2),
             ("negative_feedback_rate".to_string(), 0.0),
         ]);
         let user_features = async {
-            match self.cache.load(&request.user_id).await {
+            match self.cache.load(&user_id).await {
                 Some(features) => features,
                 None => {
                     // Serialize misses for the same user. The second read
                     // avoids a PostgreSQL stampede when a hot Redis key
                     // expires under concurrent recommendation requests.
-                    let miss_guard = self.cache.refresh_lock(&request.user_id).await;
-                    if let Some(features) = self.cache.load(&request.user_id).await {
+                    let miss_guard = self.cache.refresh_lock(&user_id).await;
+                    if let Some(features) = self.cache.load(&user_id).await {
                         miss_guard.release().await;
                         return features;
                     }
@@ -66,19 +73,19 @@ impl Domain {
                         miss_guard.release().await;
                         return HashMap::new();
                     }
-                    let features = self.dao.load(&request.user_id).await;
-                    self.cache.store(&request.user_id, &features).await;
+                    let features = self.dao.load(&user_id).await;
+                    self.cache.store(&user_id, &features).await;
                     miss_guard.release().await;
                     features
                 }
             }
         };
-        let candidate_features = self.dao.load_candidates(&request.user_id, &content_ids);
+        let candidate_features = self.dao.load_candidates(&user_id, &content_ids);
         let (persisted, candidate_features) = tokio::join!(user_features, candidate_features);
         values.extend(persisted);
         values.insert("candidate_count".to_string(), content_ids.len() as f64);
         pb::FeaturesResponse {
-            user_id: request.user_id,
+            user_id,
             model_version: self.model_version.clone(),
             recent_positive_rate: value(&values, "recent_positive_rate"),
             user_interest_strength: value(&values, "user_interest_strength"),
@@ -127,9 +134,29 @@ fn value(values: &HashMap<String, f64>, name: &str) -> f64 {
         .unwrap_or_default()
 }
 
+fn anonymous_features_response(model_version: &str) -> pb::FeaturesResponse {
+    pb::FeaturesResponse {
+        model_version: model_version.to_string(),
+        recent_positive_rate: 0.2,
+        user_interest_strength: 0.5,
+        negative_feedback_rate: 0.0,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anonymous_features_use_priors_without_a_user_namespace() {
+        let response = anonymous_features_response("feature-v1");
+        assert!(response.user_id.is_empty());
+        assert_eq!(response.model_version, "feature-v1");
+        assert_eq!(response.recent_positive_rate, 0.2);
+        assert_eq!(response.user_interest_strength, 0.5);
+        assert!(response.candidates.is_empty());
+    }
 
     #[test]
     fn builds_typed_feature_response() {

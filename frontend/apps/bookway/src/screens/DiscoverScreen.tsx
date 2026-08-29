@@ -232,7 +232,7 @@ export function DiscoverScreen({
     setSearching(true);
     const timer = setTimeout(() => {
       eventReporter.track({ event_type: 'search_submit', component_id: 'discover-search', source: 'mobile-search', content_id: undefined });
-      searchApi(trimmed)
+      searchApi(trimmed, undefined, contextualFeedContext)
         .then((response) => {
           if (requestId !== searchRequestId.current) return;
           setRecentQueries((current) => [trimmed, ...current.filter((item) => item !== trimmed)].slice(0, 6));
@@ -269,7 +269,7 @@ export function DiscoverScreen({
         });
     }, 260);
     return () => clearTimeout(timer);
-  }, [feed.items, query]);
+  }, [contextualFeedContext?.action_node_id, contextualFeedContext?.route_id, contextualFeedContext?.scene_equipment, feed.items, query]);
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -306,7 +306,7 @@ export function DiscoverScreen({
     const requestId = searchRequestId.current;
     loadingMoreRef.current = true;
     setLoadingMore(true);
-    searchApi(trimmed, cursor)
+    searchApi(trimmed, cursor, contextualFeedContext)
       .then((response) => {
         if (requestId !== searchRequestId.current) return;
         const attributedResponse = attachSearchAttribution(response);
@@ -328,7 +328,7 @@ export function DiscoverScreen({
         }
         // PIT-backed cursors are deliberately short-lived. Restart from page one so a user
         // can continue searching instead of retrying an expired cursor forever.
-        return searchApi(trimmed).then((response) => {
+        return searchApi(trimmed, undefined, contextualFeedContext).then((response) => {
           if (requestId === searchRequestId.current) setSearchResponse(attachSearchAttribution(response));
         }).catch(() => {
           // Keep already rendered results if the refresh itself cannot be completed.
@@ -494,7 +494,13 @@ export function DiscoverScreen({
       <View>
         {query
           ? visibleSearchResults?.map(({ result, attribution }) =>
-              result.post ? (
+              result.ad ? (
+                <FeedCard
+                  item={{ author_id: '', post: null, ad: result.ad, score: result.score, source: 'search-ad', reasons: [] }}
+                  key={`ad:${result.ad.request_id}:${result.ad.campaign_id}`}
+                  onAdPress={handleAdPress}
+                />
+              ) : result.post && result.result_type !== 'action_node' && result.result_type !== 'scene_equipment' ? (
                 <FeedCard
                   item={{ author_id: result.author_id ?? '', post: result.post, score: result.score, source: 'search', reasons: result.highlights, recommendation_context: attribution }}
                   bookmarked={bookmarkedPostIds?.has(result.id)}
@@ -509,6 +515,14 @@ export function DiscoverScreen({
                   onLike={onLike}
                   onOpen={onOpen}
                 />
+              ) : result.post && (result.result_type === 'action_node' || result.result_type === 'scene_equipment') ? (
+                <SearchEntityCard
+                  attribution={attribution}
+                  onOpen={onOpen}
+                  result={result}
+                />
+              ) : result.resource ? (
+                <SearchResourceCard attribution={attribution} result={result} />
               ) : (
                 <Pressable accessibilityLabel={result.result_type === 'user' ? `查看创作者${result.title}` : `搜索话题${result.title}`} key={result.id} onPress={() => openSearchResult(result)} style={({ pressed }) => [styles.resultRow, pressed && styles.pressed]}>
                   <Text style={styles.resultTitle}>{result.title}</Text>
@@ -558,6 +572,97 @@ export function DiscoverScreen({
         <View style={styles.empty}><Text style={styles.emptyText}>{mode === 'following' && !query ? '关注创作者后，他们的行记会出现在这里' : '这一页还在生长'}</Text></View>
       ) : null}
     </ScrollView>
+  );
+}
+
+function SearchEntityCard({
+  result,
+  attribution,
+  onOpen,
+}: {
+  result: SearchResult;
+  attribution: NonNullable<SearchResult['event_context']>;
+  onOpen?: (item: FeedItem) => void;
+}) {
+  const post = result.post;
+  if (!post) return null;
+  const entityLabel = result.result_type === 'action_node' ? '行动节点' : '场景装备';
+  const open = () => {
+    // The search exposure is keyed by the node/equipment result id, while the
+    // detail view opens its enclosing route. Record the entity click before
+    // delegating to the route detail handler so attribution remains exact.
+    eventReporter.track({
+      event_type: 'click',
+      component_id: 'search-entity-open',
+      content_id: result.id,
+      position: attribution.position,
+      request_id: attribution.request_id,
+      attribution_source: attribution.request_id ? 'search' : undefined,
+      source: 'mobile-search',
+    });
+    onOpen?.({
+      author_id: result.author_id ?? '',
+      post,
+      score: result.score,
+      source: 'search-entity',
+      reasons: result.highlights,
+      recommendation_context: attribution,
+    });
+  };
+  return (
+    <Pressable
+      accessibilityLabel={`查看${entityLabel}${result.title}`}
+      accessibilityRole="button"
+      key={`${result.result_type}:${result.id}`}
+      onPress={open}
+      style={({ pressed }) => [styles.entityCard, pressed && styles.pressed]}
+    >
+      <View style={styles.entityBadge}><Text style={styles.entityBadgeText}>{entityLabel}</Text></View>
+      <Text numberOfLines={2} style={styles.entityTitle}>{result.title}</Text>
+      <Text numberOfLines={2} style={styles.entitySnippet}>{result.snippet || post.summary}</Text>
+      <View style={styles.entityRoute}><Text numberOfLines={1} style={styles.entityRouteText}>路线 · {post.route_title || post.title}</Text><Text style={styles.entityOpen}>查看路线</Text></View>
+    </Pressable>
+  );
+}
+
+function SearchResourceCard({
+  result,
+  attribution,
+}: {
+  result: SearchResult;
+  attribution: NonNullable<SearchResult['event_context']>;
+}) {
+  const resource = result.resource;
+  if (!resource) return null;
+  const url = resource.url.trim();
+  const canOpen = url.startsWith('https://') || url.startsWith('http://');
+  const open = () => {
+    if (!canOpen) return;
+    eventReporter.track({
+      event_type: 'click',
+      component_id: 'search-resource-open',
+      content_id: result.id,
+      position: attribution.position,
+      request_id: attribution.request_id,
+      attribution_source: attribution.request_id ? 'search' : undefined,
+      source: 'mobile-search',
+    });
+    Linking.openURL(url).catch(() => undefined);
+  };
+  return (
+    <Pressable
+      accessibilityLabel={`打开资源${result.title}`}
+      accessibilityRole="button"
+      disabled={!canOpen}
+      key={`resource:${result.id}`}
+      onPress={open}
+      style={({ pressed }) => [styles.resourceResultCard, !canOpen && styles.resourceResultDisabled, pressed && styles.pressed]}
+    >
+      <View style={styles.resourceResultTop}><Text style={styles.resourceResultKind}>{resource.kind || 'resource'}</Text><Text numberOfLines={1} style={styles.resourceResultProvider}>{resource.provider}</Text></View>
+      <Text numberOfLines={2} style={styles.resourceResultTitle}>{result.title}</Text>
+      {result.snippet ? <Text numberOfLines={2} style={styles.resourceResultSummary}>{result.snippet}</Text> : null}
+      <Text numberOfLines={1} style={styles.resourceResultCitation}>{resource.citation}</Text>
+    </Pressable>
   );
 }
 
@@ -632,6 +737,22 @@ const styles = StyleSheet.create({
   resultRow: { paddingHorizontal: 20, paddingVertical: 15, backgroundColor: colors.surface, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
   resultTitle: { color: colors.ink, fontSize: 15, fontWeight: '700', letterSpacing: 0 },
   resultSnippet: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4, letterSpacing: 0 },
+  entityCard: { marginHorizontal: 16, marginBottom: 10, padding: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.evergreenSoft, borderRadius: 7 },
+  entityBadge: { alignSelf: 'flex-start', paddingHorizontal: 7, paddingVertical: 3, borderRadius: 4, backgroundColor: colors.evergreenSoft },
+  entityBadgeText: { color: colors.evergreen, fontSize: 10, fontWeight: '700', letterSpacing: 0 },
+  entityTitle: { color: colors.ink, fontSize: 16, lineHeight: 22, fontWeight: '700', marginTop: 8, letterSpacing: 0 },
+  entitySnippet: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 4, letterSpacing: 0 },
+  entityRoute: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 10, paddingTop: 9, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
+  entityRouteText: { flex: 1, color: colors.faint, fontSize: 11, letterSpacing: 0 },
+  entityOpen: { color: colors.evergreen, fontSize: 11, fontWeight: '700', letterSpacing: 0 },
+  resourceResultCard: { marginHorizontal: 16, marginBottom: 10, padding: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 7 },
+  resourceResultDisabled: { opacity: 0.65 },
+  resourceResultTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  resourceResultKind: { color: colors.blue, fontSize: 10, fontWeight: '700', letterSpacing: 0 },
+  resourceResultProvider: { flex: 1, color: colors.faint, fontSize: 10, textAlign: 'right', letterSpacing: 0 },
+  resourceResultTitle: { color: colors.ink, fontSize: 15, lineHeight: 21, fontWeight: '700', marginTop: 8, letterSpacing: 0 },
+  resourceResultSummary: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 4, letterSpacing: 0 },
+  resourceResultCitation: { color: colors.faint, fontSize: 10, lineHeight: 15, marginTop: 8, letterSpacing: 0 },
   degraded: { marginHorizontal: 20, marginTop: 12, color: colors.muted, fontSize: 12, lineHeight: 18, letterSpacing: 0 },
   loadMore: { minHeight: 42, marginHorizontal: 16, marginTop: 14, alignItems: 'center', justifyContent: 'center', borderRadius: 6, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
   loadMoreDisabled: { opacity: 0.65 },

@@ -138,7 +138,9 @@ function viewerClaims(): ViewerClaims | undefined {
 }
 
 export function viewerUserId(): string | undefined {
-  if (!AUTH_TOKEN) return 'demo-user';
+  // No token means an anonymous viewer. Never invent a shared demo identity:
+  // doing so would merge private actions, reactions and analytics across users.
+  if (!AUTH_TOKEN) return undefined;
   const claims = viewerClaims();
   return typeof claims?.sub === 'string' && claims.sub.trim() ? claims.sub : undefined;
 }
@@ -160,7 +162,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      ...(AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : { 'x-user-id': 'demo-user' }),
+      ...(AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {}),
       ...init?.headers,
     },
   });
@@ -202,6 +204,19 @@ export function updateReminderPreferences(input: ReminderPreferencesInput): Prom
     method: 'PUT',
     body: JSON.stringify(input),
   });
+}
+
+export function registerPushDevice(input: { device_id: string; provider: 'expo' | 'fcm' | 'apns'; endpoint: string }): Promise<{ device_id: string; provider: number; active: boolean; updated_at: string }> {
+  return request('/v1/push-devices', {
+    method: 'POST',
+    // The Gateway endpoint accepts the generated protobuf request directly,
+    // so enum values are numeric on the wire (PushProvider.EXPO = 0).
+    body: JSON.stringify({ ...input, provider: input.provider === 'expo' ? 0 : input.provider === 'fcm' ? 1 : 2 }),
+  });
+}
+
+export function revokePushDevice(deviceId: string): Promise<void> {
+  return request(`/v1/push-devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
 }
 
 export function getNotifications(cursor?: string, unreadOnly = false): Promise<NotificationPage> {
@@ -452,9 +467,12 @@ export function submitFeedback(input: CreateFeedbackInput): Promise<UserFeedback
   });
 }
 
-export function search(query: string, cursor?: string): Promise<SearchResponse> {
+export function search(query: string, cursor?: string, actionContext?: FeedActionContext): Promise<SearchResponse> {
   const params = new URLSearchParams({ q: query, search_type: 'all', limit: '20', session_id: analyticsSessionId() });
   if (cursor) params.set('cursor', cursor);
+  if (actionContext?.route_id.trim()) params.set('route_id', actionContext.route_id.trim());
+  if (actionContext?.action_node_id.trim()) params.set('action_node_id', actionContext.action_node_id.trim());
+  if (actionContext?.scene_equipment?.trim()) params.set('scene_equipment', actionContext.scene_equipment.trim());
   return request(`/v1/search?${params.toString()}`);
 }
 

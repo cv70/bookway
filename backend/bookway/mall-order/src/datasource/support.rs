@@ -392,8 +392,16 @@ mod tests {
     async fn paying_a_contextual_order_enqueues_exactly_one_purchase_event() {
         let dao = MemoryOrderDao::default();
         // draft() carries node_offer_id "offer-1": a contextual order.
+        let mut attributed = draft("order-ctx");
+        // Ad conversions are only ever derived from a payment fact, so the
+        // queued event has to carry the attribution pair the order was placed
+        // with — otherwise ad-center could never close the loop.
+        attributed.ad_attribution = Some(pb::AdAttribution {
+            request_id: "ad-request-1".to_string(),
+            campaign_id: "campaign-1".to_string(),
+        });
         dao.create(NewOrder {
-            order: draft("order-ctx"),
+            order: attributed,
             idempotency_key: "key-ctx".to_string(),
             request_fingerprint: "sku-1:1".to_string(),
         })
@@ -426,6 +434,8 @@ mod tests {
         assert_eq!(entry.order_id, "order-ctx");
         assert_eq!(entry.user_id, "user-1");
         assert_eq!(entry.node_offer_id, "offer-1");
+        assert_eq!(entry.ad_request_id.as_deref(), Some("ad-request-1"));
+        assert_eq!(entry.ad_campaign_id.as_deref(), Some("campaign-1"));
 
         // The pay endpoint re-runs ensure_settlement on every paid replay;
         // the settlement ledger must stay at exactly one eligible row.

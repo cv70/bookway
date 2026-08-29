@@ -366,7 +366,7 @@ async fn health() -> Json<HealthResponse> {
 
 /// Constant-time HMAC-SHA256 check over the webhook signature input. Split
 /// from the composition below so the RFC-4231 test can pin the primitive
-/// while the binding test pins the `{provider}.{raw_body}` input format.
+/// while the binding test pins the `{provider}.{timestamp}.{raw_body}` input format.
 fn verify_hmac(secret: &[u8], input: &[u8], provided: &str) -> bool {
     use hmac::{Hmac, Mac};
     let mut mac =
@@ -385,15 +385,55 @@ fn verify_hmac(secret: &[u8], input: &[u8], provided: &str) -> bool {
     difference == 0
 }
 
-fn verify_payment_signature(secret: &[u8], provider: &str, body: &[u8], provided: &str) -> bool {
-    // Signed bytes are exactly `{provider}.{raw_body}`: binding the path
-    // provider into the input means a signature captured for one provider's
-    // endpoint cannot be replayed against another's.
-    let mut input = Vec::with_capacity(provider.len() + 1 + body.len());
+fn verify_payment_signature(
+    secret: &[u8],
+    provider: &str,
+    timestamp: &str,
+    body: &[u8],
+    provided: &str,
+) -> bool {
+    // Signed bytes are exactly `{provider}.{timestamp}.{raw_body}`. Binding the
+    // path provider means a signature captured for one provider's endpoint
+    // cannot be replayed against another's; binding the timestamp means a
+    // captured body cannot be replayed forever, because the freshness check
+    // below covers a value the signature itself commits to.
+    let mut input = Vec::with_capacity(provider.len() + timestamp.len() + 2 + body.len());
     input.extend_from_slice(provider.as_bytes());
+    input.push(b'.');
+    input.extend_from_slice(timestamp.as_bytes());
     input.push(b'.');
     input.extend_from_slice(body);
     verify_hmac(secret, &input, provided)
+}
+
+/// Default freshness window for a signed webhook, in seconds. Every major PSP
+/// signs a timestamp and expects the receiver to reject stale deliveries; the
+/// window is symmetric so a delivery from a clock-skewed sender fails loudly
+/// instead of being silently accepted.
+const PAYMENT_WEBHOOK_DEFAULT_TOLERANCE_SECONDS: u64 = 300;
+
+fn payment_webhook_tolerance_seconds() -> u64 {
+    std::env::var("PAYMENT_WEBHOOK_TOLERANCE_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(PAYMENT_WEBHOOK_DEFAULT_TOLERANCE_SECONDS)
+}
+
+/// True when `timestamp` (unix seconds, as signed) is within `tolerance` of
+/// `now`. A timestamp that does not parse is never fresh.
+fn payment_timestamp_is_fresh(timestamp: &str, now: u64, tolerance: u64) -> bool {
+    let Ok(sent_at) = timestamp.trim().parse::<u64>() else {
+        return false;
+    };
+    now.abs_diff(sent_at) <= tolerance
+}
+
+fn unix_now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
 }
 
 fn hex_decode(value: &str) -> Option<[u8; 32]> {
@@ -429,17 +469,35 @@ async fn payment_webhook(
         ));
     };
     // Contract: `x-payment-signature` is the hex HMAC-SHA256 of
-    // `{provider}.{raw_body}` keyed with PAYMENT_WEBHOOK_SECRET, where
-    // `provider` is exactly this route's path segment. Binding the provider
-    // into the signed input keeps a signature captured at one provider's URL
-    // from being replayed against another's.
+    // `{provider}.{timestamp}.{raw_body}` keyed with PAYMENT_WEBHOOK_SECRET,
+    // where `provider` is exactly this route's path segment and `timestamp` is
+    // the `x-payment-timestamp` header verbatim (unix seconds). Binding the
+    // provider keeps a signature captured at one provider's URL from being
+    // replayed at another's; binding the timestamp — together with the
+    // freshness check — keeps a captured delivery from being replayable
+    // indefinitely.
     let provided = headers
         .get("x-payment-signature")
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if !verify_payment_signature(secret.as_bytes(), &provider, &body, provided) {
+    let timestamp = headers
+        .get("x-payment-timestamp")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !verify_payment_signature(secret.as_bytes(), &provider, timestamp, &body, provided) {
         return Err(HttpError::Unauthorized(
             "invalid webhook signature".to_string(),
+        ));
+    }
+    // Checked only after the signature verifies, so an unauthenticated caller
+    // learns nothing about our clock.
+    if !payment_timestamp_is_fresh(
+        timestamp,
+        unix_now_seconds(),
+        payment_webhook_tolerance_seconds(),
+    ) {
+        return Err(HttpError::Unauthorized(
+            "webhook signature is outside the accepted freshness window".to_string(),
         ));
     }
     let payload: PaymentWebhookBody = serde_json::from_slice(&body).map_err(|_| {
@@ -2411,11 +2469,7 @@ async fn join_route(
 /// A request without an edge-authenticated user is a 401, never a shared
 /// "demo-user" writing one phantom account's data.
 fn authenticated_user(headers: &HeaderMap) -> Result<String, HttpError> {
-    headers
-        .get("x-user-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    header_identity(headers)
         .ok_or_else(|| HttpError::Unauthorized("x-user-id header is required".to_string()))
 }
 
@@ -2423,12 +2477,15 @@ fn authenticated_user(headers: &HeaderMap) -> Result<String, HttpError> {
 /// anonymous, and downstream services treat it as such (the recommendation
 /// pipeline serves a cold-start page and records no ledger row).
 fn optional_user_id(headers: &HeaderMap) -> String {
-    headers
-        .get("x-user-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("")
-        .to_string()
+    header_identity(headers).unwrap_or_default()
+}
+
+const MAX_IDENTITY_LENGTH: usize = 160;
+
+fn header_identity(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get("x-user-id")?.to_str().ok()?.trim();
+    (!value.is_empty() && value.chars().count() <= MAX_IDENTITY_LENGTH)
+        .then(|| value.to_string())
 }
 
 fn moderator_id(headers: &HeaderMap) -> Result<String, HttpError> {
@@ -2446,11 +2503,7 @@ fn moderator_id(headers: &HeaderMap) -> Result<String, HttpError> {
             "moderator role is required".to_string(),
         ));
     }
-    headers
-        .get("x-user-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    header_identity(headers)
         .ok_or_else(|| HttpError::Forbidden("authenticated user is required".to_string()))
 }
 
@@ -2469,11 +2522,7 @@ fn merchant_admin_id(headers: &HeaderMap) -> Result<String, HttpError> {
             "merchant admin role is required".to_string(),
         ));
     }
-    headers
-        .get("x-user-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    header_identity(headers)
         .ok_or_else(|| HttpError::Forbidden("authenticated user is required".to_string()))
 }
 
@@ -2492,11 +2541,7 @@ fn advertiser_admin_id(headers: &HeaderMap) -> Result<String, HttpError> {
             "advertiser admin role is required".to_string(),
         ));
     }
-    headers
-        .get("x-user-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    header_identity(headers)
         .ok_or_else(|| HttpError::Forbidden("authenticated user is required".to_string()))
 }
 
@@ -2540,11 +2585,7 @@ fn platform_admin_id(headers: &HeaderMap) -> Result<String, HttpError> {
             "platform admin role is required".to_string(),
         ));
     }
-    headers
-        .get("x-user-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    header_identity(headers)
         .ok_or_else(|| HttpError::Forbidden("authenticated user is required".to_string()))
 }
 
@@ -2645,8 +2686,8 @@ fn error_response(status: StatusCode, code: &'static str, message: String) -> Re
 mod tests {
     use super::{
         authenticated_user, geo_region_from_headers, has_advertiser_admin_role,
-        has_merchant_admin_role, has_moderator_role, optional_user_id, required_idempotency_key,
-        verify_hmac, verify_payment_signature,
+        has_merchant_admin_role, has_moderator_role, optional_user_id, payment_timestamp_is_fresh,
+        required_idempotency_key, verify_hmac, verify_payment_signature,
     };
     use axum::http::{HeaderMap, HeaderValue};
 
@@ -2666,57 +2707,85 @@ mod tests {
         assert!(!verify_hmac(b"other", data, valid));
     }
 
-    #[test]
-    fn payment_webhook_signature_binds_the_provider_path_segment() {
-        // The RFC-4231 test pins the primitive; this one pins the composition:
-        // the signed bytes are exactly `{provider}.{raw_body}`, verified
-        // server-side from the route's path segment.
-        let secret = b"webhook-secret";
-        let provider = "stripe";
-        let body = br#"{"payment_reference":"pay-1"}"#;
+    fn hex_hmac(secret: &[u8], parts: &[&[u8]]) -> String {
         use hmac::{Hmac, Mac};
         let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(secret)
             .expect("HMAC accepts any key length");
-        mac.update(provider.as_bytes());
-        mac.update(b".");
-        mac.update(body);
-        let signature = mac
-            .finalize()
+        for part in parts {
+            mac.update(part);
+        }
+        mac.finalize()
             .into_bytes()
             .iter()
             .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+            .collect::<String>()
+    }
 
-        assert!(verify_payment_signature(secret, provider, body, &signature));
+    #[test]
+    fn payment_webhook_signature_binds_the_provider_and_timestamp() {
+        // The RFC-4231 test pins the primitive; this one pins the composition:
+        // the signed bytes are exactly `{provider}.{timestamp}.{raw_body}`,
+        // verified server-side from the route's path segment and the header.
+        let secret = b"webhook-secret";
+        let provider = "stripe";
+        let timestamp = "1770000000";
+        let body = br#"{"payment_reference":"pay-1"}"#;
+        let signature = hex_hmac(
+            secret,
+            &[provider.as_bytes(), b".", timestamp.as_bytes(), b".", body],
+        );
+
+        assert!(verify_payment_signature(
+            secret, provider, timestamp, body, &signature
+        ));
         // A signature captured at one provider's URL is dead at another's:
         // this cross-provider replay is exactly what the binding stops.
         assert!(!verify_payment_signature(
-            secret, "paypal", body, &signature
+            secret, "paypal", timestamp, body, &signature
         ));
-        // A tampered body or a signature computed over the bare (unbound)
-        // body both fail.
+        // Re-presenting the same body under a different timestamp fails, so a
+        // captured delivery cannot be refreshed past the freshness window.
+        assert!(!verify_payment_signature(
+            secret, provider, "1770000600", body, &signature
+        ));
+        // A tampered body, a missing timestamp, and a signature computed over
+        // the bare (unbound) body all fail.
         assert!(!verify_payment_signature(
             secret,
             provider,
+            timestamp,
             b"tampered",
             &signature
         ));
-        let bare = {
-            let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(secret)
-                .expect("HMAC accepts any key length");
-            mac.update(body);
-            mac.finalize().into_bytes()
-        };
-        let bare_signature = bare
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        assert!(!verify_payment_signature(
+            secret, provider, "", body, &signature
+        ));
+        let bare_signature = hex_hmac(secret, &[body]);
         assert!(!verify_payment_signature(
             secret,
             provider,
+            timestamp,
             body,
             &bare_signature
         ));
+    }
+
+    #[test]
+    fn payment_webhook_rejects_stale_and_unparseable_timestamps() {
+        let now = 1_770_000_000_u64;
+        let tolerance = 300_u64;
+
+        assert!(payment_timestamp_is_fresh("1770000000", now, tolerance));
+        assert!(payment_timestamp_is_fresh(" 1770000299 ", now, tolerance));
+        // Symmetric window: a sender whose clock runs fast is rejected too,
+        // rather than being trusted for an extra window's worth of replay.
+        assert!(payment_timestamp_is_fresh("1770000299", now, tolerance));
+        assert!(!payment_timestamp_is_fresh("1770000301", now, tolerance));
+        assert!(!payment_timestamp_is_fresh("1769999699", now, tolerance));
+        // A missing or malformed timestamp is never fresh.
+        assert!(!payment_timestamp_is_fresh("", now, tolerance));
+        assert!(!payment_timestamp_is_fresh("not-a-number", now, tolerance));
+        assert!(!payment_timestamp_is_fresh("-1", now, tolerance));
     }
 
     #[test]
@@ -2785,5 +2854,29 @@ mod tests {
         // anonymous with an empty viewer id — never a shared "demo-user".
         assert!(authenticated_user(&missing_key).is_err());
         assert_eq!(optional_user_id(&missing_key), "");
+    }
+
+    #[test]
+    fn identity_headers_are_trimmed_and_length_bounded() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-user-id", HeaderValue::from_static("  member-1  "));
+        let identity = match authenticated_user(&headers) {
+            Ok(identity) => identity,
+            Err(_) => panic!("trimmed identity should authenticate"),
+        };
+        assert_eq!(identity, "member-1");
+        assert_eq!(optional_user_id(&headers), "member-1");
+
+        headers.insert("x-user-id", HeaderValue::from_static("   "));
+        assert!(authenticated_user(&headers).is_err());
+        assert!(optional_user_id(&headers).is_empty());
+
+        let oversized = "u".repeat(super::MAX_IDENTITY_LENGTH + 1);
+        headers.insert(
+            "x-user-id",
+            HeaderValue::from_str(&oversized).expect("ASCII identity header"),
+        );
+        assert!(authenticated_user(&headers).is_err());
+        assert!(optional_user_id(&headers).is_empty());
     }
 }

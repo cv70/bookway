@@ -18,7 +18,6 @@ impl MemoryContentDao {
                         domain: pb::GrowthDomain::Travel,
                         route_title: "7 次城市观察散步",
                         route_duration: "3 周",
-                        join_count: 4862,
                         like_count: 9128,
                         freshness: 0.94,
                         tags: "城市漫游,观察",
@@ -35,7 +34,6 @@ impl MemoryContentDao {
                         domain: pb::GrowthDomain::Learning,
                         route_title: "四周主题阅读实验",
                         route_duration: "4 周",
-                        join_count: 7130,
                         like_count: 15420,
                         freshness: 0.88,
                         tags: "阅读,知识管理",
@@ -52,7 +50,6 @@ impl MemoryContentDao {
                         domain: pb::GrowthDomain::Movement,
                         route_title: "零压力晨跑计划",
                         route_duration: "6 周",
-                        join_count: 9854,
                         like_count: 22180,
                         freshness: 0.91,
                         tags: "跑步,晨间",
@@ -69,7 +66,6 @@ impl MemoryContentDao {
                         domain: pb::GrowthDomain::Wellness,
                         route_title: "温和睡眠修复",
                         route_duration: "14 天",
-                        join_count: 6321,
                         like_count: 10438,
                         freshness: 0.84,
                         tags: "睡眠,精力",
@@ -86,7 +82,6 @@ impl MemoryContentDao {
                         domain: pb::GrowthDomain::Leisure,
                         route_title: "陶艺初体验",
                         route_duration: "2 周",
-                        join_count: 2176,
                         like_count: 6890,
                         freshness: 0.96,
                         tags: "手作,放松",
@@ -103,7 +98,6 @@ impl MemoryContentDao {
                         domain: pb::GrowthDomain::Learning,
                         route_title: "三次博物馆观察练习",
                         route_duration: "3 周",
-                        join_count: 3952,
                         like_count: 10582,
                         freshness: 0.82,
                         tags: "博物馆,观察",
@@ -322,13 +316,12 @@ fn bump_source_fork_count(state: &mut State, fork: &pb::Content) {
     else {
         return;
     };
-    if let Some(source) = state
+    if let Some(post) = state
         .contents
         .iter_mut()
         .find(|item| item.id == source_route_id)
+        .and_then(|source| source.post.as_mut())
     {
-        if let Some(post) = source.post.as_mut() {
-            post.fork_count = post.fork_count.saturating_add(1);
-        }
+        post.fork_count = post.fork_count.saturating_add(1);
     }
 }

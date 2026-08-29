@@ -196,6 +196,7 @@ impl RouteTemplateKind {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct RouteTemplateStage {
+    pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) detail: String,
     pub(crate) completion_criteria: String,
@@ -204,6 +205,7 @@ pub(crate) struct RouteTemplateStage {
 impl From<RouteTemplateStage> for bbs_link_pb::RouteTemplateStage {
     fn from(value: RouteTemplateStage) -> Self {
         Self {
+            id: value.id,
             title: value.title,
             detail: value.detail,
             completion_criteria: value.completion_criteria,
@@ -214,6 +216,7 @@ impl From<RouteTemplateStage> for bbs_link_pb::RouteTemplateStage {
 impl From<bbs_link_pb::RouteTemplateStage> for RouteTemplateStage {
     fn from(value: bbs_link_pb::RouteTemplateStage) -> Self {
         Self {
+            id: value.id,
             title: value.title,
             detail: value.detail,
             completion_criteria: value.completion_criteria,
@@ -228,7 +231,7 @@ pub(crate) struct RouteTemplateAction {
     pub(crate) detail: String,
     pub(crate) estimated_minutes: u32,
     pub(crate) scheduled_label: String,
-    pub(crate) stage_index: Option<u32>,
+    pub(crate) stage_id: Option<String>,
     #[serde(default)]
     pub(crate) scene_equipment: Vec<String>,
 }
@@ -241,7 +244,7 @@ impl From<RouteTemplateAction> for bbs_link_pb::RouteTemplateAction {
             detail: value.detail,
             estimated_minutes: value.estimated_minutes,
             scheduled_label: value.scheduled_label,
-            stage_index: value.stage_index,
+            stage_id: value.stage_id,
             scene_equipment: value.scene_equipment,
         }
     }
@@ -255,7 +258,7 @@ impl From<bbs_link_pb::RouteTemplateAction> for RouteTemplateAction {
             detail: value.detail,
             estimated_minutes: value.estimated_minutes,
             scheduled_label: value.scheduled_label,
-            stage_index: value.stage_index,
+            stage_id: value.stage_id,
             scene_equipment: value.scene_equipment,
         }
     }
@@ -299,7 +302,7 @@ impl TryFrom<bbs_link_pb::RouteTemplate> for RouteTemplate {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct MilestoneDraft {
     pub(crate) route_id: String,
-    pub(crate) stage_index: Option<u32>,
+    pub(crate) stage_id: Option<String>,
     pub(crate) effort_summary: String,
     pub(crate) outcome_summary: String,
     pub(crate) adjustment_summary: String,
@@ -310,7 +313,7 @@ impl From<MilestoneDraft> for bbs_link_pb::MilestoneDraft {
     fn from(value: MilestoneDraft) -> Self {
         Self {
             route_id: value.route_id,
-            stage_index: value.stage_index,
+            stage_id: value.stage_id,
             effort_summary: value.effort_summary,
             outcome_summary: value.outcome_summary,
             adjustment_summary: value.adjustment_summary,
@@ -323,7 +326,7 @@ impl From<MilestoneDraft> for bbs_link_pb::MilestoneDraft {
 pub(crate) struct Milestone {
     route_id: String,
     route_title: String,
-    stage_index: u32,
+    stage_id: String,
     stage_title: String,
     effort_summary: String,
     outcome_summary: String,
@@ -334,14 +337,14 @@ pub(crate) struct Milestone {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct QuestionContextDraft {
     pub(crate) route_id: String,
-    pub(crate) stage_index: Option<u32>,
+    pub(crate) stage_id: Option<String>,
 }
 
 impl From<QuestionContextDraft> for bbs_link_pb::QuestionContextDraft {
     fn from(value: QuestionContextDraft) -> Self {
         Self {
             route_id: value.route_id,
-            stage_index: value.stage_index,
+            stage_id: value.stage_id,
         }
     }
 }
@@ -350,7 +353,7 @@ impl From<QuestionContextDraft> for bbs_link_pb::QuestionContextDraft {
 pub(crate) struct QuestionContext {
     route_id: String,
     route_title: String,
-    stage_index: Option<u32>,
+    stage_id: Option<String>,
     stage_title: Option<String>,
 }
 
@@ -359,7 +362,7 @@ impl From<bbs_link_pb::QuestionContext> for QuestionContext {
         Self {
             route_id: value.route_id,
             route_title: value.route_title,
-            stage_index: value.stage_index,
+            stage_id: value.stage_id,
             stage_title: value.stage_title,
         }
     }
@@ -390,7 +393,7 @@ impl From<bbs_link_pb::Milestone> for Milestone {
         Self {
             route_id: value.route_id,
             route_title: value.route_title,
-            stage_index: value.stage_index,
+            stage_id: value.stage_id,
             stage_title: value.stage_title,
             effort_summary: value.effort_summary,
             outcome_summary: value.outcome_summary,
@@ -536,7 +539,10 @@ pub(crate) struct PostSummary {
     cover_url: String,
     route_title: String,
     route_duration: String,
-    join_count: u32,
+    // Absent when no service read the live participation fact for this item.
+    // The client must not render it as "0 人加入".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    join_count: Option<u32>,
     like_count: u32,
     freshness: f64,
     tags: Vec<String>,
@@ -1025,12 +1031,13 @@ pub(crate) struct SearchQuery {
 
 impl SearchQuery {
     pub(crate) fn into_pb(self, user_id: String) -> search_pb::SearchRequest {
+        let user_id = (!user_id.trim().is_empty()).then_some(user_id);
         search_pb::SearchRequest {
             q: self.q,
             search_type: self.search_type.into_pb(),
             cursor: self.cursor,
             limit: self.limit,
-            user_id: Some(user_id),
+            user_id,
             excluded_author_ids: Vec::new(),
             session_id: self.session_id,
             route_id: self.route_id,
@@ -5253,7 +5260,7 @@ mod tests {
             "content_type": "milestone",
             "milestone": {
                 "route_id": "public-route-1",
-                "stage_index": 0,
+                "stage_id": "stage-start",
                 "effort_summary": "连续七天阅读并完成两次整理",
                 "outcome_summary": "能够复述一个完整主题",
                 "adjustment_summary": "把零散整理改到周末",
@@ -5269,7 +5276,7 @@ mod tests {
         );
         let draft = request.milestone.expect("milestone draft");
         assert_eq!(draft.route_id, "public-route-1");
-        assert_eq!(draft.stage_index, Some(0));
+        assert_eq!(draft.stage_id.as_deref(), Some("stage-start"));
 
         let content = Content::try_from(bbs_link_pb::Content {
             post: Some(bbs_link_pb::PostSummary {
@@ -5284,7 +5291,7 @@ mod tests {
             milestone: Some(bbs_link_pb::Milestone {
                 route_id: "public-route-1".to_string(),
                 route_title: "四周主题阅读".to_string(),
-                stage_index: 0,
+                stage_id: "stage-start".to_string(),
                 stage_title: "起步".to_string(),
                 effort_summary: "连续七天阅读并完成两次整理".to_string(),
                 outcome_summary: "能够复述一个完整主题".to_string(),
@@ -5308,20 +5315,20 @@ mod tests {
             "body": "我只想讨论公开路线的第一阶段。",
             "domain": "learning",
             "content_type": "question",
-            "question_context": { "route_id": "public-route-1", "stage_index": 0 }
+            "question_context": { "route_id": "public-route-1", "stage_id": "stage-start" }
         }))
         .expect("mobile question JSON should deserialize");
         let request = request.into_pb("user-1".to_string(), None);
         let draft = request.question_context.expect("question context draft");
         assert_eq!(draft.route_id, "public-route-1");
-        assert_eq!(draft.stage_index, Some(0));
+        assert_eq!(draft.stage_id.as_deref(), Some("stage-start"));
 
         let content = Content::try_from(bbs_link_pb::Content {
             content_type: bbs_link_pb::ContentType::Question as i32,
             question_context: Some(bbs_link_pb::QuestionContext {
                 route_id: "public-route-1".to_string(),
                 route_title: "四周主题阅读".to_string(),
-                stage_index: Some(0),
+                stage_id: Some("stage-start".to_string()),
                 stage_title: Some("起步".to_string()),
             }),
             ..Default::default()
@@ -5480,7 +5487,7 @@ mod tests {
                 cover_url: String::new(),
                 route_title: "一条路线".to_string(),
                 route_duration: "4 周".to_string(),
-                join_count: 3,
+                join_count: Some(3),
                 like_count: 5,
                 freshness: 0.8,
                 tags: vec!["专注".to_string()],
@@ -5567,7 +5574,15 @@ mod tests {
             "search_type": "all"
         }))
         .expect("search query JSON");
-        assert_eq!(search.into_pb("user-1".to_string()).search_type, 0);
+        let search_request = search.into_pb("user-1".to_string());
+        assert_eq!(search_request.search_type, 0);
+        assert_eq!(search_request.user_id.as_deref(), Some("user-1"));
+        let anonymous: SearchQuery = serde_json::from_value(serde_json::json!({
+            "q": "晨跑",
+            "search_type": "all"
+        }))
+        .expect("anonymous search query JSON");
+        assert!(anonymous.into_pb(String::new()).user_id.is_none());
     }
 
     #[test]

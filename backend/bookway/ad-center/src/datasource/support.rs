@@ -672,6 +672,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conversions_follow_the_impression_after_the_decision_lease_expires() {
+        let dao = MemoryCampaignDao::default();
+        let campaign = activated_campaign(&dao).await;
+        let campaign_id = campaign.id.clone();
+        let advertiser_id = campaign.advertiser_id.clone();
+        dao.register_decisions(registration(
+            "user-1",
+            "request-conversion",
+            vec![campaign.id.clone()],
+        ))
+        .await
+        .expect("decision should be registered");
+        assert!(
+            dao.record_event(
+                "user-1",
+                pb::RecordEventRequest {
+                    user_id: "user-1".to_string(),
+                    event_id: "impression-conversion".to_string(),
+                    request_id: "request-conversion".to_string(),
+                    campaign_id: campaign.id.clone(),
+                    event_type: pb::EventType::Impression as i32,
+                },
+            )
+            .await
+            .expect("impression should be accepted")
+            .accepted
+        );
+        // A checkout can finish after the one-hour delivery decision lease or
+        // after the campaign is paused. The accepted impression remains the
+        // durable attribution authority, and conversion is not billable.
+        dao.expire_decision_for_test("request-conversion", &campaign.id)
+            .await;
+        dao.update(
+            &campaign.id,
+            pb::UpdateCampaignRequest {
+                advertiser_id: campaign.advertiser_id.clone(),
+                status: Some(pb::CampaignStatus::Paused as i32),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("campaign should be pausable");
+        let conversion = dao
+            .record_event(
+                "user-1",
+                pb::RecordEventRequest {
+                    user_id: "user-1".to_string(),
+                    event_id: "conversion-after-lease".to_string(),
+                    request_id: "request-conversion".to_string(),
+                    campaign_id: campaign_id.clone(),
+                    event_type: pb::EventType::Conversion as i32,
+                },
+            )
+            .await
+            .expect("conversion should be recorded");
+        assert!(conversion.accepted);
+        assert!(!conversion.duplicate);
+        let updated = dao
+            .get_for_advertiser(&campaign_id, &advertiser_id)
+            .await;
+        assert_eq!(updated.expect("campaign remains readable").conversions, 1);
+    }
+
+    #[tokio::test]
     async fn global_frequency_cap_blocks_a_second_user() {
         let dao = MemoryCampaignDao::default();
         let mut request = campaign_request();

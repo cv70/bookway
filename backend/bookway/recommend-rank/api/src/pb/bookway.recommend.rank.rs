@@ -20,13 +20,6 @@ pub struct CandidateFeatures {
     pub action_completion_rate: f64,
     #[prost(double, tag = "9")]
     pub purchase_conversion_rate: f64,
-    /// Calibrated objective predictions used by the online multi-objective ranker.
-    #[prost(double, tag = "10")]
-    pub p_ctr: f64,
-    #[prost(double, tag = "11")]
-    pub p_cvr: f64,
-    #[prost(double, tag = "12")]
-    pub p_wegu: f64,
     #[prost(double, tag = "13")]
     pub route_completion_rate: f64,
 }

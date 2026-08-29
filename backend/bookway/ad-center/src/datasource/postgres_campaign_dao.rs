@@ -427,6 +427,7 @@ impl CampaignDao for PostgresCampaignDao {
         user_id: &str,
         request: pb::RecordEventRequest,
     ) -> Result<pb::EventReceipt, DaoError> {
+        let is_conversion = request.event_type == pb::EventType::Conversion as i32;
         let mut tx = self.pool.begin().await.map_err(database)?;
         // The event ID is the transport-level idempotency key. Lock it before
         // the first read so reuse across different campaigns cannot race the
@@ -467,6 +468,23 @@ impl CampaignDao for PostgresCampaignDao {
                 duplicate: true,
             });
         }
+        // The platform-wide user-day cap spans campaigns, so a campaign row
+        // lock alone cannot serialize two simultaneous impressions for the
+        // same user. Hold one transaction-scoped advisory lock per user/day
+        // before the authoritative count; campaign locks still protect each
+        // campaign's own budget and frequency cap below.
+        if request.event_type == pb::EventType::Impression as i32 {
+            let user_day = format!(
+                "ad-user-day:{}:{}",
+                user_id,
+                OffsetDateTime::now_utc().date()
+            );
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(user_day)
+                .execute(&mut *tx)
+                .await
+                .map_err(database)?;
+        }
         let duplicate_decision_event: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ad_delivery_events WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND event_type=$4)")
             .bind(&request.request_id)
             .bind(&request.campaign_id)
@@ -483,13 +501,28 @@ impl CampaignDao for PostgresCampaignDao {
                 duplicate: true,
             });
         }
-        let tracked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ad_delivery_decisions WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND expires_at > now())")
-            .bind(&request.request_id)
-            .bind(&request.campaign_id)
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(database)?;
+        // Conversion attribution is a post-impression fact. Its decision
+        // lease may have expired while a customer completed checkout, so use
+        // the durable accepted impression as the authority instead of the
+        // short-lived decision row. Impressions and clicks still require a
+        // live decision lease.
+        let tracked: bool = if is_conversion {
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ad_delivery_events WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND event_type='impression')")
+                .bind(&request.request_id)
+                .bind(&request.campaign_id)
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database)?
+        } else {
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ad_delivery_decisions WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND expires_at > now())")
+                .bind(&request.request_id)
+                .bind(&request.campaign_id)
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database)?
+        };
         if !tracked {
             tx.commit().await.map_err(database)?;
             return Ok(pb::EventReceipt {
@@ -534,16 +567,28 @@ impl CampaignDao for PostgresCampaignDao {
             });
         }
         let now = OffsetDateTime::now_utc();
-        let tracked: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM ad_delivery_decisions WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND expires_at > $4)",
-        )
-        .bind(&request.request_id)
-        .bind(&request.campaign_id)
-        .bind(user_id)
-        .bind(now)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(database)?;
+        let tracked: bool = if is_conversion {
+            sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM ad_delivery_events WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND event_type='impression')",
+            )
+            .bind(&request.request_id)
+            .bind(&request.campaign_id)
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database)?
+        } else {
+            sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM ad_delivery_decisions WHERE request_id=$1 AND campaign_id=$2 AND user_id=$3 AND expires_at > $4)",
+            )
+            .bind(&request.request_id)
+            .bind(&request.campaign_id)
+            .bind(user_id)
+            .bind(now)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database)?
+        };
         if !tracked {
             tx.commit().await.map_err(database)?;
             return Ok(pb::EventReceipt {
@@ -574,9 +619,10 @@ impl CampaignDao for PostgresCampaignDao {
             });
         }
         let mut campaign = row.into_proto()?;
-        if campaign.status != pb::CampaignStatus::Active as i32
-            || campaign_starts(&campaign).is_some_and(|start| start > now)
-            || campaign_ends(&campaign).is_some_and(|end| end <= now)
+        if !is_conversion
+            && (campaign.status != pb::CampaignStatus::Active as i32
+                || campaign_starts(&campaign).is_some_and(|start| start > now)
+                || campaign_ends(&campaign).is_some_and(|end| end <= now))
         {
             tx.commit().await.map_err(database)?;
             return Ok(pb::EventReceipt {

@@ -56,7 +56,10 @@ message PostSummary {
   string cover_url = 7;
   string route_title = 8;
   string route_duration = 9;
-  uint32 join_count = 10;
+  // Live participation, owned by BBS. BBS Link never stores or increments it,
+  // so it is absent unless the responding service read the fact this request.
+  // Absent means "not read", which is not the same claim as zero companions.
+  optional uint32 join_count = 10;
   uint32 like_count = 11;
   double freshness = 12;
   repeated string tags = 13;
@@ -81,6 +84,11 @@ message RouteTemplateStage {
   string title = 1;
   string detail = 2;
   string completion_criteria = 3;
+  // Stable key declared by the author and referenced by actions, milestones
+  // and question contexts. Stage identity is never the array position: an
+  // author who reorders, inserts or removes a stage must not silently
+  // re-point the milestones already published against the other stages.
+  string id = 4;
 }
 
 message RouteTemplateAction {
@@ -88,7 +96,7 @@ message RouteTemplateAction {
   string detail = 2;
   uint32 estimated_minutes = 3;
   string scheduled_label = 4;
-  optional uint32 stage_index = 5;
+  optional string stage_id = 5;
   // Stable key used by node-bound resources, equipment and advertisements.
   string id = 6;
   // Canonical equipment labels for this action context. Commercial offers and
@@ -108,7 +116,7 @@ message RouteTemplate {
 // Journey, Action, Entry, schedule, location, or identity reference.
 message MilestoneDraft {
   string route_id = 1;
-  optional uint32 stage_index = 2;
+  optional string stage_id = 2;
   string effort_summary = 3;
   string outcome_summary = 4;
   string adjustment_summary = 5;
@@ -121,7 +129,7 @@ message MilestoneDraft {
 message Milestone {
   string route_id = 1;
   string route_title = 2;
-  uint32 stage_index = 3;
+  string stage_id = 3;
   string stage_title = 4;
   string effort_summary = 5;
   string outcome_summary = 6;
@@ -134,13 +142,13 @@ message Milestone {
 // route at creation time and never reads a user's private Journey or actions.
 message QuestionContextDraft {
   string route_id = 1;
-  optional uint32 stage_index = 2;
+  optional string stage_id = 2;
 }
 
 message QuestionContext {
   string route_id = 1;
   string route_title = 2;
-  optional uint32 stage_index = 3;
+  optional string stage_id = 3;
   optional string stage_title = 4;
 }
 

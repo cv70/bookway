@@ -23,9 +23,10 @@ ranked candidate already matches the context by construction.
 
 Campaigns carry bounded `predicted_ctr` and `predicted_cvr` serving inputs for
 the `ad-rank` eCPM auction. Frequency protection is enforced twice at receipt
-time under the campaign row lock: `frequency_cap` limits a user/campaign/day and
-`global_frequency_cap` limits a campaign/day across all users. A rejected
-receipt never consumes campaign budget.
+time: campaign row locks protect `frequency_cap` (user/campaign/day) and
+`global_frequency_cap` (campaign/day across all users), while a transaction
+advisory lock on `(user, UTC day)` serializes the platform-wide user daily cap
+across campaigns. A rejected receipt never consumes campaign budget.
 
 Eligibility pre-filtering uses Redis (`FrequencyGate`) as an accelerator, never
 as an authority. Three day-scoped counter families — campaign×user
@@ -68,6 +69,7 @@ per-user daily total cap. It is exposed through three RPCs:
   `YYYY-MM-DD`). Rows aggregate `ad_campaign_daily_stats`, which is itself the
   durable projection of accepted delivery events written under receipt-time row
   locks (migration 0031), so report numbers match the adjudicated ledger by
-  construction. Advertisers see only their own campaigns; conversions are
-  intentionally absent until a conversion event source exists.
-
+  construction. Advertisers see only their own campaigns. Server-verified
+  purchase conversions are accepted only after an accepted impression for the
+  same decision and are recorded without charge; the payment outbox may deliver
+  them after the short decision lease has expired.

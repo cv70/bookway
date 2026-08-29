@@ -143,6 +143,18 @@ pub(crate) trait CandidateHydrator: Send + Sync {
         HydratorFailurePolicy::BestEffort
     }
 
+    /// Whether this hydrator consumes fields populated by an earlier hydrator.
+    /// Independent hydrators run concurrently; dependent ones run after their
+    /// predecessors and mutate the canonical candidate list directly.
+    fn depends_on_previous(&self) -> bool {
+        false
+    }
+
+    /// Merge the result of an independent snapshot back into the canonical
+    /// candidates. Each built-in hydrator overrides this with its owned fields
+    /// so concurrent snapshots cannot clobber one another's facts.
+    fn merge(&self, _target: &mut [Candidate], _hydrated: &[Candidate]) {}
+
     async fn hydrate(
         &self,
         query: &FeedQuery,
@@ -289,17 +301,53 @@ impl FeedPipeline {
         DuplicateFilter::deduplicate(&mut candidates);
 
         let mut safety_context_unavailable = false;
-        for hydrator in &self.hydrators {
-            if let Err(error) = hydrator.hydrate(&query, &mut candidates).await {
+        let independent_count = self
+            .hydrators
+            .iter()
+            .position(|hydrator| hydrator.depends_on_previous())
+            .unwrap_or(self.hydrators.len());
+        let baseline = candidates.clone();
+        let hydration_jobs = self.hydrators[..independent_count]
+            .iter()
+            .cloned()
+            .map(|hydrator| {
+                let query = query.clone();
+                let mut hydrated = baseline.clone();
+                async move {
+                    let result = hydrator.hydrate(&query, &mut hydrated).await;
+                    (hydrator, hydrated, result)
+                }
+            });
+        for (hydrator, hydrated, result) in join_all(hydration_jobs).await {
+            if let Err(error) = result {
                 degraded = true;
                 if hydrator.failure_policy() == HydratorFailurePolicy::FailClosed {
                     safety_context_unavailable = true;
-                    candidates.clear();
                     tracing::warn!(%error, "feed safety hydrator unavailable; suppressing candidates");
-                    break;
+                } else {
+                    tracing::warn!(%error, "feed hydrator degraded");
                 }
-                tracing::warn!(%error, "feed hydrator degraded");
+            } else {
+                hydrator.merge(&mut candidates, &hydrated);
             }
+        }
+        // A dependent hydrator (currently SocialProof) consumes the merged
+        // visibility/reaction/route facts and therefore remains ordered.
+        if !safety_context_unavailable {
+            for hydrator in &self.hydrators[independent_count..] {
+                if let Err(error) = hydrator.hydrate(&query, &mut candidates).await {
+                    degraded = true;
+                    if hydrator.failure_policy() == HydratorFailurePolicy::FailClosed {
+                        safety_context_unavailable = true;
+                        tracing::warn!(%error, "feed safety hydrator unavailable; suppressing candidates");
+                        break;
+                    }
+                    tracing::warn!(%error, "feed hydrator degraded");
+                }
+            }
+        }
+        if safety_context_unavailable {
+            candidates.clear();
         }
         if safety_context_unavailable {
             // A cursor could otherwise make the client page through a response
@@ -440,6 +488,20 @@ impl FeedPipeline {
         let Some(exposure) = served.exposure.as_ref() else {
             return false; // anonymous: nothing to record, honestly
         };
+        // Attribution positions are the positions the client sees. Contextual
+        // ads occupy FeedItem slots but have no organic exposure row, so do
+        // not compress the remaining items back to zero-based organic order.
+        // User Event sends the visual index (including ad cards) and must hit
+        // the same position in the durable ledger.
+        let rendered_positions = served
+            .response
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(position, item)| {
+                item.post.as_ref().map(|post| (post.id.as_str(), position))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
         // The response's request ID is the key User Event uses for attribution.
         // Persist it before returning so a legitimate immediate interaction can
         // always be verified against the exact rendered candidate.
@@ -450,11 +512,11 @@ impl FeedPipeline {
                 .items
                 .iter()
                 .filter(|item| served.rendered_ids.contains(&item.content_id))
-                .enumerate()
-                .map(|(position, item)| {
+                .filter_map(|item| {
+                    let position = rendered_positions.get(item.content_id.as_str())?;
                     let mut item = item.clone();
-                    item.position = position;
-                    item
+                    item.position = *position;
+                    Some(item)
                 })
                 .collect();
             if let Err(error) = side_effect.run(attributed).await {
@@ -490,16 +552,20 @@ fn pipeline_id(surface: &str, versions: &BTreeSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::{
+        collections::BTreeSet,
+        sync::{Arc, Mutex},
+    };
 
     use async_trait::async_trait;
     use bookway_bbs_link_api::pb::{ContentStatus, GrowthDomain, PostSummary};
 
     use super::{
         Candidate, CandidateHydrator, CandidateSource, DiversitySelector, FeedPipeline,
-        FeedPipelineComponents, FeedQuery, HydratorFailurePolicy, PipelineError, SourceResult,
-        pipeline_id, user_reasons,
+        FeedPipelineComponents, FeedQuery, HydratorFailurePolicy, PipelineError,
+        PipelineSideEffect, SourceResult, pipeline_id, user_reasons,
     };
+    use crate::datasource::{Exposure, ExposureError};
     use crate::api::pb;
 
     struct StaticSource;
@@ -521,7 +587,7 @@ mod tests {
                         cover_url: String::new(),
                         route_title: String::new(),
                         route_duration: String::new(),
-                        join_count: 0,
+                        join_count: None,
                         like_count: 0,
                         freshness: 0.0,
                         tags: Vec::new(),
@@ -575,6 +641,18 @@ mod tests {
     }
 
     struct FailingHydrator(HydratorFailurePolicy);
+
+    struct CapturingSideEffect {
+        exposure: Arc<Mutex<Option<Exposure>>>,
+    }
+
+    #[async_trait]
+    impl PipelineSideEffect for CapturingSideEffect {
+        async fn run(&self, exposure: Exposure) -> Result<(), ExposureError> {
+            *self.exposure.lock().expect("capture lock") = Some(exposure);
+            Ok(())
+        }
+    }
 
     #[test]
     fn user_reasons_drop_debug_diagnostics_but_keep_explanations() {
@@ -700,6 +778,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persist_keeps_visual_positions_when_an_ad_occupies_a_slot() {
+        let captured = Arc::new(Mutex::new(None));
+        let pipeline = FeedPipeline::new(FeedPipelineComponents {
+            query_hydrator: Arc::new(super::DefaultQueryHydrator),
+            sources: vec![Arc::new(StaticSource)],
+            hydrators: Vec::new(),
+            filters: Vec::new(),
+            scorers: Vec::new(),
+            coarse_ranker: Arc::new(super::CoarseRanker),
+            ranker: None,
+            selector: Arc::new(DiversitySelector),
+            post_selection_filters: Vec::new(),
+            side_effects: vec![Arc::new(CapturingSideEffect {
+                exposure: captured.clone(),
+            })],
+        });
+        let mut served = pipeline.execute(request()).await;
+        served.response.items.insert(
+            0,
+            pb::FeedItem {
+                source: "contextual_ad_ecpm".to_string(),
+                ad: Some(pb::FeedAd::default()),
+                ..Default::default()
+            },
+        );
+        // FeedService normally refreshes this after mixing. Keep the explicit
+        // rendered set here to model that final post/ad page boundary.
+        served.rendered_ids = vec!["content-1".to_string()];
+
+        assert!(!pipeline.persist(&served).await);
+        let exposure = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("exposure was recorded");
+        assert_eq!(exposure.items.len(), 1);
+        assert_eq!(
+            exposure.items[0].position, 1,
+            "the ad slot remains part of the client-visible attribution index"
+        );
+    }
+
+    #[tokio::test]
     async fn hides_all_candidates_when_a_safety_hydrator_is_unavailable() {
         let response = pipeline(HydratorFailurePolicy::FailClosed)
             .execute(request())
@@ -767,7 +888,7 @@ mod tests {
                 cover_url: String::new(),
                 route_title: String::new(),
                 route_duration: String::new(),
-                join_count: 0,
+                join_count: None,
                 like_count: 0,
                 freshness: 0.0,
                 tags: Vec::new(),
@@ -798,4 +919,3 @@ mod tests {
         }
     }
 }
-

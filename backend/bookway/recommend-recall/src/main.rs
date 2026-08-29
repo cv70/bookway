@@ -1,6 +1,5 @@
 pub(crate) mod api;
 pub(crate) mod conf;
-pub(crate) mod datasource;
 pub(crate) mod domain;
 
 use conf::Config;

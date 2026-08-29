@@ -42,7 +42,10 @@ CREATE TABLE IF NOT EXISTS ad_delivery_events (
     request_id TEXT NOT NULL,
     campaign_id TEXT NOT NULL REFERENCES ad_campaigns(id),
     user_id TEXT NOT NULL,
-    event_type TEXT NOT NULL CHECK (event_type IN ('impression', 'click')),
+    -- Conversion is a server-verified, non-billable post-impression fact;
+    -- keeping it in the baseline constraint makes fresh databases compatible
+    -- with the ad attribution contract (0083 also upgrades older installs).
+    event_type TEXT NOT NULL CHECK (event_type IN ('impression', 'click', 'conversion')),
     cost_micros BIGINT NOT NULL DEFAULT 0 CHECK (cost_micros >= 0),
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

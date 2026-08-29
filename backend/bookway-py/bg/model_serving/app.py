@@ -312,8 +312,19 @@ def score(request: ScoreRequest) -> dict:
         pooled = _mean_pool(output[0].float(), encoded["attention_mask"])
         logits = head(pooled)
     scores = torch.sigmoid(logits).tolist()
+    # Each row echoes the content_id it was scored for. Without it the caller
+    # can only match by array position, which silently attaches one item's
+    # pWEGU to another whenever the batch is reordered or short.
     return {
         "ready": True,
         "model_version": f"minicpm-scorer-{os.path.basename(scorer['key'].rsplit(':', 1)[0])}",
-        "scores": [{"p_ctr": row[0], "p_cvr": row[1], "p_wegu": row[2]} for row in scores],
+        "scores": [
+            {
+                "content_id": item.get("content_id", ""),
+                "p_ctr": row[0],
+                "p_cvr": row[1],
+                "p_wegu": row[2],
+            }
+            for item, row in zip(request.items, scores)
+        ],
     }

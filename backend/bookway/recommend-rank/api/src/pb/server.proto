@@ -13,10 +13,11 @@ message CandidateFeatures {
   double save_rate = 7;
   double action_completion_rate = 8;
   double purchase_conversion_rate = 9;
-  // Calibrated objective predictions used by the online multi-objective ranker.
-  double p_ctr = 10;
-  double p_cvr = 11;
-  double p_wegu = 12;
+  // 10-12 were a second, unread copy of the calibrated objective predictions.
+  // Prediction belongs to this service: the observed rates above are its input,
+  // and the explicit predictions on RankRequest.candidates are the remote
+  // scorer's output. A caller shipping its own calibration here had no reader.
+  reserved 10, 11, 12;
   double route_completion_rate = 13;
 }
 message RankFeatures {

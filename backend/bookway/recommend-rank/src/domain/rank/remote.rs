@@ -83,9 +83,23 @@ impl RemoteScorer {
             .get("scores")
             .and_then(serde_json::Value::as_array)
             .ok_or("model serving response missing scores")?;
+        // Each row must name the content it scored. Matching by array position
+        // would attach one candidate's pWEGU to another the moment the batch
+        // comes back reordered or short, and a short response would be
+        // truncated silently while still reporting a served model version.
+        let requested = candidates
+            .iter()
+            .map(|candidate| candidate.content_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let mut returned = std::collections::HashSet::new();
         let mut out = Vec::with_capacity(rows.len());
-        for (row, candidate) in rows.iter().zip(candidates) {
+        for row in rows {
             let objectives = row.as_object().ok_or("score row is not an object")?;
+            let content_id = objectives
+                .get("content_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("score row missing content_id")?;
+            validate_score_id(content_id, &requested, &mut returned)?;
             let get = |key: &str| {
                 objectives
                     .get(key)
@@ -95,12 +109,33 @@ impl RemoteScorer {
                     .ok_or_else(|| format!("score row missing {key}"))
             };
             out.push((
-                candidate.content_id.clone(),
+                content_id.to_string(),
                 (get("p_ctr")?, get("p_cvr")?, get("p_wegu")?),
             ));
         }
         Ok((out, served_version))
     }
+}
+
+fn validate_score_id(
+    content_id: &str,
+    requested: &std::collections::HashSet<&str>,
+    returned: &mut std::collections::HashSet<String>,
+) -> Result<(), String> {
+    if content_id.trim().is_empty() {
+        return Err("score row has an empty content_id".to_string());
+    }
+    if !requested.contains(content_id) {
+        return Err(format!(
+            "score row names an unrequested candidate {content_id}"
+        ));
+    }
+    if !returned.insert(content_id.to_string()) {
+        return Err(format!(
+            "score response contains duplicate candidate {content_id}"
+        ));
+    }
+    Ok(())
 }
 
 fn truncate(value: &str) -> String {
@@ -112,4 +147,29 @@ fn candidate_text(candidate: &Candidate) -> String {
         return String::new();
     };
     truncate(&format!("{}。{}", post.title, post.summary))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::validate_score_id;
+
+    #[test]
+    fn score_response_rejects_duplicate_candidate_rows() {
+        let requested = HashSet::from(["candidate-1"]);
+        let mut returned = HashSet::new();
+        validate_score_id("candidate-1", &requested, &mut returned).expect("first row");
+        let error = validate_score_id("candidate-1", &requested, &mut returned)
+            .expect_err("duplicate rows must invalidate the response");
+        assert!(error.contains("duplicate"));
+    }
+
+    #[test]
+    fn score_response_rejects_empty_and_unknown_candidate_ids() {
+        let requested = HashSet::from(["candidate-1"]);
+        let mut returned = HashSet::new();
+        assert!(validate_score_id("", &requested, &mut returned).is_err());
+        assert!(validate_score_id("candidate-2", &requested, &mut returned).is_err());
+    }
 }

@@ -1,4 +1,5 @@
 use bookway_recommend_main_api::pb::recommend_main_client::RecommendMainClient;
+use std::sync::Arc;
 
 use crate::conf::Config;
 
@@ -6,6 +7,7 @@ use crate::conf::Config;
 pub(crate) struct Domain {
     pub(crate) config: Config,
     pub(crate) recommend_main: RecommendMainClient<tonic::transport::Channel>,
+    pub(crate) recommend_breaker: Arc<bookway_runtime::CircuitBreaker>,
 }
 
 impl Domain {
@@ -15,6 +17,7 @@ impl Domain {
         );
         Ok(Self {
             recommend_main,
+            recommend_breaker: Arc::new(bookway_runtime::CircuitBreaker::from_env()),
             config,
         })
     }

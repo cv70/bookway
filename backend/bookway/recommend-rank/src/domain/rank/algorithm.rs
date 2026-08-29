@@ -28,10 +28,15 @@ pub(crate) struct RankWeights {
 }
 
 impl RankWeights {
-    /// Baseline ("control") table; values are the proven v2 scoring set.
+    /// Baseline ("control") table. Every term it multiplies is on a 0..1
+    /// scale — `local_score` is normalized across the request before it gets
+    /// here (see `normalized_local_scores`) — so these coefficients are
+    /// directly comparable to each other. WEGU plus route completion (0.50)
+    /// deliberately outweighs the engagement heuristic (0.22) and pCTR (0.18):
+    /// the product ranks on "适合且做到", not on clicks or dwell.
     pub(crate) fn control() -> Self {
         Self {
-            local_score: 0.58,
+            local_score: 0.22,
             quality_score: 0.18,
             recall_score: 0.10,
             freshness: 0.08,
@@ -58,7 +63,7 @@ impl RankWeights {
     /// outranks engagement entirely for its cohorts.
     pub(crate) fn wegu_heavy() -> Self {
         let mut weights = Self::control();
-        weights.local_score = 0.50;
+        weights.local_score = 0.16;
         weights.quality_score = 0.15;
         weights.recall_score = 0.09;
         weights.freshness = 0.07;
@@ -178,6 +183,10 @@ fn objective_evidence(
             .find(|entry| entry.content_id == candidate.content_id)
     });
     ObjectiveEvidence {
+        // The explicit predictions are the remote LLM scorer's output for THIS
+        // request, written onto the candidate in `rank::rank` before ranking.
+        // They are zero when no scorer served, which is what makes the
+        // predictor fall through to the observed rates below.
         explicit_ctr: finite(candidate.p_ctr),
         explicit_cvr: finite(candidate.p_cvr),
         explicit_wegu: finite(candidate.p_wegu),
@@ -238,6 +247,48 @@ pub(crate) fn stable_bucket(value: &str) -> u8 {
         % 10
 }
 
+/// Min-max normalizes the upstream heuristic score across this request's
+/// candidates, returning one value in `0.0..=1.0` per candidate in order.
+///
+/// The heuristic arriving from recommend-main is an unbounded sum (quality +
+/// log-popularity + freshness, plus flat +2.5 / +2.0 bonuses for an interest
+/// match and a followed author), so it typically lands somewhere in 1..8. Every
+/// other term in the fusion below is a rate or a calibrated probability in
+/// 0..1. Multiplying the raw heuristic by a coefficient therefore made that one
+/// term dwarf all the others — a single interest-match bonus outweighed the
+/// entire WEGU contribution — and made the published coefficients meaningless.
+/// Normalizing first is what lets the weight tables state a real policy.
+///
+/// A request whose candidates all share one heuristic value carries no ordering
+/// information, so every candidate gets a neutral 0.5 rather than a spurious
+/// spread.
+fn normalized_local_scores(candidates: &[Candidate]) -> Vec<f64> {
+    let scores = candidates
+        .iter()
+        .map(|candidate| finite(candidate.score))
+        .collect::<Vec<_>>();
+    let (Some(lowest), Some(highest)) = (
+        scores
+            .iter()
+            .copied()
+            .reduce(f64::min),
+        scores
+            .iter()
+            .copied()
+            .reduce(f64::max),
+    ) else {
+        return scores;
+    };
+    let span = highest - lowest;
+    if span <= f64::EPSILON {
+        return scores.iter().map(|_| 0.5).collect();
+    }
+    scores
+        .iter()
+        .map(|score| ((score - lowest) / span).clamp(0.0, 1.0))
+        .collect()
+}
+
 pub(crate) fn rank(
     mut candidates: Vec<Candidate>,
     features: Option<&pb::RankFeatures>,
@@ -247,14 +298,15 @@ pub(crate) fn rank(
 ) -> Vec<Candidate> {
     let weights = RankWeights::for_bucket(bucket);
     let signals = RankingSignals::from_features(features);
-    for candidate in &mut candidates {
+    let local_scores = normalized_local_scores(&candidates);
+    for (index, candidate) in candidates.iter_mut().enumerate() {
         let candidate_signals =
             CandidateRankingSignals::from_features(features, &candidate.content_id);
         let evidence = objective_evidence(candidate, features);
         // A configured-but-unavailable remote model already defers to its
         // internal heuristic per call and reports degradation on the response.
         let prediction = predictor.predict(&evidence);
-        let local_score = finite(candidate.score);
+        let local_score = local_scores.get(index).copied().unwrap_or(0.5);
         candidate.score = weights.local_score * local_score
             + weights.quality_score * finite(candidate.quality_score)
             + weights.recall_score * finite(candidate.recall_score)
@@ -317,7 +369,7 @@ fn finite(value: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{RankWeights, rank};
+    use super::{RankWeights, normalized_local_scores, rank};
     use crate::api::pb;
     use crate::domain::rank::predictor::HeuristicPredictor;
     use bookway_recommend_recall_api::pb::Candidate;
@@ -466,6 +518,102 @@ mod tests {
         );
 
         assert_eq!(ranked[0].content_id, "route-proven");
+    }
+
+    /// The headline product requirement: ranking centres on WEGU (action
+    /// conversion) and route completion, not on clicks/dwell. A candidate with
+    /// the strongest possible engagement heuristic and CTR must still lose to
+    /// one that people actually act on and finish.
+    ///
+    /// This is the case the old arithmetic could not express: `local_score` was
+    /// the raw unbounded heuristic (here 8.0, an interest match plus a followed
+    /// author), so at the old 0.58 coefficient it contributed 4.64 while the
+    /// entire multi-objective block could contribute at most 0.88.
+    #[test]
+    fn action_proven_content_outranks_a_pure_engagement_candidate() {
+        let ranked = rank(
+            vec![
+                Candidate {
+                    content_id: "engagement-heavy".to_string(),
+                    score: 8.0,
+                    ..Default::default()
+                },
+                Candidate {
+                    content_id: "action-proven".to_string(),
+                    score: 1.0,
+                    ..Default::default()
+                },
+            ],
+            Some(&features_for(vec![
+                pb::CandidateFeatures {
+                    content_id: "engagement-heavy".to_string(),
+                    click_through_rate: 1.0,
+                    ..Default::default()
+                },
+                pb::CandidateFeatures {
+                    content_id: "action-proven".to_string(),
+                    action_completion_rate: 1.0,
+                    route_completion_rate: 1.0,
+                    ..Default::default()
+                },
+            ])),
+            0,
+            "recommend-rank-v2",
+            &HeuristicPredictor,
+        );
+
+        assert_eq!(ranked[0].content_id, "action-proven");
+    }
+
+    /// Normalization must not invent an ordering where the heuristic carries no
+    /// information, and must stay bounded so the coefficients keep their meaning.
+    #[test]
+    fn local_heuristic_is_normalized_into_the_unit_range() {
+        let candidate = |content_id: &str, score: f64| Candidate {
+            content_id: content_id.to_string(),
+            score,
+            ..Default::default()
+        };
+
+        let spread = normalized_local_scores(&[
+            candidate("low", 1.0),
+            candidate("mid", 4.5),
+            candidate("high", 8.0),
+        ]);
+        assert_eq!(spread, vec![0.0, 0.5, 1.0]);
+
+        // All-equal heuristics carry no ordering information: neutral, not a
+        // fabricated spread.
+        let flat = normalized_local_scores(&[candidate("a", 3.0), candidate("b", 3.0)]);
+        assert_eq!(flat, vec![0.5, 0.5]);
+
+        let single = normalized_local_scores(&[candidate("only", 7.0)]);
+        assert_eq!(single, vec![0.5]);
+        assert!(normalized_local_scores(&[]).is_empty());
+
+        // A non-finite upstream score cannot escape the unit range.
+        let poisoned = normalized_local_scores(&[candidate("nan", f64::NAN), candidate("ok", 2.0)]);
+        assert!(poisoned.iter().all(|value| (0.0..=1.0).contains(value)));
+    }
+
+    #[test]
+    fn weight_tables_keep_action_signals_above_engagement() {
+        for weights in [
+            RankWeights::control(),
+            RankWeights::wegu_heavy(),
+            RankWeights::exploration(),
+        ] {
+            assert!(
+                weights.p_wegu > weights.p_ctr,
+                "{}: WEGU must outweigh click-through",
+                weights.tag()
+            );
+            assert!(
+                weights.p_wegu + weights.route_completion_rate > weights.local_score,
+                "{}: action signals must outweigh the engagement heuristic",
+                weights.tag()
+            );
+        }
     }
 
     #[test]

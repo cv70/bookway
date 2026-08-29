@@ -28,7 +28,8 @@ enum SearchResultType {
   // available through the post field for scene-aware commerce linking.
   SEARCH_RESULT_TYPE_ACTION_NODE = 6;
   // One (route node, equipment) match. Equipment has no standalone identity,
-  // so the result ID is "<content-id>/<action-id>/equipment/<name>".
+  // so short identities use "<content-id>/<action-id>/equipment/<name>";
+  // overlong composites are replaced by a deterministic bounded UUID.
   SEARCH_RESULT_TYPE_SCENE_EQUIPMENT = 7;
 }
 
@@ -78,7 +79,9 @@ message PostSummary {
   string cover_url = 7;
   string route_title = 8;
   string route_duration = 9;
-  uint32 join_count = 10;
+  // Live participation, owned by BBS and never indexed. Absent means the
+  // responding service did not read the fact, not that nobody joined.
+  optional uint32 join_count = 10;
   uint32 like_count = 11;
   double freshness = 12;
   repeated string tags = 13;

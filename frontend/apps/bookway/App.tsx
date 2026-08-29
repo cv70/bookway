@@ -124,11 +124,12 @@ import {
 
 type EntryContext = { actionId?: string; journeyId?: string; durationMinutes?: number };
 
+
 export default function App() {
   const currentUserId = viewerUserId();
   const canModerate = viewerCanModerate();
   const [profile, setProfile] = useState<AccountProfile>(() => ({
-    user_id: currentUserId ?? 'demo-user',
+    user_id: currentUserId ?? '',
     display_name: '行路人',
     avatar_url: '',
     bio: '在万卷与山河之间，成为自己',
@@ -238,6 +239,10 @@ const [authorStats, setAuthorStats] = useState<SocialStats>();
   const [readerActionId, setReaderActionId] = useState<string>();
 
   const refreshMyOrders = () => {
+    if (!currentUserId) {
+      setOrdersLoading(false);
+      return;
+    }
     setOrdersLoading(true);
     listMyOrders()
       .then((response) => {
@@ -274,47 +279,49 @@ useEffect(() => {
     ])
       .then(([profileResult, todayResult, journeysResult, feedResult, followingResult, entriesResult, reviewResult, companionResult, knowledgeResult, notificationResult, socialResult, participationResult]) => {
         if (!mounted) return;
-        if (profileResult.status === 'fulfilled') setProfile(profileResult.value);
-        if (todayResult.status === 'fulfilled') setToday(todayResult.value);
-        else setTodayError(true);
-        if (journeysResult.status === 'fulfilled') setJourneys(journeysResult.value);
-        else setJourneysError(true);
+        if (currentUserId) {
+          if (profileResult.status === 'fulfilled') setProfile(profileResult.value);
+          if (todayResult.status === 'fulfilled') setToday(todayResult.value);
+          else setTodayError(true);
+          if (journeysResult.status === 'fulfilled') setJourneys(journeysResult.value);
+          else setJourneysError(true);
+        }
         if (feedResult.status === 'fulfilled') setFeed(attachFeedAttribution(feedResult.value, 'home'));
         else setFeedError(true);
         if (followingResult.status === 'fulfilled') {
           setFollowingFeed(attachFeedAttribution(followingResult.value, 'following'));
         } else setFollowingFeedError(true);
-        if (entriesResult.status === 'fulfilled') setEntries(entriesResult.value);
-        else setEntriesError(true);
-        if (reviewResult.status === 'fulfilled') setWeeklyReview(reviewResult.value);
-        if (companionResult.status === 'fulfilled') setCompanion(companionResult.value);
-        if (knowledgeResult.status === 'fulfilled') {
-          setKnowledgeResources(knowledgeResult.value);
-          setReadingBooks(knowledgeResult.value
-            .filter((resource) => resource.kind === 'book')
-            .map(knowledgeResourceToReadingBook));
-          setReadingBookmarks(knowledgeResult.value.flatMap((resource) => resource.bookmarks.map((chapterId) => ({
-            book_id: resource.id,
-            chapter_id: chapterId,
-            created_at: resource.updated_at,
-          }))));
-        }
-        if (notificationResult.status === 'fulfilled') setNotificationPage(notificationResult.value);
-        if (socialResult.status === 'fulfilled') {
-          setFollowingAuthorIds(new Set(socialResult.value.followed_author_ids));
-          setMutedAuthorIds(new Set(socialResult.value.muted_author_ids));
-          setBlockedAuthorIds(new Set(socialResult.value.blocked_author_ids));
-        }
-        if (participationResult.status === 'fulfilled') {
-          setJoinedRouteIds(new Set(participationResult.value.map((item) => item.route_id)));
+        if (currentUserId) {
+          if (entriesResult.status === 'fulfilled') setEntries(entriesResult.value);
+          else setEntriesError(true);
+          if (reviewResult.status === 'fulfilled') setWeeklyReview(reviewResult.value);
+          if (companionResult.status === 'fulfilled') setCompanion(companionResult.value);
+          if (knowledgeResult.status === 'fulfilled') {
+            setKnowledgeResources(knowledgeResult.value);
+            setReadingBooks(knowledgeResult.value
+              .filter((resource) => resource.kind === 'book')
+              .map(knowledgeResourceToReadingBook));
+            setReadingBookmarks(knowledgeResult.value.flatMap((resource) => resource.bookmarks.map((chapterId) => ({
+              book_id: resource.id,
+              chapter_id: chapterId,
+              created_at: resource.updated_at,
+            }))));
+          }
+          if (notificationResult.status === 'fulfilled') setNotificationPage(notificationResult.value);
+          if (socialResult.status === 'fulfilled') {
+            setFollowingAuthorIds(new Set(socialResult.value.followed_author_ids));
+            setMutedAuthorIds(new Set(socialResult.value.muted_author_ids));
+            setBlockedAuthorIds(new Set(socialResult.value.blocked_author_ids));
+          }
+          if (participationResult.status === 'fulfilled') {
+            setJoinedRouteIds(new Set(participationResult.value.map((item) => item.route_id)));
+          }
         }
         setInitialLoading(false);
-        setOffline([
+        const privateResults = [
           profileResult,
           todayResult,
           journeysResult,
-          feedResult,
-          followingResult,
           entriesResult,
           reviewResult,
           companionResult,
@@ -322,13 +329,19 @@ useEffect(() => {
           notificationResult,
           socialResult,
           participationResult,
-        ].some((result) => result.status === 'rejected'));
+        ];
+        setOffline(
+          feedResult.status === 'rejected'
+            || followingResult.status === 'rejected'
+            || (Boolean(currentUserId) && privateResults.some((result) => result.status === 'rejected')),
+        );
       });
     return () => {
       mounted = false;
       eventReporter.stop();
     };
   }, []);
+
 
   useEffect(() => {
     if (!entries.some((entry) => entryPublicationStatus(entry) === 'pending')) return undefined;
@@ -1264,7 +1277,7 @@ useEffect(() => {
     const localComment: Comment = {
       id: `local-comment-${Date.now()}`,
       post_id: postId,
-      author_id: currentUserId ?? 'demo-user',
+      author_id: currentUserId ?? '',
       author_name: '行路人',
       body,
       parent_id: parentId,
@@ -1366,7 +1379,11 @@ useEffect(() => {
       intent: journey.intent.trim() || journey.title,
       completion_criteria: journey.completion_criteria.trim() || '完成路线中的必要阶段和行动',
       journey_type: journey.journey_type,
-      stages: journey.stages.map(({ title, detail, completion_criteria }) => ({
+      // Public stages get their own stable ids minted at publish time. The
+      // private journey's stage ids stay private, and the published ids do not
+      // move when the author later reorders the public route.
+      stages: journey.stages.map(({ title, detail, completion_criteria }, position) => ({
+        id: `stage-${position + 1}`,
         title: title.trim(),
         detail: detail.trim(),
         completion_criteria: completion_criteria.trim(),
@@ -1380,7 +1397,7 @@ useEffect(() => {
           estimated_minutes: action.estimated_minutes,
           // A public route is a reusable method, never the author's exact calendar.
           scheduled_label: '按自己的节奏安排',
-          ...(stageIndex >= 0 ? { stage_index: stageIndex } : {}),
+          ...(stageIndex >= 0 ? { stage_id: `stage-${stageIndex + 1}` } : {}),
         };
       }),
     } : undefined;

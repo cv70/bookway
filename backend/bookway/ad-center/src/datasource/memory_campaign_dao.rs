@@ -348,6 +348,7 @@ impl CampaignDao for MemoryCampaignDao {
     ) -> Result<pb::EventReceipt, DaoError> {
         let now = OffsetDateTime::now_utc();
         let day = date_key(now);
+        let is_conversion = request.event_type == pb::EventType::Conversion as i32;
         // Idempotent retries must remain successful even after the decision
         // lease expires or the campaign is paused. Read the event first,
         // then release the lock before taking the campaign lock below.
@@ -382,20 +383,22 @@ impl CampaignDao for MemoryCampaignDao {
                 duplicate: true,
             });
         }
-        let decision = self
-            .decisions
-            .read()
-            .await
-            .get(&(request.request_id.clone(), request.campaign_id.clone()))
-            .cloned();
-        if !decision
-            .is_some_and(|decision| decision.user_id == user_id && decision.expires_at > now)
-        {
-            return Ok(pb::EventReceipt {
-                event_id: request.event_id,
-                accepted: false,
-                duplicate: false,
-            });
+        if !is_conversion {
+            let decision = self
+                .decisions
+                .read()
+                .await
+                .get(&(request.request_id.clone(), request.campaign_id.clone()))
+                .cloned();
+            if !decision
+                .is_some_and(|decision| decision.user_id == user_id && decision.expires_at > now)
+            {
+                return Ok(pb::EventReceipt {
+                    event_id: request.event_id,
+                    accepted: false,
+                    duplicate: false,
+                });
+            }
         }
         // All following locks use the same order as candidate reads:
         // campaigns -> events -> daily budget, avoiding a memory-mode deadlock.
@@ -403,9 +406,10 @@ impl CampaignDao for MemoryCampaignDao {
         let campaign = campaigns
             .get_mut(&request.campaign_id)
             .ok_or_else(|| DaoError::NotFound(request.campaign_id.clone()))?;
-        if campaign.status != pb::CampaignStatus::Active as i32
-            || campaign_starts(campaign).is_some_and(|start| start > now)
-            || campaign_ends(campaign).is_some_and(|end| end <= now)
+        if !is_conversion
+            && (campaign.status != pb::CampaignStatus::Active as i32
+                || campaign_starts(campaign).is_some_and(|start| start > now)
+                || campaign_ends(campaign).is_some_and(|end| end <= now))
         {
             return Ok(pb::EventReceipt {
                 event_id: request.event_id,
@@ -442,7 +446,7 @@ impl CampaignDao for MemoryCampaignDao {
                 duplicate: true,
             });
         }
-        if request.event_type == pb::EventType::Click as i32
+        if (request.event_type == pb::EventType::Click as i32 || is_conversion)
             && !events.values().any(|event| {
                 event.user_id == user_id
                     && event.request_id == request.request_id
@@ -538,6 +542,8 @@ impl CampaignDao for MemoryCampaignDao {
             campaign.impressions = campaign.impressions.saturating_add(1);
         } else if request.event_type == pb::EventType::Click as i32 {
             campaign.clicks = campaign.clicks.saturating_add(1);
+        } else if is_conversion {
+            campaign.conversions = campaign.conversions.saturating_add(1);
         }
         campaign.updated_at = timestamp(now);
         events.insert(

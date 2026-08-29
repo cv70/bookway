@@ -108,11 +108,16 @@ impl CandidateRanker for RecommendRanker {
     }
 }
 
+/// What the ranker returned for one candidate: the fused score, the calibrated
+/// (pCTR, pCVR, pWEGU) objectives behind it, and the serving-time feature values
+/// the exposure ledger records.
+type RankedScore = (f64, (f64, f64, f64), HashMap<String, f64>);
+
 /// Applies the rank response's fused score and per-objective estimates to the
 /// matching candidates. Returns how many candidates the response covered.
 fn apply_ranked_scores(
     candidates: &mut [Candidate],
-    scores: HashMap<String, (f64, (f64, f64, f64), HashMap<String, f64>)>,
+    scores: HashMap<String, RankedScore>,
 ) -> usize {
     let mut scored_candidates = 0;
     for candidate in candidates {
@@ -150,6 +155,27 @@ fn apply_feature_fallback(candidates: &mut [Candidate], features: &feature::Feat
         candidate.p_ctr = p_ctr;
         candidate.p_cvr = p_cvr;
         candidate.p_wegu = p_wegu;
+        // Keep the same leak-free feature contract as the remote ranker even
+        // when the model RPC is unavailable. This fallback still made a
+        // serving decision from these values, so dropping them would leave an
+        // untraceable exposure row and silently bias later training.
+        candidate.feature_snapshot = [
+            ("explicit_ctr", 0.0),
+            ("observed_ctr", finite_probability(signal.click_through_rate)),
+            ("observed_cvr", finite_probability(signal.purchase_conversion_rate)),
+            ("observed_wegu", finite_probability(signal.action_completion_rate)),
+            ("route_completion", route_completion),
+            ("domain_affinity", finite_probability(signal.domain_affinity)),
+            ("author_affinity", finite_probability(signal.author_affinity)),
+            ("impression_fatigue", finite_probability(signal.impression_fatigue)),
+            (
+                "direct_negative_feedback",
+                finite_probability(signal.direct_negative_feedback),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
         candidate.score += 0.18 * p_ctr
             + 0.20 * p_cvr
             + 0.30 * p_wegu
@@ -217,10 +243,12 @@ fn rank_features(features: feature::FeaturesResponse) -> rank::RankFeatures {
                 save_rate: candidate.save_rate,
                 action_completion_rate: candidate.action_completion_rate,
                 purchase_conversion_rate: candidate.purchase_conversion_rate,
-                p_ctr: calibrated_probability(candidate.click_through_rate),
-                p_cvr: calibrated_probability(candidate.purchase_conversion_rate),
-                p_wegu: calibrated_probability(candidate.action_completion_rate),
-                route_completion_rate: calibrated_probability(candidate.route_completion_rate),
+                // Raw, not calibrated: recommend-rank owns prediction, and it
+                // needs to tell "never observed" (0.0) apart from "observed
+                // zero". `calibrated_probability` floors at 0.0001, which lands
+                // verbatim in the training feature snapshot and erases that
+                // distinction for the trainer.
+                route_completion_rate: finite_probability(candidate.route_completion_rate),
             })
             .collect(),
     }
@@ -391,6 +419,10 @@ mod tests {
                 .reasons
                 .iter()
                 .any(|reason| reason == "[debug] 多目标特征降级排序")
+        }));
+        assert!(candidates.iter().all(|candidate| {
+            candidate.feature_snapshot.len() == 9
+                && candidate.feature_snapshot.contains_key("observed_wegu")
         }));
     }
 

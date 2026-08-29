@@ -53,7 +53,7 @@ cargo run -p bookway-search-evaluator
 
 ## 搜索归因
 
-每个返回给客户端的结果页都有独立 UUID `request_id`。Search Main 在返回前将可信查看者、客户端会话、查询 hash、结果 ID 和原始零基位置写入 `search_exposures` / `search_exposure_items`；User Event 通过内部 `ValidateAttributions` 批量 RPC 校验搜索点击、点赞、收藏、隐藏、知识收集和路线加入。归因记录在 30 天后失效，写入路径每次至多清理 1,000 个过期页。伪造或过期归因会被拒绝；搜索服务暂时不可用时，User Event 仅保留无归因反馈，避免污染训练和质量指标。
+每个返回给客户端的结果页都有独立 UUID `request_id`。登录请求在返回前将可信查看者、客户端会话、查询 hash、结果 ID 和原始零基位置写入 `search_exposures` / `search_exposure_items`；匿名请求只返回 request ID，不写入共享的合成身份，也不能产生可验证归因。User Event 通过内部 `ValidateAttributions` 批量 RPC 校验搜索点击、点赞、收藏、隐藏、知识收集和路线加入。归因记录在 30 天后失效，写入路径每次至多清理 1,000 个过期页。伪造或过期归因会被拒绝；搜索服务暂时不可用时，User Event 仅保留无归因反馈，避免污染训练和质量指标。
 
 ## 可观测性与边界
 

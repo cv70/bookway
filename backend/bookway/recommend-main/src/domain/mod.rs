@@ -58,6 +58,13 @@ impl FeedService {
             self.persist_served(&mut served).await;
             return served.response;
         };
+        // Ads require a user-scoped frequency decision. Anonymous contextual
+        // feeds remain organic-only instead of making an ad RPC that can only
+        // fail on its missing identity and mark the useful response degraded.
+        if request.user_id.trim().is_empty() {
+            self.persist_served(&mut served).await;
+            return served.response;
+        }
         // Skip the decision RPC entirely when the mix schedule offers no slot
         // (short pages, tiny limits) or the recall is too thin to guarantee a
         // useful organic experience.
@@ -212,9 +219,16 @@ impl FeedService {
 /// the requested route, node, placement and scene equipment are dropped
 /// before the mix, so a mismatched campaign can never buy its way in.
 ///
-/// Naturals displaced past the page limit are dropped here and stay invisible
-/// for this response; the caller persists exposure only AFTER this mixing, so
-/// a displaced item never enters the ledger or the frequency guard.
+/// Naturals displaced past the page limit are dropped here. The caller persists
+/// exposure only AFTER this mixing, so a displaced item never enters the ledger
+/// or the frequency guard — but the response cursor was already advanced past it
+/// by recall, so it is skipped for good rather than deferred to the next page.
+/// The loss is bounded by the ad slot count and always falls on the lowest-ranked
+/// tail of the page. Search does defer its overflow (`session.pending`), which it
+/// can because it owns a session pending list; the feed's cursor is recall's
+/// opaque token and cannot be rewound. Fixing this properly means reserving ad
+/// slots before selection, which would shrink every page whose ad decision comes
+/// back empty — a worse trade at current fill rates.
 fn mix_contextual_ad(
     response: &mut pb::FeedResponse,
     decision: ad_pb::DecisionResponse,
@@ -257,9 +271,10 @@ fn mix_contextual_ad(
     let organics = std::mem::take(&mut response.items);
     let (mixed, overflow) =
         bookway_commercial_mix::mix_page(organics, ads, limit, FEED_AD_POLICY);
-    // Displaced tail organics stay invisible for this response. Exposure
-    // persistence happens after this function, filtering by rendered ids,
-    // so they are never recorded as served.
+    // Displaced tail organics stay invisible for this response and are never
+    // recorded as served (exposure persistence runs after this function and
+    // filters by rendered ids). They are not re-offered later, though — see the
+    // note on this function.
     drop(overflow);
     let mut items = Vec::with_capacity(mixed.len());
     for slot in mixed {

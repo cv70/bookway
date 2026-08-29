@@ -172,7 +172,7 @@ impl Domain {
                     .unwrap_or_default(),
                 route_title,
                 route_duration,
-                join_count: 0,
+                join_count: None,
                 like_count: 0,
                 freshness: 1.0,
                 tags: request.tags,
@@ -296,14 +296,14 @@ impl Domain {
                 cover_url: String::new(),
                 route_title: title,
                 route_duration: source_duration,
-                join_count: 0,
+                join_count: None,
                 like_count: 0,
                 freshness: 1.0,
                 tags: source_tags,
                 is_route: true,
                 is_milestone: false,
                 is_question: false,
-            fork_count: 0,
+                fork_count: 0,
             }),
             author_id: user_id.to_string(),
             content_type: pb::ContentType::Route as i32,
@@ -596,9 +596,15 @@ impl Domain {
         validate_text(&draft.outcome_summary, 1, 1_000, "阶段结果")?;
         validate_text(&draft.adjustment_summary, 0, 600, "阶段调整")?;
         validate_text(&draft.evidence_scope, 1, 300, "证据范围")?;
-        let stage_index = draft.stage_index.ok_or_else(|| {
-            ContentError::Validation("阶段成果必须关联路线中的一个阶段".to_string())
-        })?;
+        let stage_id = draft
+            .stage_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ContentError::Validation("阶段成果必须关联路线中的一个阶段".to_string())
+            })?
+            .to_string();
 
         // A milestone can only point to content that is currently public. The
         // snapshot below is public route metadata, never a private plan read.
@@ -634,12 +640,13 @@ impl Domain {
             .ok_or_else(|| ContentError::Validation("关联路线没有可验证的阶段模板".to_string()))?;
         let stage = route_template
             .stages
-            .get(stage_index as usize)
+            .iter()
+            .find(|stage| stage.id.trim() == stage_id)
             .ok_or_else(|| ContentError::Validation("关联路线中不存在该阶段".to_string()))?;
         Ok(Some(pb::Milestone {
             route_id,
             route_title: post.title.clone(),
-            stage_index,
+            stage_id,
             stage_title: stage.title.clone(),
             effort_summary: draft.effort_summary.trim().to_string(),
             outcome_summary: draft.outcome_summary.trim().to_string(),
@@ -694,22 +701,31 @@ impl Domain {
                 "问题的成长领域必须与关联路线一致".to_string(),
             ));
         }
-        let (stage_index, stage_title) = if let Some(stage_index) = draft.stage_index {
-            let route_template = route.route_template.as_ref().ok_or_else(|| {
-                ContentError::Validation("关联路线没有可验证的阶段模板".to_string())
-            })?;
-            let stage = route_template
-                .stages
-                .get(stage_index as usize)
-                .ok_or_else(|| ContentError::Validation("关联路线中不存在该阶段".to_string()))?;
-            (Some(stage_index), Some(stage.title.clone()))
-        } else {
-            (None, None)
+        let (stage_id, stage_title) = match draft
+            .stage_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(stage_id) => {
+                let route_template = route.route_template.as_ref().ok_or_else(|| {
+                    ContentError::Validation("关联路线没有可验证的阶段模板".to_string())
+                })?;
+                let stage = route_template
+                    .stages
+                    .iter()
+                    .find(|stage| stage.id.trim() == stage_id)
+                    .ok_or_else(|| {
+                        ContentError::Validation("关联路线中不存在该阶段".to_string())
+                    })?;
+                (Some(stage_id.to_string()), Some(stage.title.clone()))
+            }
+            None => (None, None),
         };
         Ok(Some(pb::QuestionContext {
             route_id,
             route_title: post.title.clone(),
-            stage_index,
+            stage_id,
             stage_title,
         }))
     }
@@ -875,12 +891,21 @@ fn validate_route_template(
         ));
     }
     for stage in &template.stages {
+        validate_route_node_id(&stage.id, "路线阶段 ID")?;
         validate_text(&stage.title, 1, 100, "路线阶段名称")?;
         validate_text(&stage.detail, 0, 500, "路线阶段说明")?;
         validate_text(&stage.completion_criteria, 0, 200, "路线阶段完成标准")?;
     }
+    let stage_ids = template
+        .stages
+        .iter()
+        .map(|stage| stage.id.trim())
+        .collect::<std::collections::HashSet<_>>();
+    if stage_ids.len() != template.stages.len() {
+        return Err(ContentError::Validation("路线阶段 ID 必须唯一".to_string()));
+    }
     for action in &template.actions {
-        validate_action_node_id(&action.id)?;
+        validate_route_node_id(&action.id, "路线行动节点 ID")?;
         validate_text(&action.title, 1, 120, "路线行动名称")?;
         validate_text(&action.detail, 0, 1_000, "路线行动说明")?;
         validate_text(&action.scheduled_label, 1, 80, "路线行动安排")?;
@@ -889,9 +914,14 @@ fn validate_route_template(
                 "路线行动时长需要在 1 到 720 分钟之间".to_string(),
             ));
         }
-        if action.stage_index.is_some_and(|index| {
-            usize::try_from(index).map_or(true, |index| index >= template.stages.len())
-        }) {
+        // A stage reference must resolve to a stage declared by this template.
+        // Resolution is by stable id, so reordering the stages later cannot
+        // silently move an action to a different stage.
+        if action
+            .stage_id
+            .as_deref()
+            .is_some_and(|stage_id| !stage_ids.contains(stage_id.trim()))
+        {
             return Err(ContentError::Validation(
                 "路线行动关联了不存在的阶段".to_string(),
             ));
@@ -911,7 +941,11 @@ fn validate_route_template(
     Ok(Some(template))
 }
 
-fn validate_action_node_id(value: &str) -> Result<(), ContentError> {
+/// Stable identity for the addressable parts of a public route template
+/// (stages and action nodes). Node-bound resources, equipment, commercial
+/// offers, advertisements, milestones and question contexts all join on these
+/// keys, so they must be opaque slugs rather than array positions.
+fn validate_route_node_id(value: &str, label: &str) -> Result<(), ContentError> {
     let raw = value;
     let value = raw.trim();
     if value.is_empty()
@@ -921,9 +955,9 @@ fn validate_action_node_id(value: &str) -> Result<(), ContentError> {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
         })
     {
-        return Err(ContentError::Validation(
-            "路线行动节点 ID 只能包含字母、数字、-、_ 或 .，长度不超过 160".to_string(),
-        ));
+        return Err(ContentError::Validation(format!(
+            "{label}只能包含字母、数字、-、_ 或 .，长度不超过 160"
+        )));
     }
     Ok(())
 }
@@ -1085,7 +1119,7 @@ mod tests {
     fn milestone_draft(route_id: &str) -> pb::MilestoneDraft {
         pb::MilestoneDraft {
             route_id: route_id.to_string(),
-            stage_index: Some(0),
+            stage_id: Some(format!("{route_id}-stage-start")),
             effort_summary: "连续 7 天每天阅读 20 分钟，并完成两次整理".to_string(),
             outcome_summary: "从零散阅读转为能复述一个主题的完整观点".to_string(),
             adjustment_summary: "把周中整理改为周末集中完成".to_string(),
@@ -1098,6 +1132,7 @@ mod tests {
             intent: "用小步建立阅读节奏".to_string(),
             completion_criteria: "完成四周的主题阅读和三次复盘".to_string(),
             stages: vec![pb::RouteTemplateStage {
+                id: "stage-warmup".to_string(),
                 title: "起步".to_string(),
                 detail: "先找到可持续的时段".to_string(),
                 completion_criteria: "完成三次阅读".to_string(),
@@ -1108,7 +1143,7 @@ mod tests {
                 detail: "只标记一个有用观点".to_string(),
                 estimated_minutes: 20,
                 scheduled_label: "今晚".to_string(),
-                stage_index: Some(0),
+                stage_id: Some("stage-warmup".to_string()),
                 scene_equipment: vec!["阅读灯".to_string()],
             }],
             journey_type: pb::RouteTemplateKind::Project as i32,
@@ -1283,7 +1318,7 @@ mod tests {
                 content_type: pb::ContentType::Question as i32,
                 question_context: Some(pb::QuestionContextDraft {
                     route_id: "post-reading".to_string(),
-                    stage_index: Some(0),
+                    stage_id: Some("post-reading-stage-start".to_string()),
                 }),
                 ..create_request()
             })
@@ -1298,7 +1333,10 @@ mod tests {
             context.route_title,
             "读完 12 本书后，我留下了这套主题阅读法"
         );
-        assert_eq!(context.stage_index, Some(0));
+        assert_eq!(
+            context.stage_id.as_deref(),
+            Some("post-reading-stage-start")
+        );
         assert_eq!(context.stage_title.as_deref(), Some("从第一步开始"));
     }
 
@@ -1320,7 +1358,7 @@ mod tests {
                 content_type: pb::ContentType::Question as i32,
                 question_context: Some(pb::QuestionContextDraft {
                     route_id: private_route.id,
-                    stage_index: None,
+                    stage_id: None,
                 }),
                 ..create_request()
             })
@@ -1334,7 +1372,7 @@ mod tests {
                 domain: pb::GrowthDomain::Travel as i32,
                 question_context: Some(pb::QuestionContextDraft {
                     route_id: "post-reading".to_string(),
-                    stage_index: None,
+                    stage_id: None,
                 }),
                 ..create_request()
             })
@@ -1402,7 +1440,7 @@ mod tests {
             milestone.route_title,
             "读完 12 本书后，我留下了这套主题阅读法"
         );
-        assert_eq!(milestone.stage_index, 0);
+        assert_eq!(milestone.stage_id, "post-reading-stage-start");
         assert_eq!(milestone.stage_title, "从第一步开始");
         assert!(milestone.effort_summary.contains("7 天"));
     }
@@ -1755,6 +1793,28 @@ mod tests {
             validate_route_template(pb::ContentType::Route as i32, Some(duplicate_equipment),)
                 .is_err()
         );
+
+        // Stage identity is a declared id, so it must be present, unique, and
+        // actually resolvable from the actions that claim it.
+        let mut missing_stage_id = route_template();
+        missing_stage_id.stages[0].id = String::new();
+        assert!(
+            validate_route_template(pb::ContentType::Route as i32, Some(missing_stage_id)).is_err()
+        );
+        let mut duplicate_stage_id = route_template();
+        let mut cloned_stage = duplicate_stage_id.stages[0].clone();
+        cloned_stage.title = "另一个阶段".to_string();
+        duplicate_stage_id.stages.push(cloned_stage);
+        assert!(
+            validate_route_template(pb::ContentType::Route as i32, Some(duplicate_stage_id))
+                .is_err()
+        );
+        let mut dangling_stage_ref = route_template();
+        dangling_stage_ref.actions[0].stage_id = Some("stage-does-not-exist".to_string());
+        assert!(
+            validate_route_template(pb::ContentType::Route as i32, Some(dangling_stage_ref))
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1764,6 +1824,7 @@ mod tests {
             intent: "在忙碌中恢复阅读".to_string(),
             completion_criteria: "完成四次阅读和一次回望".to_string(),
             stages: vec![pb::RouteTemplateStage {
+                id: "stage-minimum".to_string(),
                 title: "起步".to_string(),
                 detail: "先找到最小可行时间".to_string(),
                 completion_criteria: "完成第一次阅读".to_string(),
@@ -1774,7 +1835,7 @@ mod tests {
                 detail: "只记录一个值得保留的观点".to_string(),
                 estimated_minutes: 20,
                 scheduled_label: "今晚".to_string(),
-                stage_index: Some(0),
+                stage_id: Some("stage-minimum".to_string()),
                 scene_equipment: vec!["阅读笔记本".to_string()],
             }],
             journey_type: pb::RouteTemplateKind::Habit as i32,

@@ -192,7 +192,9 @@ export type CommunityPost = {
   cover_url: string;
   route_title: string;
   route_duration: string;
-  join_count: number;
+  // Absent when no service read the live participation fact. Never render it
+  // as 0 人加入 — that is a claim the server did not make.
+  join_count?: number | null;
   like_count: number;
   freshness: number;
   tags: string[];
@@ -238,7 +240,7 @@ export type ContentDetail = {
 export type Milestone = {
   route_id: string;
   route_title: string;
-  stage_index: number;
+  stage_id: string;
   stage_title: string;
   effort_summary: string;
   outcome_summary: string;
@@ -249,7 +251,7 @@ export type Milestone = {
 export type QuestionContext = {
   route_id: string;
   route_title: string;
-  stage_index?: number | null;
+  stage_id?: string | null;
   stage_title?: string | null;
 };
 
@@ -501,7 +503,7 @@ export type Feed = {
 
 export type SearchResult = {
   id: string;
-  result_type: 'post' | 'journey' | 'user' | 'topic';
+  result_type: 'post' | 'journey' | 'user' | 'topic' | 'resource' | 'ad' | 'action_node' | 'scene_equipment';
   title: string;
   snippet: string;
   cover_url?: string;
@@ -511,8 +513,23 @@ export type SearchResult = {
   score: number;
   highlights: string[];
   post?: CommunityPost;
+  resource?: SearchResourceSummary | null;
+  ad?: FeedAd | null;
   // Client-only position and page request that produced this search result.
   event_context?: RecommendationEventContext;
+};
+
+export type SearchResourceSummary = {
+  id: string;
+  kind: string;
+  provider: string;
+  url: string;
+  license: string;
+  version: string;
+  citation: string;
+  topics: string[];
+  published_at: string;
+  updated_at: string;
 };
 
 export type SearchResponse = {
@@ -527,7 +544,7 @@ export type SearchResponse = {
 
 export type SuggestionResponse = {
   query: string;
-  items: Array<{ text: string; result_type: 'post' | 'journey' | 'user' | 'topic'; score: number; personal?: boolean }>;
+  items: Array<{ text: string; result_type: SearchResult['result_type']; score: number; personal?: boolean }>;
 };
 
 export type CreateJourneyInput = {
@@ -738,11 +755,11 @@ export type ReportReason = 'spam' | 'harassment' | 'unsafe' | 'misinformation' |
 
 export type ContentType = 'note' | 'article' | 'video' | 'route' | 'milestone' | 'question';
 
-export type RouteTemplateStage = Pick<JourneyStage, 'title' | 'detail' | 'completion_criteria'>;
+export type RouteTemplateStage = Pick<JourneyStage, 'id' | 'title' | 'detail' | 'completion_criteria'>;
 
 export type RouteTemplateAction = Pick<Action, 'title' | 'detail' | 'estimated_minutes' | 'scheduled_label'> & {
   id: string;
-  stage_index?: number;
+  stage_id?: string;
   scene_equipment?: string[];
 };
 
@@ -768,7 +785,7 @@ export type CreatePostInput = {
   route_template?: RouteTemplate;
   milestone?: {
     route_id: string;
-    stage_index?: number;
+    stage_id?: string;
     effort_summary: string;
     outcome_summary: string;
     adjustment_summary: string;
@@ -776,7 +793,7 @@ export type CreatePostInput = {
   };
   question_context?: {
     route_id: string;
-    stage_index?: number;
+    stage_id?: string;
   };
 };
 

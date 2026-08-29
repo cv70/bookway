@@ -335,7 +335,18 @@ impl FeatureDao {
                     COUNT(DISTINCT event.user_id) FILTER (
                         WHERE event.event_type = 'join_route'
                           AND event.source = 'gateway-route-join'
-                    )::double precision AS join_users
+                    )::double precision AS join_users,
+                    -- Knowledge lane counterparts, counted the same way: people
+                    -- who finished over people who started.
+                    COUNT(DISTINCT event.user_id) FILTER (
+                        WHERE event.event_type = 'complete'
+                          AND event.source = 'gateway-knowledge-completion'
+                          AND event.occurred_at > now() - interval '90 days'
+                    )::double precision AS knowledge_completion_users,
+                    COUNT(DISTINCT event.user_id) FILTER (
+                        WHERE event.event_type = 'save_knowledge'
+                          AND event.occurred_at > now() - interval '90 days'
+                    )::double precision AS knowledge_starter_users
                 FROM user_events AS event
                 WHERE event.content_id = ANY($2)
                   AND event.occurred_at > now() - interval '90 days'
@@ -358,21 +369,32 @@ impl FeatureDao {
                 )::double precision,
                 LEAST(COALESCE(feedback.saves, 0.0) / GREATEST(COALESCE(feedback.impression_count, 0.0), 1.0), 1.0)::double precision,
                 CASE
+                    -- Action conversion counts PEOPLE, not events. Gateway emits
+                    -- one `complete` per action node, so a raw event count over a
+                    -- per-user join count scales with how many nodes a route
+                    -- declares: a single follower finishing a 10-node route used
+                    -- to read as 10/1, saturating the clamp and systematically
+                    -- ranking long routes above short ones. Both sides are
+                    -- therefore distinct-user counts, and the personal side is
+                    -- capped at its own join so one user can never exceed 1.
                     WHEN candidate.content_type = 'route' THEN LEAST(
-                        COALESCE(feedback.completions, 0.0)
+                        LEAST(COALESCE(feedback.completions, 0.0), COALESCE(feedback.joins, 0.0))
                             / GREATEST(COALESCE(feedback.joins, 0.0), 1.0)
                             * LEAST(COALESCE(feedback.joins, 0.0) / 20.0, 1.0)
-                        + (COALESCE(population.completions, 0.0) + 0.1)
-                            / GREATEST(COALESCE(population.joins, 0.0) + 20.0, 20.0)
+                        + (COALESCE(population.completion_users, 0.0) + 0.1)
+                            / GREATEST(COALESCE(population.join_users, 0.0) + 20.0, 20.0)
                             * (1.0 - LEAST(COALESCE(feedback.joins, 0.0) / 20.0, 1.0)),
                         1.0
                     )
                     ELSE LEAST(
-                        COALESCE(feedback.completions, 0.0)
+                        LEAST(
+                            COALESCE(feedback.completions, 0.0),
+                            COALESCE(feedback.knowledge_starts, 0.0)
+                        )
                             / GREATEST(COALESCE(feedback.knowledge_starts, 0.0), 1.0)
                             * LEAST(COALESCE(feedback.knowledge_starts, 0.0) / 20.0, 1.0)
-                        + (COALESCE(population.completions, 0.0) + 0.1)
-                            / GREATEST(COALESCE(population.knowledge_starts, 0.0) + 20.0, 20.0)
+                        + (COALESCE(population.knowledge_completion_users, 0.0) + 0.1)
+                            / GREATEST(COALESCE(population.knowledge_starter_users, 0.0) + 20.0, 20.0)
                             * (1.0 - LEAST(COALESCE(feedback.knowledge_starts, 0.0) / 20.0, 1.0)),
                         1.0
                     )

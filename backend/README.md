@@ -314,7 +314,7 @@ cargo run -p bookway-gateway
 
 | 服务 | 监听变量 | 上游变量 |
 | --- | --- | --- |
-| gateway | `GATEWAY_ADDR` | `ACCOUNT_GRPC_URL`、`GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`、`BBS_CREATOR_GRPC_URL`、`BBS_MESSAGE_GRPC_URL`、`COMMENT_GRPC_URL`、`INTERACTION_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、`FEEDBACK_GRPC_URL` 、`PAYMENT_WEBHOOK_SECRET`（支付 webhook HMAC 验签密钥，签名输入为 `{provider}.{raw_body}`，见「支付 Webhook 签名契约」；未配置时 `/payments/webhook/*` 返回 503，绝不无签名放行） |
+| gateway | `GATEWAY_ADDR` | `ACCOUNT_GRPC_URL`、`GROWTH_GRPC_URL`、`BBS_FEED_GRPC_URL`、`SEARCH_MAIN_GRPC_URL`、`USER_EVENT_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`、`BBS_CREATOR_GRPC_URL`、`BBS_MESSAGE_GRPC_URL`、`COMMENT_GRPC_URL`、`INTERACTION_STATUS_GRPC_URL`、`MEDIA_GRPC_URL`、`CONTENT_AUDIT_GRPC_URL`、`FEEDBACK_GRPC_URL` 、`PAYMENT_WEBHOOK_SECRET`（支付 webhook HMAC 验签密钥，签名输入为 `{provider}.{timestamp}.{raw_body}`，见「支付 Webhook 签名契约」；未配置时 `/payments/webhook/*` 返回 503，绝不无签名放行）、`PAYMENT_WEBHOOK_TOLERANCE_SECONDS`（webhook 时间戳容差秒数，默认 300） |
 | account | `ACCOUNT_ADDR` | 无 |
 | growth | `GROWTH_ADDR` | 无 |
 | bbs | `BBS_ADDR` | 无 |
@@ -334,7 +334,7 @@ cargo run -p bookway-gateway
 | direct-message-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`GROWTH_GRPC_URL`、`DIRECT_MESSAGE_NOTIFICATION_*` |
 | appeal-notification-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`GROWTH_GRPC_URL`、`APPEAL_NOTIFICATION_*` |
 | content-report-restriction-dispatcher | 无监听端口 | `DATABASE_URL`、`BBS_LINK_GRPC_URL`、`REPORT_RESTRICTION_*` |
-| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`（路线 join_count 水合，缺失时保留索引值）、`KNOWLEDGE_CATALOG_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`AD_MAIN_GRPC_URL`（特征与广告均可降级） |
+| search-main | `SEARCH_MAIN_ADDR` | `BBS_SEARCH_GRPC_URL`、`BBS_LINK_GRPC_URL`、`BBS_GRPC_URL`（路线 join_count 水合；索引不存该计数，缺失时字段留空表示未读到事实，而非 0 人同行）、`KNOWLEDGE_CATALOG_GRPC_URL`、`FEATURE_MAIN_GRPC_URL`、`AD_MAIN_GRPC_URL`（特征与广告均可降级） |
 | media | `MEDIA_ADDR` | `S3_ENDPOINT`、`S3_BUCKET`、`CDN_BASE_URL` |
 | content-audit | `CONTENT_AUDIT_ADDR` | 审核规则与 PostgreSQL |
 | feedback | `FEEDBACK_ADDR` | PostgreSQL；`user_feedback` 状态队列 |
@@ -354,18 +354,20 @@ cargo run -p bookway-gateway
 | bookway-py/bg/model_serving | `8110`（`MODEL_SERVING_PORT`） | `MODEL_NAME`、`MODEL_SOURCE`、`MODEL_DIR`、`MODEL_DEVICE`、`MODEL_CHECKPOINT_PATH`（静态 checkpoint）、`MODEL_REGISTRY_PATH`（训练侧原子发布的注册表，热加载优先于静态路径；两半契约：`scoring_head.pt` + `adapter/` 缺一拒绝服务）、`MODEL_MAX_BATCH`、`MODEL_MAX_INPUT_CHARS` |
 | bookway-py/cronjob/rank_training | 无监听端口 | `DATABASE_URL`、`TRAINER_LLM_OUTPUT_DIR`、`TRAINER_REGISTRY_PATH`（通过门控后原子发布到 model_serving 热加载）、`TRAINER_LLM_MIN_AUC`（holdout AUC 门控，默认 0.55；不达标拒绝发布 exit 非零）、`TRAINER_LLM_*`、`TRAINER_LORA_*` |
 
-全服务共享 `STORAGE_MODE`、`DATABASE_URL`、`SERVICE_AUTH_TOKEN`、`SERVICE_AUTH_REQUIRED`、`AUTH_REQUIRED`、`AUTH_JWT_SECRET`、`HTTP_CONNECT_TIMEOUT_MS` 和 `HTTP_REQUEST_TIMEOUT_MS`。Gateway 的 `CORS_ALLOWED_ORIGINS` 必须列出允许访问 Web API 的精确 `http(s)` Origin，拒绝通配符、路径和自定义 scheme；默认值仅供本机 Expo Web 调试。Redis 连接和命令预算分别由 `REDIS_CONNECT_TIMEOUT_MS`（默认 1000ms）与 `REDIS_COMMAND_TIMEOUT_MS`（默认 100ms）控制，缓存或限流 Redis 故障时会告警并 fail-open。生产环境必须启用两种鉴权：App 的 Bearer JWT 只在 Gateway 解析；非 Gateway 服务的业务端点只接受带服务令牌的内部请求，并信任 Gateway 注入的 `x-user-id`。健康、就绪和指标端点不要求服务令牌。
+全服务共享 `STORAGE_MODE`、`DATABASE_URL`、`SERVICE_AUTH_TOKEN`、`SERVICE_AUTH_REQUIRED`、`AUTH_REQUIRED`、`AUTH_JWT_SECRET`、`AUTH_JWKS_URL`、`AUTH_ISSUER`、`AUTH_AUDIENCE`、`AUTH_JWKS_CACHE_SECONDS`、`HTTP_CONNECT_TIMEOUT_MS` 和 `HTTP_REQUEST_TIMEOUT_MS`。Gateway 的 `CORS_ALLOWED_ORIGINS` 必须列出允许访问 Web API 的精确 `http(s)` Origin，拒绝通配符、路径和自定义 scheme；默认值仅供本机 Expo Web 调试。Redis 连接和命令预算分别由 `REDIS_CONNECT_TIMEOUT_MS`（默认 1000ms）与 `REDIS_COMMAND_TIMEOUT_MS`（默认 100ms）控制，缓存或限流 Redis 故障时会告警并 fail-open。生产环境必须启用两种鉴权：App 的 Bearer JWT 只在 Gateway 解析；配置 `AUTH_JWKS_URL` 时使用 OIDC/JWKS，按 TTL 缓存并在未知 `kid` 时立即刷新，`AUTH_ISSUER`/`AUTH_AUDIENCE` 可选约束；未配置 JWKS 时仅用于本地联调的 HS256 `AUTH_JWT_SECRET`。非 Gateway 服务的业务端点只接受带服务令牌的内部请求，并信任 Gateway 注入的 `x-user-id`。健康、就绪和指标端点不要求服务令牌。
 
 如果默认端口被占用，可整组使用 `18080-18090` 并显式设置全部 URL；客户端将 `EXPO_PUBLIC_API_URL` 指向新的 Gateway 地址。
 
 ### 支付 Webhook 签名契约
 
-`POST /payments/webhook/{provider}` 的签名覆盖 **provider 路径段与原始请求体的拼接**：
+`POST /payments/webhook/{provider}` 的签名覆盖 **provider 路径段、发送时间戳与原始请求体的拼接**：
 
-- `x-payment-signature` = hex(HMAC-SHA256(key=`PAYMENT_WEBHOOK_SECRET`, message=`"{provider}." + raw_body`))。provider 即 URL 路径段原样字节，网关在服务端拼接 `.` 分隔符后整体验签；针对某 provider 抓取的签名无法在另一 provider 的端点重放。
+- `x-payment-signature` = hex(HMAC-SHA256(key=`PAYMENT_WEBHOOK_SECRET`, message=`"{provider}." + x_payment_timestamp + "." + raw_body`))。provider 即 URL 路径段原样字节，时间戳取 `x-payment-timestamp` 头原样字节（Unix 秒），网关在服务端拼接 `.` 分隔符后整体验签；针对某 provider 抓取的签名无法在另一 provider 的端点重放。
+- `x-payment-timestamp` 必须存在且可解析，验签通过后再做新鲜度校验：与服务端时钟之差超过 `PAYMENT_WEBHOOK_TOLERANCE_SECONDS`（默认 300 秒，对称窗口）即返回 401。时间戳已进入签名输入，因此抓包者无法靠改时间戳把旧投递刷新到窗口内；新鲜度检查放在验签之后，未认证的调用方问不出服务端时钟。
 - 请求体为 JSON，必须携带非空 `payment_reference`；mall-order 以该流水号驱动与 `Pay` 相同的幂等状态机。
 - 确认到达晚于 `MALL_PAYMENT_TTL_SECONDS` 时，订单如实进入 `paid_after_expiry` 终态（不自动履约、不生成分账，运营决定退款或补履约），provider 不会陷入 failed_precondition 重试循环。
 - `PAYMENT_WEBHOOK_SECRET` 未配置时端点整体返回 503，绝不无签名放行。
+- 该方案与 Stripe 式 `t=…,v1=…` 构造同形（签名覆盖时间戳+原文、对称容差窗口）。若接入 RSA 验签的 PSP（微信支付 v3 的 `RSA-SHA256(timestamp\nnonce\nbody\n)`、支付宝 RSA2），需按 provider 分派到各自的验签实现，而不是把house HMAC 当通用协议使用。
 
 ## 已实现的生产能力
 

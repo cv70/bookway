@@ -33,6 +33,17 @@ impl RecommendRecallSource {
 
     async fn interests(&self, query: &FeedQuery) -> (Vec<GrowthDomain>, bool) {
         let mut interests = query.interests.iter().copied().collect::<BTreeSet<_>>();
+        // Anonymous requests have no feature namespace. Calling Feature Main
+        // with an empty user id would make every visitor share one cache key
+        // and one pointless database lookup, while it cannot add personalized
+        // interests anyway.
+        if query
+            .user_id
+            .as_deref()
+            .is_none_or(|user_id| user_id.trim().is_empty())
+        {
+            return (interests.into_iter().collect(), false);
+        }
         let mut client = self.feature_client.clone();
         let request = match bookway_runtime::grpc_service_request(feature::FeaturesRequest {
             user_id: query.user_id_or_empty().to_string(),

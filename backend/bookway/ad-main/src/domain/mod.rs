@@ -7,6 +7,7 @@ mod pacing;
 pub(crate) use pacing::ImpressionPacing;
 
 use crate::Config;
+use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -26,6 +27,9 @@ pub struct Domain {
     recall: AdRecallClient<tonic::transport::Channel>,
     rank: AdRankClient<tonic::transport::Channel>,
     center: AdCenterClient<tonic::transport::Channel>,
+    recall_breaker: Arc<bookway_runtime::CircuitBreaker>,
+    rank_breaker: Arc<bookway_runtime::CircuitBreaker>,
+    center_breaker: Arc<bookway_runtime::CircuitBreaker>,
     pacing: Option<ImpressionPacing>,
 }
 impl Domain {
@@ -41,6 +45,9 @@ impl Domain {
             recall,
             rank,
             center,
+            recall_breaker: Arc::new(bookway_runtime::CircuitBreaker::from_env()),
+            rank_breaker: Arc::new(bookway_runtime::CircuitBreaker::from_env()),
+            center_breaker: Arc::new(bookway_runtime::CircuitBreaker::from_env()),
             pacing,
         })
     }
@@ -97,8 +104,9 @@ impl Domain {
             });
         }
         let mut recall_client = self.recall.clone();
-        let candidates = recall_client
-            .recall(service_request(
+        let candidates = self
+            .recall_breaker
+            .execute(recall_client.recall(service_request(
                 "ad-recall",
                 recall::RecallRequest {
                     user_id: request.user_id.clone(),
@@ -111,13 +119,14 @@ impl Domain {
                     geo_region: geo_region.clone(),
                     device_os: device_os.clone(),
                 },
-            )?)
+            )?))
             .await
             .map_err(|error| upstream_error("ad-recall", error))?
             .into_inner();
         let mut rank_client = self.rank.clone();
-        let ranked = rank_client
-            .rank(service_request(
+        let ranked = self
+            .rank_breaker
+            .execute(rank_client.rank(service_request(
                 "ad-rank",
                 rank::RankRequest {
                     user_id: request.user_id.clone(),
@@ -127,7 +136,7 @@ impl Domain {
                     action_node_id: request.action_node_id.clone(),
                     scene_equipment: scene_equipment.clone(),
                 },
-            )?)
+            )?))
             .await
             .map_err(|error| upstream_error("ad-rank", error))?
             .into_inner();
@@ -173,8 +182,8 @@ impl Domain {
             .collect::<Vec<_>>();
         if !items.is_empty() {
             let mut center_client = self.center.clone();
-            center_client
-                .register_decisions(service_request(
+            self.center_breaker
+                .execute(center_client.register_decisions(service_request(
                     "ad-center",
                     center::RegisterDecisionRequest {
                         user_id: request.user_id.clone(),
@@ -185,7 +194,7 @@ impl Domain {
                         action_node_id: request.action_node_id.clone(),
                         scene_equipment,
                     },
-                )?)
+                )?))
                 .await
                 .map_err(|error| upstream_error("ad-center", error))?;
         }
@@ -223,8 +232,8 @@ impl Domain {
         // public beacon path admits impressions and clicks only.
         reject_client_asserted_conversion(&request)?;
         let mut client = self.center.clone();
-        client
-            .record_event(service_request("ad-center", request)?)
+        self.center_breaker
+            .execute(client.record_event(service_request("ad-center", request)?))
             .await
             .map(|response| response.into_inner())
             .map_err(|error| upstream_error("ad-center", error))
@@ -244,6 +253,26 @@ fn reject_client_asserted_conversion(
         ));
     }
     Ok(())
+}
+
+fn scene_equipment_key(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn delivery_context_key(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn invalid_identifier(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value.chars().count() > MAX_IDENTIFIER_LENGTH
+}
+fn service_request<T>(service: &'static str, value: T) -> Result<tonic::Request<T>, AdMainError> {
+    bookway_runtime::grpc_service_request(value)
+        .map_err(|error| AdMainError::Upstream(format!("{service} request failed: {error}")))
+}
+fn upstream_error(service: &'static str, error: tonic::Status) -> AdMainError {
+    AdMainError::Upstream(format!("{service} request failed: {error}"))
 }
 
 #[cfg(test)]
@@ -279,24 +308,4 @@ mod conversion_gate_tests {
             assert!(reject_client_asserted_conversion(&request).is_ok());
         }
     }
-}
-
-fn scene_equipment_key(value: &str) -> String {
-    value.trim().to_lowercase()
-}
-
-fn delivery_context_key(value: &str) -> String {
-    value.trim().to_lowercase()
-}
-
-fn invalid_identifier(value: &str) -> bool {
-    let value = value.trim();
-    value.is_empty() || value.chars().count() > MAX_IDENTIFIER_LENGTH
-}
-fn service_request<T>(service: &'static str, value: T) -> Result<tonic::Request<T>, AdMainError> {
-    bookway_runtime::grpc_service_request(value)
-        .map_err(|error| AdMainError::Upstream(format!("{service} request failed: {error}")))
-}
-fn upstream_error(service: &'static str, error: tonic::Status) -> AdMainError {
-    AdMainError::Upstream(format!("{service} request failed: {error}"))
 }

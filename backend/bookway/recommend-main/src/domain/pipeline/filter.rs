@@ -97,7 +97,7 @@ mod tests {
                 cover_url: String::new(),
                 route_title: String::new(),
                 route_duration: String::new(),
-                join_count: 0,
+                join_count: None,
                 like_count: 0,
                 freshness: 0.0,
                 tags: Vec::new(),

@@ -5,6 +5,13 @@ pub(crate) struct MemorySearchExposureStore {
     exposures: RwLock<Vec<(SearchExposure, Instant)>>,
 }
 
+#[cfg(test)]
+impl MemorySearchExposureStore {
+    pub(crate) async fn len(&self) -> usize {
+        self.exposures.read().await.len()
+    }
+}
+
 #[async_trait]
 impl SearchExposureStore for MemorySearchExposureStore {
     async fn record(&self, exposure: SearchExposure) -> Result<(), SearchExposureError> {

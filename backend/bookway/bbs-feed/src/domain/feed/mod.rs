@@ -14,6 +14,10 @@ impl Domain {
         let mut client = self.recommend_main.clone();
         let request = bookway_runtime::grpc_service_request(request)
             .map_err(|error| tonic::Status::unauthenticated(error.to_string()))?;
-        Ok(client.feed(request).await?.into_inner())
+        Ok(self
+            .recommend_breaker
+            .execute(client.feed(request))
+            .await?
+            .into_inner())
     }
 }

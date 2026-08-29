@@ -58,3 +58,19 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt httpx
 维度约束：`SEMANTIC_VECTOR_DIMS` 必须等于基模 hidden size（写入索引后不可改）。
 MiniCPM5-1B 实测 hidden size = **1536**（本机已下载快照并过 `real_model_check.py`：
 8/8，相关文本余弦 0.904 > 无关 0.817，无 checkpoint 时 `/score` 如实 `ready:false`）。
+
+两个离线校验的跑法（都不需要 GPU）：
+
+```sh
+./.venv/bin/python smoke_test.py                     # 19/19，程序化微型模型跑全部契约
+./.venv/bin/python real_model_check.py <snapshot-dir> # 8/8，真快照
+```
+
+`<snapshot-dir>` 是 modelscope 缓存里的**快照**目录而非模型根目录，例如
+`~/.cache/modelscope/models/OpenBMB--MiniCPM5-1B/snapshots/master`（根目录下只有
+`snapshots/`，传错会报 tokenizer 加载失败）。真快照校验依赖 `sentencepiece`，
+已列入 `requirements.txt`。
+
+仍未做：GPU 实机 LoRA 微调。本机无 GPU，`train_llm.py` 只过了契约与导入校验，
+产出的 adapter/scoring_head 未经真实训练验证；`TRAINER_LLM_MIN_AUC` 门控会拦住
+不达标产物，因此未训练状态下服务端如实 `ready:false`，不会端出未验证的打分。

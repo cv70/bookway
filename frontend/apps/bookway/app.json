@@ -16,7 +16,8 @@
           "cameraPermission": false,
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-notifications"
     ],
     "ios": {
       "supportsTablet": true

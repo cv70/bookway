@@ -39,8 +39,8 @@ VOCAB = [
     "用户", "兴趣", "领域", "学习", "旅行", "内容", "路线", "装备", "场景",
 ]
 ITEMS = [
-    {"user_context": "用户 兴趣 领域：学习", "candidate_text": "学习 路线 内容"},
-    {"user_context": "用户 兴趣 领域：旅行", "candidate_text": "旅行 装备 场景"},
+    {"content_id": "route-learning", "user_context": "用户 兴趣 领域：学习", "candidate_text": "学习 路线 内容"},
+    {"content_id": "route-travel", "user_context": "用户 兴趣 领域：旅行", "candidate_text": "旅行 装备 场景"},
 ]
 
 
@@ -177,6 +177,12 @@ def main() -> int:
         check("scores match adapter+head reference", approx(score_a["scores"], reference_scores(base_path, ckpt_a)))
         check("scores are probabilities",
               all(0.0 <= row[key] <= 1.0 for row in score_a["scores"] for key in ("p_ctr", "p_cvr", "p_wegu")))
+        # recommend-rank matches rows to candidates by content_id and rejects a
+        # row it did not ask for; a response without the echo would make it
+        # attach one item's pWEGU to another.
+        check("score rows echo the requested content_id",
+              [row.get("content_id") for row in score_a["scores"]]
+              == [item["content_id"] for item in ITEMS])
 
         # Embeddings: base-model contract, adapter disabled even with scorer loaded.
         texts = ["用户 学习 路线", "旅行 装备 场景"]

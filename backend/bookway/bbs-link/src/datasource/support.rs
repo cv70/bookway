@@ -69,7 +69,6 @@ struct SeedContent<'a> {
     domain: pb::GrowthDomain,
     route_title: &'a str,
     route_duration: &'a str,
-    join_count: u32,
     like_count: u32,
     freshness: f64,
     tags: &'a str,
@@ -91,7 +90,9 @@ fn seed(input: SeedContent<'_>) -> pb::Content {
             cover_url: input.cover_url.to_string(),
             route_title: input.route_title.to_string(),
             route_duration: input.route_duration.to_string(),
-            join_count: input.join_count,
+            // Participation is BBS's fact. A content store that seeded a number
+            // here would be publishing a companion count it cannot back.
+            join_count: None,
             like_count: input.like_count,
             freshness: input.freshness,
             tags: input.tags.split(',').map(str::to_string).collect(),
@@ -130,6 +131,7 @@ fn seed_route_template(input: &SeedContent<'_>) -> pb::RouteTemplate {
         intent: input.summary.to_string(),
         completion_criteria: format!("完成{}中的核心练习", input.route_title),
         stages: vec![pb::RouteTemplateStage {
+            id: format!("{}-stage-start", input.id),
             title: "从第一步开始".to_string(),
             detail: "先在自己的节奏里完成一次练习。".to_string(),
             completion_criteria: "完成至少一次行动并留下简短记录".to_string(),
@@ -140,7 +142,7 @@ fn seed_route_template(input: &SeedContent<'_>) -> pb::RouteTemplate {
             detail: input.summary.to_string(),
             estimated_minutes: 20,
             scheduled_label: "开始时".to_string(),
-            stage_index: Some(0),
+            stage_id: Some(format!("{}-stage-start", input.id)),
             scene_equipment: vec!["行动记录工具".to_string()],
         }],
         journey_type: pb::RouteTemplateKind::Project as i32,

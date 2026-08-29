@@ -34,7 +34,7 @@
 | `0028_search_main_sessions.sql` | search-main | 多路搜索召回的短期会话与稳定公开游标 |
 | `0029_comment_reply_depth.sql` | comment | 评论树层级回填与受限回复深度 |
 | `0030_account.sql` | account | 账户公开资料 |
-| `0031_commercialization.sql` | advertising / commerce | 广告投放、商品目录、库存预占、订单支付状态 |
+| `0031_commercialization.sql` | advertising / commerce | 广告投放（曝光、点击及服务端转化事实）、商品目录、库存预占、订单支付状态 |
 | `0032_commercialization_reliability.sql` | commerce | 支付渠道流水号的跨订单唯一约束 |
 | `0033_feedback.sql` | feedback | 用户产品反馈、状态、处理说明与幂等键 |
 | `0034_content_index_outbox.sql` | bbs-link / bbs-search | 内容搜索投影的事务性 Outbox、租约与存量回填 |
@@ -82,7 +82,7 @@
 | `0080_bbs_follower_pages.sql` | bbs | 粉丝 keyset 分页的部分覆盖索引（follow+未删按时间/ID 降序） |
 | `0081_feed_exposure_item_objectives.sql` | recommend-main | `feed_exposure_items` 增加 `p_ctr`/`p_cvr`/`p_wegu` 列：记录排序服务对本次曝光的三目标预估，供校准与实验评估使用 |
 | `0082_user_event_route_fork.sql` | user-event | `user_events` 事件类型约束增加 `route_fork`（Gateway 在 fork 公开路线后写入，稳定键=每个 fork 实例） |
-| `0083_ad_conversion_events.sql` | ad-center | `ad_campaigns`/`ad_campaign_daily_stats` 增加 `conversions` 列：转化事件记账（要求已受理曝光回执，不计费），供 ad-rank CVR 校准 |
+| `0083_ad_conversion_events.sql` | ad-center | 放宽 `ad_delivery_events` 的事件约束以接受服务端 `conversion`，并为 `ad_campaigns`/`ad_campaign_daily_stats` 增加 `conversions` 列：转化事件记账（要求已受理曝光回执，不计费），供 ad-rank CVR 校准 |
 | `0084_affiliate_settlement_hold.sql` | mall-order | 分账冷静期部分索引：`pending` 行按 `eligible_at` 供 expirer 晋级扫描；窗口内退款直接作废分账 |
 | `0085_feed_exposure_feature_snapshot.sql` | recommend-main | `feed_exposure_items` 增加 `feature_snapshot` JSONB：记录排序时刻的命名特征，作为唯一无泄漏训练输入 |
 | `0086_mall_order_paid_after_expiry.sql` | mall-order | 订单状态约束增加 `paid_after_expiry`：TTL 过期后 provider 回调确认的收款如实落为独立终态，不自动履约、不生成分账 |

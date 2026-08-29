@@ -7,6 +7,7 @@ use std::{
 use bookway_bbs_link_api::pb::{self as bbs_link_pb, bbs_link_client::BbsLinkClient};
 use bookway_bbs_search_api::pb;
 use thiserror::Error;
+use uuid::Uuid;
 
 use super::datasource::{
     EntityBias, MemorySearchAnalytics, MemorySearchSessionStore, OpenSearchSource,
@@ -23,6 +24,8 @@ const MAX_SOURCE_PAGES_PER_RESPONSE: usize = 20;
 const MAX_PUBLIC_CURSOR_BYTES: usize = 128;
 const MAX_QUERY_LENGTH: usize = 100;
 const MAX_ROUTE_CONTEXT_FIELD_LENGTH: usize = 160;
+const MIN_SEMANTIC_VECTOR_DIMENSION: usize = 8;
+const MAX_SEMANTIC_VECTOR_DIMENSION: usize = 4_096;
 
 #[derive(Clone)]
 pub(crate) struct Domain {
@@ -90,9 +93,15 @@ impl Domain {
     ) -> Result<pb::SearchResponse, SearchError> {
         let started = Instant::now();
         let query_text = request.q.trim().to_string();
-        if request.query_vector.is_empty() {
+        if query_text.is_empty() || query_text.chars().count() > MAX_QUERY_LENGTH {
             return Err(SearchError::Validation(
-                "query_vector is required for semantic search".to_string(),
+                "搜索词需要在 1 到 100 个字符之间".to_string(),
+            ));
+        }
+        if !valid_semantic_vector(&request.query_vector) {
+            return Err(SearchError::Validation(
+                "query_vector must contain finite, non-zero values with 8 to 4096 dimensions"
+                    .to_string(),
             ));
         }
         let search_type = pb::SearchType::try_from(request.search_type.unwrap_or_default())
@@ -153,6 +162,12 @@ impl Domain {
             degraded: false,
         })
     }
+}
+
+fn valid_semantic_vector(vector: &[f32]) -> bool {
+    (MIN_SEMANTIC_VECTOR_DIMENSION..=MAX_SEMANTIC_VECTOR_DIMENSION).contains(&vector.len())
+        && vector.iter().all(|value| value.is_finite())
+        && vector.iter().any(|value| *value != 0.0)
 }
 
 fn empty_semantic_response(query: &str, started: Instant) -> pb::SearchResponse {
@@ -1025,7 +1040,7 @@ fn action_node_results(
                     score += content.quality_score;
                     highlights.retain(|value| !value.trim().is_empty());
                     Some(pb::SearchResult {
-                        id: action.id.clone(),
+                        id: bounded_entity_result_id("node", &action.id),
                         result_type: pb::SearchResultType::ActionNode as i32,
                         title: action.title.clone(),
                         snippet: if action.detail.is_empty() {
@@ -1082,7 +1097,10 @@ fn scene_equipment_results(
                         4.0
                     } + content.quality_score;
                     matches.push(pb::SearchResult {
-                        id: format!("{}/{}/equipment/{}", content.id, action.id, gear),
+                        id: bounded_entity_result_id(
+                            "equipment",
+                            &format!("{}/{}/equipment/{}", content.id, action.id, gear),
+                        ),
                         result_type: pb::SearchResultType::SceneEquipment as i32,
                         title: gear.clone(),
                         snippet: format!("{} · {}", post.title, action.title),
@@ -1101,6 +1119,22 @@ fn scene_equipment_results(
             matches
         })
         .collect()
+}
+
+/// User Event accepts opaque result identifiers up to 128 characters. Route
+/// and action ids are individually bounded at 160 characters, so their
+/// human-readable composite can exceed that limit. Preserve readable ids when
+/// possible and use a deterministic UUIDv5 only for overlong composites;
+/// result identity remains stable without truncation collisions.
+fn bounded_entity_result_id(kind: &str, raw: &str) -> String {
+    const MAX_RESULT_ID_LENGTH: usize = 128;
+    if raw.chars().count() <= MAX_RESULT_ID_LENGTH {
+        return raw.to_string();
+    }
+    format!(
+        "{kind}:{}",
+        Uuid::new_v5(&Uuid::NAMESPACE_URL, raw.as_bytes())
+    )
 }
 
 fn sort_results(items: &mut [pb::SearchResult]) {
@@ -1418,6 +1452,15 @@ mod tests {
         items: Vec<bbs_link_pb::Content>,
     }
 
+    #[test]
+    fn semantic_vectors_are_bounded_finite_and_non_zero() {
+        assert!(!valid_semantic_vector(&[]));
+        assert!(!valid_semantic_vector(&[0.0; 8]));
+        assert!(!valid_semantic_vector(&[f32::NAN; 8]));
+        assert!(!valid_semantic_vector(&[0.0; 4]));
+        assert!(valid_semantic_vector(&[0.1; 8]));
+    }
+
     #[async_trait]
     impl SearchSource for StaticSearchSource {
         async fn contents(
@@ -1709,6 +1752,19 @@ mod tests {
         // An exact term outranks a partial mention on the same quality score.
         let partial = scene_equipment_results(&[&route], "登山", false);
         assert!(partial.iter().all(|item| item.score < exact));
+    }
+
+    #[test]
+    fn overlong_entity_result_ids_are_stable_and_bounded() {
+        let raw = format!("{}/{}", "route".repeat(80), "node".repeat(80));
+        let first = bounded_entity_result_id("node", &raw);
+        let retry = bounded_entity_result_id("node", &raw);
+        let different = bounded_entity_result_id("node", &format!("{}-other", raw));
+
+        assert!(first.chars().count() <= 128);
+        assert_eq!(first, retry, "retries must keep the same entity identity");
+        assert_ne!(first, different, "different entities must not truncate-collide");
+        assert_eq!(bounded_entity_result_id("node", "short-node"), "short-node");
     }
 
     #[test]
@@ -2370,7 +2426,7 @@ mod tests {
                 cover_url: String::new(),
                 route_title: String::new(),
                 route_duration: String::new(),
-                join_count: 0,
+                join_count: None,
                 like_count: 0,
                 freshness: 1.0,
                 tags: vec![topic.to_string()],

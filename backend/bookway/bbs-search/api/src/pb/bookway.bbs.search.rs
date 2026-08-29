@@ -65,8 +65,10 @@ pub struct PostSummary {
     pub route_title: ::prost::alloc::string::String,
     #[prost(string, tag = "9")]
     pub route_duration: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "10")]
-    pub join_count: u32,
+    /// Live participation, owned by BBS and never indexed. Absent means the
+    /// responding service did not read the fact, not that nobody joined.
+    #[prost(uint32, optional, tag = "10")]
+    pub join_count: ::core::option::Option<u32>,
     #[prost(uint32, tag = "11")]
     pub like_count: u32,
     #[prost(double, tag = "12")]
@@ -291,7 +293,8 @@ pub enum SearchResultType {
     /// available through the post field for scene-aware commerce linking.
     ActionNode = 6,
     /// One (route node, equipment) match. Equipment has no standalone identity,
-    /// so the result ID is "<content-id>/<action-id>/equipment/<name>".
+    /// so short identities use "<content-id>/<action-id>/equipment/<name>";
+    /// overlong composites are replaced by a deterministic bounded UUID.
     SceneEquipment = 7,
 }
 impl SearchResultType {

@@ -6,6 +6,7 @@ import { colors } from '../theme';
 import { appealPost, getDirectMessagePreferences, getMyAppeals, getMyPosts, getReminderPreferences, updateDirectMessagePreferences, updateReminderPreferences } from '../api/client';
 import { CommunityPost, ContentAppeal, GrowthEntry, Journey, OwnedContent, ReminderPreferences, ReviewAdjustmentSuggestion, WeeklyReview } from '../types';
 import { localScheduleContext } from '../utils/scheduling';
+import { registerNativePushDevice } from '../notifications/push';
 import { type ProfileSection } from '../screens/ProfileScreen';
 
 type Props = {
@@ -143,6 +144,13 @@ export function ProfileSectionModal({ section, visible, journeys, entries, saved
       .then((preferences) => {
         setReminderPreferences(preferences);
         setNotifications(preferences.enabled);
+        if (enabled) {
+          void registerNativePushDevice()
+            .then((registered) => {
+              if (!registered) setReminderError('应用内提醒已保存；系统推送需在原生设备上开启并配置 EAS。');
+            })
+            .catch(() => setReminderError('应用内提醒已保存，但系统推送注册失败，可稍后重试。'));
+        }
       })
       .catch(() => {
         setReminderPreferences(current);

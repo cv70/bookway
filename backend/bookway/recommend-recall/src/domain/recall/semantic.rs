@@ -3,8 +3,34 @@ use std::{collections::BTreeSet, time::Duration};
 use bookway_bbs_link_api::pb as bbs_link_pb;
 use bookway_bbs_search_api::pb as bbs_search_pb;
 use bookway_knowledge_catalog_api::pb as catalog_pb;
+use tonic::transport::Channel;
 
 use crate::api::pb;
+use crate::conf::SemanticConfig;
+
+/// Outbound clients for the optional semantic lane. They belong to the domain
+/// orchestration boundary because this lane coordinates embedding, vector
+/// recall and public-content hydration; datasource remains local persistence.
+#[derive(Clone)]
+pub(crate) struct SemanticRecallClients {
+    pub(crate) catalog:
+        catalog_pb::knowledge_catalog_client::KnowledgeCatalogClient<Channel>,
+    pub(crate) search: bbs_search_pb::bbs_search_client::BbsSearchClient<Channel>,
+}
+
+impl SemanticRecallClients {
+    pub(crate) async fn connect(
+        config: &SemanticConfig,
+    ) -> Result<Self, bookway_runtime::ConnectFailure> {
+        let catalog = catalog_pb::knowledge_catalog_client::KnowledgeCatalogClient::new(
+            bookway_runtime::grpc_channel(&config.knowledge_catalog_url).await?,
+        );
+        let search = bbs_search_pb::bbs_search_client::BbsSearchClient::new(
+            bookway_runtime::grpc_channel(&config.bbs_search_url).await?,
+        );
+        Ok(Self { catalog, search })
+    }
+}
 
 const SEMANTIC_EMBED_TIMEOUT: Duration = Duration::from_millis(100);
 const SEMANTIC_SEARCH_TIMEOUT: Duration = Duration::from_millis(150);

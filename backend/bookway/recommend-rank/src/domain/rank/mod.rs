@@ -15,6 +15,9 @@ impl Domain {
         // trouble — timeout, not-ready, bad payload — falls back to the
         // local heuristic without surfacing an error.
         let mut served_model_version: Option<String> = None;
+        // A response that covered only part of the slate left the rest on the
+        // heuristic. That is a degraded response even though a model served it.
+        let mut partial_coverage = false;
         if let Some(scorer) = self.scorer.as_ref() {
             match scorer
                 .score(&request.user_context, &request.candidates)
@@ -36,6 +39,8 @@ impl Domain {
                             candidate.p_ctr = *p_ctr;
                             candidate.p_cvr = *p_cvr;
                             candidate.p_wegu = *p_wegu;
+                        } else {
+                            partial_coverage = true;
                         }
                     }
                 }
@@ -47,7 +52,8 @@ impl Domain {
         // Degradation is an observed fact of THIS response, not a config
         // property: a configured scorer that did not serve it (down,
         // untrained, malformed) means the heuristic shaped the slate.
-        let degraded = self.scorer.is_some() && served_model_version.is_none();
+        let degraded =
+            self.scorer.is_some() && (served_model_version.is_none() || partial_coverage);
         // A served artifact labels itself so every exposure row records which
         // weight file produced the estimates; the heuristic keeps the config
         // version string.

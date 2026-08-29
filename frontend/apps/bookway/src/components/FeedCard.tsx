@@ -53,7 +53,13 @@ export function FeedCard({
   }, [attribution?.position, attribution?.request_id, attribution?.surface, impressionComponent, post?.id]);
   if (item.ad && !post) return <ContextualAdCard ad={item.ad} onOpen={onAdPress} />;
   if (!post) return null;
-  const canJoinRoute = post.is_route ?? Boolean(post.route_title.trim());
+  // Route adoption is authorized by the canonical type bit. A route title is
+  // descriptive metadata only and must never resurrect the removed legacy
+  // "route_title implies joinable" behavior for ordinary content.
+  const canJoinRoute = post.is_route === true;
+  // The local override wins while a join is in flight; otherwise show the
+  // server's fact, and nothing at all when it did not report one.
+  const companionCount = joinCount ?? post.join_count ?? undefined;
   return (
     <View style={styles.card}>
       <View style={styles.authorRow}>
@@ -84,8 +90,10 @@ export function FeedCard({
             <Text numberOfLines={1} style={styles.routeTitle}>{post.route_title}</Text>
             <View style={styles.routeMeta}>
               <Text style={styles.routeMetaText}>{post.route_duration}</Text>
-              <UsersRound color={colors.faint} size={13} />
-              <Text style={styles.routeMetaText}>{(joinCount ?? post.join_count).toLocaleString()} 人加入</Text>
+              {companionCount === undefined ? null : <>
+                <UsersRound color={colors.faint} size={13} />
+                <Text style={styles.routeMetaText}>{companionCount.toLocaleString()} 人加入</Text>
+              </>}
             </View>
           </View>
           <Text style={styles.join}>{joining ? '加入中' : joined ? '已加入' : '加入'}</Text>

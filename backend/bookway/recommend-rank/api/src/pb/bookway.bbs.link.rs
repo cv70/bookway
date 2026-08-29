@@ -36,8 +36,11 @@ pub struct PostSummary {
     pub route_title: ::prost::alloc::string::String,
     #[prost(string, tag = "9")]
     pub route_duration: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "10")]
-    pub join_count: u32,
+    /// Live participation, owned by BBS. BBS Link never stores or increments it,
+    /// so it is absent unless the responding service read the fact this request.
+    /// Absent means "not read", which is not the same claim as zero companions.
+    #[prost(uint32, optional, tag = "10")]
+    pub join_count: ::core::option::Option<u32>,
     #[prost(uint32, tag = "11")]
     pub like_count: u32,
     #[prost(double, tag = "12")]
@@ -73,6 +76,12 @@ pub struct RouteTemplateStage {
     pub detail: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub completion_criteria: ::prost::alloc::string::String,
+    /// Stable key declared by the author and referenced by actions, milestones
+    /// and question contexts. Stage identity is never the array position: an
+    /// author who reorders, inserts or removes a stage must not silently
+    /// re-point the milestones already published against the other stages.
+    #[prost(string, tag = "4")]
+    pub id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -85,8 +94,8 @@ pub struct RouteTemplateAction {
     pub estimated_minutes: u32,
     #[prost(string, tag = "4")]
     pub scheduled_label: ::prost::alloc::string::String,
-    #[prost(uint32, optional, tag = "5")]
-    pub stage_index: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "5")]
+    pub stage_id: ::core::option::Option<::prost::alloc::string::String>,
     /// Stable key used by node-bound resources, equipment and advertisements.
     #[prost(string, tag = "6")]
     pub id: ::prost::alloc::string::String,
@@ -116,8 +125,8 @@ pub struct RouteTemplate {
 pub struct MilestoneDraft {
     #[prost(string, tag = "1")]
     pub route_id: ::prost::alloc::string::String,
-    #[prost(uint32, optional, tag = "2")]
-    pub stage_index: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "2")]
+    pub stage_id: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, tag = "3")]
     pub effort_summary: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
@@ -137,8 +146,8 @@ pub struct Milestone {
     pub route_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub route_title: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "3")]
-    pub stage_index: u32,
+    #[prost(string, tag = "3")]
+    pub stage_id: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub stage_title: ::prost::alloc::string::String,
     #[prost(string, tag = "5")]
@@ -158,8 +167,8 @@ pub struct Milestone {
 pub struct QuestionContextDraft {
     #[prost(string, tag = "1")]
     pub route_id: ::prost::alloc::string::String,
-    #[prost(uint32, optional, tag = "2")]
-    pub stage_index: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "2")]
+    pub stage_id: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -168,8 +177,8 @@ pub struct QuestionContext {
     pub route_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub route_title: ::prost::alloc::string::String,
-    #[prost(uint32, optional, tag = "3")]
-    pub stage_index: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "3")]
+    pub stage_id: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "4")]
     pub stage_title: ::core::option::Option<::prost::alloc::string::String>,
 }

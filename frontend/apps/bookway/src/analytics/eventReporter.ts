@@ -1,6 +1,6 @@
 import { AppState, type AppStateStatus } from 'react-native';
 
-import { sendEvents } from '../api/client';
+import { sendEvents, viewerUserId } from '../api/client';
 import type { NegativeFeedbackReason } from '../types';
 import { analyticsSessionId } from './session';
 
@@ -32,6 +32,7 @@ type PendingEvent = {
 };
 
 const sessionId = analyticsSessionId();
+const reportsEvents = Boolean(viewerUserId());
 const pending: PendingEvent[] = [];
 const seenImpressions = new Set<string>();
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -51,6 +52,7 @@ export const eventReporter = {
     void flush();
   },
   track(input: Omit<PendingEvent, 'event_id' | 'session_id' | 'occurred_at' | 'source'> & { source?: string }) {
+    if (!reportsEvents) return;
     pending.push({ ...input, event_id: uuid(), session_id: sessionId, occurred_at: new Date().toISOString(), source: input.source ?? 'mobile' });
     if (pending.length >= 100) void flush();
     else scheduleFlush();
@@ -62,6 +64,7 @@ export const eventReporter = {
     requestId?: string,
     attributionSource?: 'recommendation' | 'search',
   ) {
+    if (!reportsEvents) return;
     // The same content may be legitimately re-served by a later request. Keep
     // that exposure distinct while still deduplicating an un-attributed card.
     const key = `${sessionId}:${requestId ?? 'unattributed'}:${componentId}:${contentId}`;
