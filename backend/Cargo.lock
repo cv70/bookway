@@ -1595,12 +1595,14 @@ name = "bookway-search-index-rebuild"
 version = "0.1.0"
 dependencies = [
  "bookway-data",
+ "bookway-knowledge-catalog-api",
  "bookway-runtime",
  "reqwest",
  "serde_json",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tracing",
 ]
 

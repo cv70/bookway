@@ -20,4 +20,20 @@ Configuration:
 - `GATEWAY_LOADTEST_BEARER_TOKEN`: optional Gateway Bearer JWT. Set this for environments with `AUTH_REQUIRED=true`; when omitted, the job uses `x-user-id` for local development only.
 - `GATEWAY_LOADTEST_SEARCH_QUERY`: search query, default `跑步装备`.
 
-The job emits one JSON report with Feed and Search latency percentiles. Keep that output with the release record required by `backend/deploy/SLO.md`.
+The job emits one JSON report with Feed and Search latency percentiles. The
+`contextual_action_node` field records whether the run exercised the complete
+route/node/equipment path. Keep that output with the release record required by
+`backend/deploy/SLO.md`.
+
+To exercise the contextual commerce path as well as organic Feed/Search, set
+all three action-context variables together. The job then appends the route,
+action node, scene equipment and placement to both requests; partial context is
+rejected instead of silently measuring a different surface:
+
+```sh
+GATEWAY_LOADTEST_ROUTE_ID='<published-route-id>' \
+GATEWAY_LOADTEST_ACTION_NODE_ID='<action-node-id>' \
+GATEWAY_LOADTEST_SCENE_EQUIPMENT='trail shoes' \
+GATEWAY_LOADTEST_ACTION_PLACEMENT='action_node' \
+cargo run -p bookway-gateway-slo-loadtest
+```

@@ -135,17 +135,19 @@ export function DiscoverScreen({
     setAdAttribution(undefined);
   }, [contextualAction?.id, contextualFeedContext?.route_id, contextualFeedContext?.action_node_id]);
 
-  const contextualOfferItems = contextualFeedContext
+  const selectedSceneEquipment = contextualFeedContext?.scene_equipment?.trim().toLowerCase() ?? '';
+  const contextualOfferItems = contextualFeedContext && selectedSceneEquipment
     ? contextualOffers.filter((offer) => (
       offer.route_id === contextualFeedContext.route_id
       && offer.action_node_id === contextualFeedContext.action_node_id
-      && offer.scene_equipment === contextualFeedContext.scene_equipment
+      && offer.scene_equipment.trim().toLowerCase() === selectedSceneEquipment
     ))
     : [];
-  const contextualResourceItems = contextualFeedContext
+  const contextualResourceItems = contextualFeedContext && selectedSceneEquipment
     ? contextualResources.filter((attachment) => (
       attachment.route_id === contextualFeedContext.route_id
       && attachment.action_node_id === contextualFeedContext.action_node_id
+      && attachment.scene_equipment.trim().toLowerCase() === selectedSceneEquipment
     ))
     : [];
 
@@ -433,7 +435,7 @@ export function DiscoverScreen({
                   <View style={styles.offerCopy}>
                     <Text style={styles.offerTitle}>{product?.title || '场景装备'}</Text>
                     <Text style={styles.offerSku}>{sku?.title || offer.sku_id}</Text>
-                    <Text style={styles.offerMeta}>{price} · 商家 {offer.merchant_id}</Text>
+                    <Text style={styles.offerMeta}>{price} · 挂载于当前行动节点</Text>
                   </View>
                   <Pressable
                     accessibilityLabel={canOrder ? `购买${product?.title || '场景装备'}` : '商品暂不可购买'}
@@ -673,6 +675,7 @@ function resourceKindLabel(kind: RouteNodeResourceAttachment['kind']) {
     external_link: '链接',
     tool_checklist: '工具清单',
     ai_action_guide: '行动指南',
+    resource_package: '资源包',
     rag_corpus: '参考资料',
   })[kind];
 }

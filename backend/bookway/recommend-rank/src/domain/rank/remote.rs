@@ -15,7 +15,10 @@ use std::time::Duration;
 
 use bookway_recommend_recall_api::pb::Candidate;
 
-const SCORE_TIMEOUT: Duration = Duration::from_millis(150);
+// LLM scoring is an optional enrichment inside Recommend Main's 140ms Feed
+// budget. A shorter cap guarantees the rank service can return its local
+// multi-objective fallback before the caller's deadline expires.
+const SCORE_TIMEOUT: Duration = Duration::from_millis(80);
 const MAX_PROMPT_CHARS: usize = 512;
 
 #[derive(Clone)]
@@ -152,8 +155,14 @@ fn candidate_text(candidate: &Candidate) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::time::Duration;
 
-    use super::validate_score_id;
+    use super::{SCORE_TIMEOUT, validate_score_id};
+
+    #[test]
+    fn scorer_timeout_leaves_room_for_local_fallback() {
+        assert!(SCORE_TIMEOUT < Duration::from_millis(140));
+    }
 
     #[test]
     fn score_response_rejects_duplicate_candidate_rows() {

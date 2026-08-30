@@ -403,18 +403,18 @@ export type MallProduct = {
   updated_at: string;
 };
 
+// Public storefront projection. Merchant ownership and affiliate rates stay
+// server-side; checkout addresses this offer by ID and the order service
+// snapshots the private fields internally.
 export type NodeOffer = {
   id: string;
   product_id: string;
   sku_id: string;
   route_id: string;
   action_node_id: string;
-  creator_id: string;
-  commission_bps: number;
   created_at: string;
   scene_equipment: string;
   product?: MallProduct | null;
-  merchant_id: string;
 };
 
 export type NodeOfferList = { items: NodeOffer[] };
@@ -456,6 +456,7 @@ export type RouteNodeResourceKind =
   | 'external_link'
   | 'tool_checklist'
   | 'ai_action_guide'
+  | 'resource_package'
   | 'rag_corpus';
 
 export type RouteNodeResourceAttachment = {
@@ -470,6 +471,7 @@ export type RouteNodeResourceAttachment = {
   rag_enabled: boolean;
   embedding_collection: string;
   retrieval_scope: string;
+  scene_equipment: string;
   created_by: string;
   created_at: string;
   updated_at: string;

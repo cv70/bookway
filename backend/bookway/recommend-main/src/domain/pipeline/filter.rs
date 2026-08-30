@@ -80,8 +80,6 @@ mod tests {
             surface: surface.to_string(),
             cursor: None,
             limit: 10,
-            geo_region: String::new(),
-            device_os: String::new(),
         }
     }
 

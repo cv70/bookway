@@ -35,7 +35,9 @@ impl MixPolicy {
         if self.load_bps > 0 && allowed == 0 && page_len >= 8 {
             1
         } else {
-            allowed
+            // The mixer has a finite, explicitly audited slot schedule. Do
+            // not reserve organic capacity for slots that cannot be rendered.
+            allowed.min(DEFAULT_SLOT_FRACTIONS.len())
         }
     }
 }
@@ -228,5 +230,16 @@ mod tests {
         let (mixed, _) = mix_page(organics(6), ads(6), 6, policy);
         let ad_count = mixed.iter().filter(|item| item.is_ad()).count();
         assert!(ad_count <= 2, "small page must collapse duplicate targets, got {ad_count}");
+    }
+
+    #[test]
+    fn slot_demand_never_exceeds_the_renderable_schedule() {
+        let policy = MixPolicy::new(10_000, 1);
+        assert_eq!(policy.ad_slots_for(100), DEFAULT_SLOT_FRACTIONS.len());
+
+        let (mixed, overflow) = mix_page(organics(96), ads(10), 100, policy);
+        assert_eq!(mixed.len(), 100);
+        assert_eq!(mixed.iter().filter(|item| item.is_ad()).count(), 4);
+        assert!(overflow.is_empty());
     }
 }

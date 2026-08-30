@@ -9,7 +9,12 @@ use tonic::transport::Channel;
 use super::{Candidate, CandidateSource, FeedQuery, PipelineError, SourceResult};
 use bookway_recommend_recall_api::pb as recall;
 
-const PROFILE_FEATURE_TIMEOUT: Duration = Duration::from_millis(150);
+// Profile expansion is optional and runs before the recall RPC. Keep its
+// outage budget well below Recommend Main's 140ms request deadline so a cache
+// or feature-service failure still reaches the normal recall fallback.
+const PROFILE_FEATURE_TIMEOUT: Duration = Duration::from_millis(25);
+const RECALL_TIMEOUT: Duration = Duration::from_millis(90);
+const FOLLOWING_CONTEXT_TIMEOUT: Duration = Duration::from_millis(35);
 const PERSONALIZED_INTEREST_MINIMUM: f64 = 0.2;
 
 pub(crate) struct RecommendRecallSource {
@@ -78,16 +83,19 @@ impl RecommendRecallSource {
             return Ok(Vec::new());
         }
         let mut client = self.bbs_client.clone();
-        let context = client
-            .context(
+        let context = tokio::time::timeout(
+            FOLLOWING_CONTEXT_TIMEOUT,
+            client.context(
                 bookway_runtime::grpc_service_request(bbs_pb::ContextRequest {
                     user_id: query.user_id_or_empty().to_string(),
                     post_ids: Vec::new(),
                 })
                 .map_err(|error| PipelineError::Bbs(error.to_string()))?,
-            )
-            .await
-            .map_err(|error| PipelineError::Bbs(error.to_string()))?
+            ),
+        )
+        .await
+        .map_err(|_| PipelineError::Bbs("following context request timed out".to_string()))?
+        .map_err(|error| PipelineError::Bbs(error.to_string()))?
             .into_inner();
         Ok(context.followed_author_ids)
     }
@@ -105,8 +113,9 @@ impl CandidateSource for RecommendRecallSource {
         };
         let following_author_ids = self.following_author_ids(query).await?;
         let mut client = (*self.client).clone();
-        let response = client
-            .recall(
+        let response = tokio::time::timeout(
+            RECALL_TIMEOUT,
+            client.recall(
                 bookway_runtime::grpc_service_request(recall::RecallRequest {
                     user_id: query.user_id_or_empty().to_string(),
                     interests: interests.into_iter().map(|domain| domain as i32).collect(),
@@ -122,10 +131,12 @@ impl CandidateSource for RecommendRecallSource {
                     following_only: query.surface == "following",
                 })
                 .map_err(|error| PipelineError::Recall(error.to_string()))?,
-            )
-            .await
-            .map_err(|status| PipelineError::Recall(status.to_string()))?
-            .into_inner();
+            ),
+        )
+        .await
+        .map_err(|_| PipelineError::Recall("recommend-recall request timed out".to_string()))?
+        .map_err(|status| PipelineError::Recall(status.to_string()))?
+        .into_inner();
         let candidates = response
             .candidates
             .into_iter()
@@ -196,8 +207,19 @@ fn candidate_to_domain(candidate: recall::Candidate) -> Option<Candidate> {
 mod tests {
     use bookway_bbs_link_api::pb::GrowthDomain;
     use bookway_feature_main_api::pb::FeaturesResponse;
+    use std::time::Duration;
 
-    use super::personalized_interest_domains;
+    use super::{
+        FOLLOWING_CONTEXT_TIMEOUT, PROFILE_FEATURE_TIMEOUT, RECALL_TIMEOUT,
+        personalized_interest_domains,
+    };
+
+    #[test]
+    fn profile_expansion_budget_stays_inside_the_feed_deadline() {
+        assert!(PROFILE_FEATURE_TIMEOUT < Duration::from_millis(140));
+        assert!(PROFILE_FEATURE_TIMEOUT + RECALL_TIMEOUT < Duration::from_millis(140));
+        assert!(FOLLOWING_CONTEXT_TIMEOUT < Duration::from_millis(140));
+    }
 
     #[test]
     fn expands_recall_only_for_meaningful_profile_domains() {

@@ -38,8 +38,6 @@ impl QueryHydrator for DefaultQueryHydrator {
             session_id: non_empty(request.session_id),
             surface: normalize_surface(&request.surface),
             cursor: request.cursor,
-            geo_region: request.geo_region,
-            device_os: request.device_os,
         }
     }
 }

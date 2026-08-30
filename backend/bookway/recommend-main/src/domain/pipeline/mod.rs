@@ -51,10 +51,6 @@ pub(crate) struct FeedQuery {
     pub(crate) surface: String,
     pub(crate) cursor: Option<String>,
     pub(crate) limit: usize,
-    /// Delivery context for fail-closed geo/device ad targeting; empty means
-    /// unknown, which matches unrestricted campaigns only.
-    pub(crate) geo_region: String,
-    pub(crate) device_os: String,
 }
 
 impl FeedQuery {
@@ -195,9 +191,8 @@ pub(crate) trait PipelineSideEffect: Send + Sync {
 }
 
 /// What the pipeline produced for one feed request. Exposure persistence is
-/// the CALLER's job: commercial mixing happens after ranking and can displace
-/// organics, and the ledger must record what actually rendered — not a page
-/// that was about to be truncated.
+/// the CALLER's job: commercial mixing happens after ranking, and the ledger
+/// must record what actually rendered rather than an intermediate page.
 pub(crate) struct ServedFeed {
     pub(crate) response: pb::FeedResponse,
     /// Ledger row for attributed (logged-in) serving. Anonymous serving gets
@@ -207,9 +202,6 @@ pub(crate) struct ServedFeed {
     /// Content ids rendered on the final page (after any ad mixing) for the
     /// frequency-guard increment.
     pub(crate) rendered_ids: Vec<String>,
-    /// Hydrated delivery context for contextual ad mixing.
-    pub(crate) geo_region: String,
-    pub(crate) device_os: String,
 }
 
 #[derive(Clone)]
@@ -475,8 +467,6 @@ impl FeedPipeline {
             response,
             exposure,
             rendered_ids,
-            geo_region: query.geo_region,
-            device_os: query.device_os,
         }
     }
 

@@ -312,13 +312,19 @@ export function getFeed(
   );
 }
 
-export function getRouteNodeOffers(routeId: string, actionNodeId: string): Promise<NodeOfferList> {
+export function getRouteNodeOffers(routeId: string, actionNodeId: string, sceneEquipment?: string): Promise<NodeOfferList> {
   const query = new URLSearchParams({ limit: '20' });
+  const equipment = sceneEquipment?.trim();
+  if (equipment) query.set('scene_equipment', equipment);
   return request(`/v1/routes/${encodeURIComponent(routeId)}/nodes/${encodeURIComponent(actionNodeId)}/offers?${query.toString()}`);
 }
 
-export function getRouteNodeResources(routeId: string, actionNodeId: string): Promise<RouteNodeResourcePage> {
-  return request(`/v1/routes/${encodeURIComponent(routeId)}/nodes/${encodeURIComponent(actionNodeId)}/resources`);
+export function getRouteNodeResources(routeId: string, actionNodeId: string, sceneEquipment?: string): Promise<RouteNodeResourcePage> {
+  const query = new URLSearchParams();
+  const equipment = sceneEquipment?.trim();
+  if (equipment) query.set('scene_equipment', equipment);
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request(`/v1/routes/${encodeURIComponent(routeId)}/nodes/${encodeURIComponent(actionNodeId)}/resources${suffix}`);
 }
 
 export interface MallOrderAdAttribution {

@@ -8,7 +8,12 @@ use super::{Candidate, CandidateSelector};
 pub(crate) struct CoarseRanker;
 
 impl CoarseRanker {
-    const CANDIDATES_PER_RESULT: usize = 2;
+    // RecommendRecallSource requests three candidates per rendered result.
+    // Keep the complete recall envelope until RecommendRank has loaded the
+    // action/completion features; otherwise a high-WEGU item with a modest
+    // lexical/quality score could be discarded before the product objective
+    // is even observable.
+    const CANDIDATES_PER_RESULT: usize = 3;
     const MINIMUM_CANDIDATES: usize = 24;
     /// Fixed-strength fatigue discount applied inside the coarse pass so an
     /// item served earlier this window must buy back relevance elsewhere.
@@ -28,8 +33,7 @@ impl CoarseRanker {
     /// decide who survives truncation, so it relies on cheap hydrated facts
     /// (content quality, retrieval strength, follow state, exposure history).
     fn coarse_v1(candidate: &Candidate) -> f64 {
-        let mut v1 = 0.60 * finite(candidate.quality_score)
-            + 0.30 * finite(candidate.recall_score);
+        let mut v1 = 0.60 * finite(candidate.quality_score) + 0.30 * finite(candidate.recall_score);
         if candidate.followed_author {
             v1 += Self::FOLLOWED_AUTHOR_BONUS;
         }
@@ -182,5 +186,16 @@ mod tests {
 
         let selected = CoarseRanker.select(vec![repeated, fresh], 2);
         assert_eq!(selected[0].post.id, "fresh-item");
+    }
+
+    #[test]
+    fn coarse_limit_preserves_the_recall_envelope_for_action_ranking() {
+        // RecommendRecallSource asks for three candidates per requested slot;
+        // all of them must reach RecommendRank where WEGU is available.
+        assert_eq!(CoarseRanker::candidate_limit(20), 60);
+        assert_eq!(
+            CoarseRanker::candidate_limit(1),
+            CoarseRanker::MINIMUM_CANDIDATES
+        );
     }
 }

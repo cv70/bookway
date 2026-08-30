@@ -38,9 +38,12 @@ const MAX_QUERY_LENGTH: usize = 100;
 const MAX_REWRITE_TERMS: usize = 6;
 const MAX_ROUTE_CONTEXT_FIELD_LENGTH: usize = 160;
 const QUERY_REWRITE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
-const BBS_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_500);
-const BBS_LINK_TIMEOUT: Duration = Duration::from_millis(1_500);
-const KNOWLEDGE_CATALOG_TIMEOUT: Duration = Duration::from_millis(1_500);
+// Search Main has a 140ms request deadline. These per-call caps keep an
+// optional expansion, authority revalidation, or resource lookup from
+// turning a recoverable degradation into a deadline failure.
+const BBS_SEARCH_TIMEOUT: Duration = Duration::from_millis(80);
+const BBS_LINK_TIMEOUT: Duration = Duration::from_millis(60);
+const KNOWLEDGE_CATALOG_TIMEOUT: Duration = Duration::from_millis(60);
 /// Join counts are cosmetic social proof: one batched counts-only read that
 /// must never crowd out ranking within the request budget.
 const BBS_ROUTE_CONTEXT_TIMEOUT: Duration = Duration::from_millis(40);
@@ -416,7 +419,10 @@ impl Domain {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
         {
-            match self.contextual_search_ad(&request, context, user_id, ad_slots).await {
+            match self
+                .contextual_search_ad(&request, context, user_id, ad_slots)
+                .await
+            {
                 Ok(ads) if !ads.is_empty() => {
                     let ads = ads.into_iter().map(|ad| pb::SearchResult {
                         id: format!("ad:{}", ad.campaign_id),
@@ -434,8 +440,12 @@ impl Domain {
                         ad: Some(ad),
                     });
                     let organics = std::mem::take(&mut page);
-                    let (mixed, overflow) =
-                        bookway_commercial_mix::mix_page(organics, ads.collect(), limit, SEARCH_AD_POLICY);
+                    let (mixed, overflow) = bookway_commercial_mix::mix_page(
+                        organics,
+                        ads.collect(),
+                        limit,
+                        SEARCH_AD_POLICY,
+                    );
                     page.reserve(mixed.len());
                     for item in mixed {
                         match item {
@@ -592,42 +602,35 @@ impl Domain {
             .into_inner();
         // Decision items arrive in auction (eCPM) order; keep that order so
         // the mixer consumes the strongest inventory first.
-        Ok(response
-            .items
+        let mut ads = retain_search_ads(response.items, context, &placement)
             .into_iter()
-            .filter(|ad| {
-                ad.route_id == context.route_id
-                    && ad.action_node_id == context.action_node_id
-                    && ad.placement == placement
-                    && !ad.campaign_id.trim().is_empty()
-                    && !ad.request_id.trim().is_empty()
-                    && ad.ecpm.is_finite()
-                    && ad.ecpm >= 0.0
-                    && ad
-                        .scene_equipment
-                        .trim()
-                        .eq_ignore_ascii_case(&context.scene_equipment)
-            })
             .map(|ad| {
                 pb::SearchAd {
-                request_id: ad.request_id,
-                campaign_id: ad.campaign_id,
-                placement: ad.placement,
-                title: ad.title,
-                body: ad.body,
-                image_url: ad.image_url,
-                landing_url: ad.landing_url,
-                // `score` includes targeting and pacing tie-breakers and is
-                // intentionally not a billable impression value. Preserve
-                // the auction's normalized eCPM as the only pricing signal.
-                ecpm: ad.ecpm,
-                model_version: ad.model_version,
-                route_id: ad.route_id,
-                action_node_id: ad.action_node_id,
-                scene_equipment: ad.scene_equipment,
-            }
+                    request_id: ad.request_id,
+                    campaign_id: ad.campaign_id,
+                    placement: ad.placement,
+                    title: ad.title,
+                    body: ad.body,
+                    image_url: ad.image_url,
+                    landing_url: ad.landing_url,
+                    // `score` includes targeting and pacing tie-breakers and is
+                    // intentionally not a billable impression value. Preserve
+                    // the auction's normalized eCPM as the only pricing signal.
+                    ecpm: ad.ecpm,
+                    model_version: ad.model_version,
+                    route_id: ad.route_id,
+                    action_node_id: ad.action_node_id,
+                    scene_equipment: ad.scene_equipment,
+                }
             })
-            .collect())
+            .collect::<Vec<_>>();
+        ads.sort_by(|left, right| {
+            right
+                .ecpm
+                .total_cmp(&left.ecpm)
+                .then_with(|| left.campaign_id.cmp(&right.campaign_id))
+        });
+        Ok(ads)
     }
 
     pub(crate) async fn validate_attributions(
@@ -855,14 +858,13 @@ impl Domain {
             return Ok(pb::SearchResponse::default());
         };
         let mut client = catalog.clone();
-        let embed_request =
-            bookway_runtime::grpc_service_request(catalog_pb::EmbedTextsRequest {
-                texts: vec![plan.original_query.clone()],
-            })
-            .map_err(|error| SearchMainError::ResourceUpstream {
-                code: tonic::Code::Internal,
-                message: error.to_string(),
-            })?;
+        let embed_request = bookway_runtime::grpc_service_request(catalog_pb::EmbedTextsRequest {
+            texts: vec![plan.original_query.clone()],
+        })
+        .map_err(|error| SearchMainError::ResourceUpstream {
+            code: tonic::Code::Internal,
+            message: error.to_string(),
+        })?;
         let embeddings =
             match tokio::time::timeout(SEMANTIC_EMBED_TIMEOUT, client.embed_texts(embed_request))
                 .await
@@ -901,20 +903,22 @@ impl Domain {
             code: tonic::Code::Internal,
             message: error.to_string(),
         })?;
-        let response =
-            match tokio::time::timeout(SEMANTIC_SEARCH_TIMEOUT, bbs.search_semantic(search_request))
-                .await
-            {
-                Ok(Ok(response)) => response.into_inner(),
-                Ok(Err(error)) => {
-                    tracing::debug!(code = %error.code(), "semantic recall degraded");
-                    return Ok(pb::SearchResponse::default());
-                }
-                Err(_) => {
-                    tracing::debug!("semantic recall timed out");
-                    return Ok(pb::SearchResponse::default());
-                }
-            };
+        let response = match tokio::time::timeout(
+            SEMANTIC_SEARCH_TIMEOUT,
+            bbs.search_semantic(search_request),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response.into_inner(),
+            Ok(Err(error)) => {
+                tracing::debug!(code = %error.code(), "semantic recall degraded");
+                return Ok(pb::SearchResponse::default());
+            }
+            Err(_) => {
+                tracing::debug!("semantic recall timed out");
+                return Ok(pb::SearchResponse::default());
+            }
+        };
         Ok(response)
     }
 
@@ -977,16 +981,17 @@ impl Domain {
         if route_ids.is_empty() {
             return;
         }
-        let request = match bookway_runtime::grpc_service_request(bbs_participation_pb::RouteContextRequest {
-            user_id: user_id.unwrap_or_default().to_string(),
-            route_ids,
-        }) {
-            Ok(request) => request,
-            Err(error) => {
-                tracing::debug!(%error, "route join-count hydration skipped");
-                return;
-            }
-        };
+        let request =
+            match bookway_runtime::grpc_service_request(bbs_participation_pb::RouteContextRequest {
+                user_id: user_id.unwrap_or_default().to_string(),
+                route_ids,
+            }) {
+                Ok(request) => request,
+                Err(error) => {
+                    tracing::debug!(%error, "route join-count hydration skipped");
+                    return;
+                }
+            };
         let mut client = bbs_client.clone();
         match tokio::time::timeout(BBS_ROUTE_CONTEXT_TIMEOUT, client.route_context(request)).await {
             Ok(Ok(response)) => {
@@ -1074,6 +1079,38 @@ impl Domain {
     }
 }
 
+fn retain_search_ads(
+    items: Vec<ad_pb::AdDecision>,
+    context: &RouteSearchContext,
+    placement: &str,
+) -> Vec<ad_pb::AdDecision> {
+    let mut items = items
+        .into_iter()
+        .filter(|ad| {
+            ad.route_id == context.route_id
+                && ad.action_node_id == context.action_node_id
+                && ad.placement == placement
+                && !ad.campaign_id.trim().is_empty()
+                && !ad.request_id.trim().is_empty()
+                && ad.ecpm.is_finite()
+                && ad.ecpm >= 0.0
+                && ad
+                    .scene_equipment
+                    .trim()
+                    .eq_ignore_ascii_case(&context.scene_equipment)
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .ecpm
+            .total_cmp(&left.ecpm)
+            .then_with(|| left.campaign_id.cmp(&right.campaign_id))
+    });
+    let mut seen_campaigns = HashSet::new();
+    items.retain(|ad| seen_campaigns.insert(ad.campaign_id.clone()));
+    items
+}
+
 /// The public content id a result must be revalidated against, or `None` when
 /// the result does not stand for a content item at all (users, topics,
 /// resources). Node and equipment results are keyed by the action-node or gear
@@ -1084,10 +1121,9 @@ impl Domain {
 fn revalidation_content_id(candidate: &pb::SearchResult) -> Option<&str> {
     match pb::SearchResultType::try_from(candidate.result_type) {
         Ok(pb::SearchResultType::Post | pb::SearchResultType::Journey) => Some(&candidate.id),
-        Ok(pb::SearchResultType::ActionNode | pb::SearchResultType::SceneEquipment) => candidate
-            .post
-            .as_ref()
-            .map(|post| post.id.as_str()),
+        Ok(pb::SearchResultType::ActionNode | pb::SearchResultType::SceneEquipment) => {
+            candidate.post.as_ref().map(|post| post.id.as_str())
+        }
         _ => None,
     }
 }
@@ -1837,6 +1873,17 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn downstream_search_timeouts_stay_inside_the_request_budget() {
+        let budget = Duration::from_millis(140);
+        assert!(BBS_SEARCH_TIMEOUT < budget);
+        assert!(BBS_LINK_TIMEOUT < budget);
+        assert!(KNOWLEDGE_CATALOG_TIMEOUT < budget);
+        assert!(SEMANTIC_EMBED_TIMEOUT < budget);
+        assert!(SEMANTIC_SEARCH_TIMEOUT < budget);
+        assert!(FEATURE_RERANK_TIMEOUT < budget);
+    }
+
     type ResponseKey = (String, Option<String>);
     type RecordedResponse = Result<pb::SearchResponse, String>;
 
@@ -2119,11 +2166,7 @@ mod tests {
     }
 
     async fn service(source: Arc<RecordingSearchSource>) -> Domain {
-        service_with_exposure_store(
-            source,
-            Arc::new(MemorySearchExposureStore::default()),
-        )
-        .await
+        service_with_exposure_store(source, Arc::new(MemorySearchExposureStore::default())).await
     }
 
     async fn service_with_exposure_store(
@@ -2232,6 +2275,36 @@ mod tests {
     }
 
     #[test]
+    fn search_ads_are_contextual_unique_and_finite() {
+        let context = RouteSearchContext {
+            route_id: "route-1".to_string(),
+            action_node_id: "node-1".to_string(),
+            scene_equipment: "trail shoes".to_string(),
+        };
+        let ad = |campaign_id: &str, ecpm: f64| ad_pb::AdDecision {
+            request_id: "request-1".to_string(),
+            campaign_id: campaign_id.to_string(),
+            placement: "search".to_string(),
+            route_id: "route-1".to_string(),
+            action_node_id: "node-1".to_string(),
+            scene_equipment: "Trail Shoes".to_string(),
+            ecpm,
+            ..Default::default()
+        };
+        let mut invalid = ad("", 1.0);
+        invalid.request_id.clear();
+        invalid.ecpm = f64::NAN;
+        let retained = retain_search_ads(
+            vec![ad("campaign-1", 1.0), ad("campaign-1", 2.0), invalid],
+            &context,
+            "search",
+        );
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].campaign_id, "campaign-1");
+        assert_eq!(retained[0].ecpm, 2.0);
+    }
+
+    #[test]
     fn action_completion_outweighs_click_signal_in_search_rerank() {
         let mut items = vec![
             item("click-only", "行动路线", 1.0),
@@ -2324,8 +2397,8 @@ mod tests {
     /// carry, and dropped with it.
     #[tokio::test]
     async fn node_and_equipment_results_are_revalidated_against_their_route() {
-        let carried = |result_type: pb::SearchResultType, id: &str, route_id: &str| {
-            pb::SearchResult {
+        let carried =
+            |result_type: pb::SearchResultType, id: &str, route_id: &str| pb::SearchResult {
                 id: id.to_string(),
                 result_type: result_type as i32,
                 title: "索引里的节点标题".to_string(),
@@ -2343,8 +2416,7 @@ mod tests {
                 }),
                 resource: None,
                 ad: None,
-            }
-        };
+            };
 
         let reconciled = reconcile_pending_results(
             vec![
@@ -2688,7 +2760,10 @@ mod tests {
         // Exact + synonym expansion + one-shot semantic lane.
         assert_eq!(plan.recalls.len(), 3);
         assert_eq!(plan.recalls[1].query, "跑步 计划 慢跑 晨跑");
-        assert_eq!(plan.recalls[2].source, crate::datasource::RecallSource::Semantic);
+        assert_eq!(
+            plan.recalls[2].source,
+            crate::datasource::RecallSource::Semantic
+        );
         assert_eq!(new_session(1, &plan).query_rewrite_version, "lifestyle-v3");
 
         let identity_plan = make_search_plan("#跑步", pb::SearchType::All, &dictionary, false)
@@ -2707,7 +2782,10 @@ mod tests {
                 .expect("entity tab plan should build");
             assert_eq!(plan.recalls.len(), 2);
             assert_eq!(plan.recalls[0].source, crate::datasource::RecallSource::Bbs);
-            assert_eq!(plan.recalls[1].source, crate::datasource::RecallSource::Semantic);
+            assert_eq!(
+                plan.recalls[1].source,
+                crate::datasource::RecallSource::Semantic
+            );
             assert_eq!(plan.bbs_search_type, search_type);
         }
 
@@ -2951,34 +3029,20 @@ mod tests {
             version: "test-1".to_string(),
             rules: Vec::new(),
         };
-        let plan = make_search_plan(
-            "徒步装备",
-            pb::SearchType::All,
-            &dictionary,
-            false,
-        )
-        .expect("plan builds");
+        let plan = make_search_plan("徒步装备", pb::SearchType::All, &dictionary, false)
+            .expect("plan builds");
         assert_eq!(plan.intent, SearchIntent::Equipment);
         assert_eq!(plan.bbs_search_type, pb::SearchType::Equipment);
 
-        let node_plan = make_search_plan(
-            "晨跑打卡节点",
-            pb::SearchType::Posts,
-            &dictionary,
-            false,
-        )
-        .expect("node plan builds");
+        let node_plan = make_search_plan("晨跑打卡节点", pb::SearchType::Posts, &dictionary, false)
+            .expect("node plan builds");
         assert_eq!(node_plan.intent, SearchIntent::ActionNode);
         assert_eq!(node_plan.bbs_search_type, pb::SearchType::Nodes);
 
         // An explicit tab keeps its type even when entity words appear.
-        let journey_plan = make_search_plan(
-            "徒步路线装备",
-            pb::SearchType::Journeys,
-            &dictionary,
-            false,
-        )
-        .expect("journey plan builds");
+        let journey_plan =
+            make_search_plan("徒步路线装备", pb::SearchType::Journeys, &dictionary, false)
+                .expect("journey plan builds");
         assert_eq!(journey_plan.intent, SearchIntent::Journey);
         assert_eq!(journey_plan.bbs_search_type, pb::SearchType::Journeys);
     }
@@ -3302,10 +3366,12 @@ mod tests {
                 .iter()
                 .filter_map(|route_id| counts.get(route_id).map(|count| (route_id.clone(), *count)))
                 .collect();
-            Ok(Response::new(bbs_participation_pb::RouteParticipationContext {
-                participant_counts,
-                joined_route_ids: Vec::new(),
-            }))
+            Ok(Response::new(
+                bbs_participation_pb::RouteParticipationContext {
+                    participant_counts,
+                    joined_route_ids: Vec::new(),
+                },
+            ))
         }
 
         async fn set_route_participation(
@@ -3339,7 +3405,10 @@ mod tests {
 
     async fn participation_client(
         counts: HashMap<String, u64>,
-    ) -> (BbsClient<tonic::transport::Channel>, StubParticipationSource) {
+    ) -> (
+        BbsClient<tonic::transport::Channel>,
+        StubParticipationSource,
+    ) {
         let source = StubParticipationSource {
             counts: Arc::new(Mutex::new(counts)),
             seen_user_ids: Arc::new(Mutex::new(Vec::new())),
@@ -3396,11 +3465,8 @@ mod tests {
 
     #[tokio::test]
     async fn hydration_attaches_live_participation_facts_and_leaves_the_rest_absent() {
-        let (client, source) = participation_client(HashMap::from([(
-            "route-live".to_string(),
-            256,
-        )]))
-        .await;
+        let (client, source) =
+            participation_client(HashMap::from([("route-live".to_string(), 256)])).await;
         let mut domain = Domain::with_test_dependencies(
             BbsSearchClient::new(idle_channel().await),
             Arc::new(MemorySearchSessionStore::default()),
@@ -3422,7 +3488,9 @@ mod tests {
                 ..Default::default()
             },
         ];
-        domain.hydrate_route_join_counts(&mut page, Some("walker")).await;
+        domain
+            .hydrate_route_join_counts(&mut page, Some("walker"))
+            .await;
 
         assert_eq!(
             page[0].post.as_ref().and_then(|post| post.join_count),

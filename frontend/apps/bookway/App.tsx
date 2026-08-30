@@ -1170,7 +1170,7 @@ useEffect(() => {
       .finally(() => {
         if (requestId === contextualFeedRequestRef.current) setContextualFeedLoading(false);
       });
-    getRouteNodeOffers(routeId, action.id)
+    getRouteNodeOffers(routeId, action.id, sceneEquipment)
       .then((response) => {
         if (requestId !== contextualFeedRequestRef.current) return;
         setContextualOffers(response.items);
@@ -1182,7 +1182,7 @@ useEffect(() => {
       .finally(() => {
         if (requestId === contextualFeedRequestRef.current) setContextualOffersLoading(false);
       });
-    getRouteNodeResources(routeId, action.id)
+    getRouteNodeResources(routeId, action.id, sceneEquipment)
       .then((response) => {
         if (requestId !== contextualFeedRequestRef.current) return;
         setContextualResources(response.items);

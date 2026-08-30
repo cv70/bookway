@@ -25,6 +25,8 @@ cargo run -p bookway-search-index-outbox-recovery
 
 `bookway-search-index-rebuild` 将 PostgreSQL `content_items` 的完整历史投影到一个已经存在的物理 OpenSearch 索引。它要求 `OPENSEARCH_URL` 与 `OPENSEARCH_REBUILD_INDEX`；目标通过 `_resolve/index` 验证为精确物理索引，别名和数据流会被拒绝。`SEARCH_INDEX_REBUILD_BATCH_SIZE` 默认 `500`，`SEARCH_INDEX_REBUILD_AFTER_ID` 可从日志中最后成功的内容 ID 继续执行。
 
+重建投影与常驻 `bbs-indexer` 使用相同的路线节点、场景装备和规范化枚举字段。需要语义检索时同时设置 `SEMANTIC_VECTOR_DIMS`（8--4096，必须与目标索引 mapping 固定维度一致）和可选的 `KNOWLEDGE_CATALOG_GRPC_URL`；任务会经 `knowledge-catalog.EmbedTexts` 回填节点感知向量。向量服务不可用时保留可用的词法文档；修复服务后应从头重跑以补齐此前跳过的向量。
+
 任务以内容 ID 做 keyset 分页，并在 Bulk API 中携带内容版本和 `version_type=external_gte`。已发布内容 upsert，草稿、受限和已删除内容 delete；已经被更高版本 Shadow 写入覆盖的 `version_conflict_engine_exception` 会被安全视为完成。因此从开头重放或者在某个完成页后恢复都不会倒退索引版本。成功结束时任务会刷新目标索引，确保紧随其后的计数、抽样和别名发布可见所有已提交文档。
 
 在运行任务前，必须先配置并保持 `bbs-indexer` 双写：

@@ -8,13 +8,14 @@ use super::api::pb;
 use bookway_ad_main_api::pb::{self as ad_pb, ad_main_client::AdMainClient};
 use bookway_commercial_mix::{MixPolicy, MixedItem};
 use prost::Message;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 /// Low-density contextual commerce for the action feed: at most ~10% of a
 /// full page may be commercial, never before the opening three organics.
 /// The same schedule caps how many decisions are requested upstream so
 /// supply never exceeds what the page can legitimately render.
 const FEED_AD_POLICY: MixPolicy = MixPolicy::new(1_000, 3);
+const AD_DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(25);
 
 #[derive(Clone)]
 pub(crate) struct FeedService {
@@ -38,79 +39,95 @@ impl FeedService {
     }
 
     pub(crate) async fn recommend(&self, request: pb::FeedRequest) -> pb::FeedResponse {
-        let action_context = request.action_context.clone();
+        let action_context = request.action_context.clone().filter(valid_action_context);
         let limit = request.limit.unwrap_or(20).clamp(1, 100) as usize;
+        // Decide contextual inventory before fetching organics. If ads are
+        // available, the organic pipeline can reserve exactly enough room for
+        // them; otherwise it still returns a full page. This prevents the
+        // opaque recall cursor from skipping organic tail items displaced by
+        // an ad after selection.
+        let mut ad_degraded = false;
+        let ad_decision = if let Some(context) = action_context.as_ref()
+            && !request.user_id.trim().is_empty()
+        {
+            let ad_slots = FEED_AD_POLICY.ad_slots_for(limit);
+            if ad_slots == 0 {
+                None
+            } else {
+                match self
+                    .decide_contextual_ads(&request, context, ad_slots)
+                    .await
+                {
+                    Ok(decision) => Some(decision),
+                    Err(error) => {
+                        ad_degraded = true;
+                        tracing::warn!(%error, "contextual ad decision degraded; serving organic feed");
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        let organic_limit = organic_limit_for(limit, ad_decision.as_ref(), action_context.as_ref());
+        let pipeline_request = if organic_limit == limit {
+            request.clone()
+        } else {
+            let mut request = request.clone();
+            request.limit = Some(u32::try_from(organic_limit).unwrap_or(1));
+            request
+        };
         let page_key = cacheable_cold_start_page(&request).then(|| cold_start_page_key(&request));
         let mut served = match (&self.page_cache, &page_key) {
             (Some(cache), Some(key)) => ServedFeed {
-                response: self.cold_start_page(&request, cache, key).await,
+                response: self.cold_start_page(&pipeline_request, cache, key).await,
                 // Cold-start pages are anonymous-only by the cacheable check:
                 // there is no exposure row and no guard increment to attach.
                 exposure: None,
                 rendered_ids: Vec::new(),
-                geo_region: request.geo_region.clone(),
-                device_os: request.device_os.clone(),
             },
-            _ => self.pipeline.execute(request.clone()).await,
+            _ => self.pipeline.execute(pipeline_request).await,
         };
-        let (geo_region, device_os) = (served.geo_region.clone(), served.device_os.clone());
-        let Some(context) = action_context.filter(valid_action_context) else {
+        let Some(context) = action_context else {
             self.persist_served(&mut served).await;
             return served.response;
         };
-        // Ads require a user-scoped frequency decision. Anonymous contextual
-        // feeds remain organic-only instead of making an ad RPC that can only
-        // fail on its missing identity and mark the useful response degraded.
-        if request.user_id.trim().is_empty() {
-            self.persist_served(&mut served).await;
-            return served.response;
+        if let Some(decision) = ad_decision {
+            mix_contextual_ad(&mut served.response, decision, &context, limit);
         }
-        // Skip the decision RPC entirely when the mix schedule offers no slot
-        // (short pages, tiny limits) or the recall is too thin to guarantee a
-        // useful organic experience.
-        let ad_slots = FEED_AD_POLICY.ad_slots_for(limit);
-        if ad_slots == 0 || served.response.items.len() < FEED_AD_POLICY.min_natural_results {
-            self.persist_served(&mut served).await;
-            return served.response;
+        if ad_degraded && let Some(meta) = &mut served.response.meta {
+            meta.degraded = true;
         }
+        self.persist_served(&mut served).await;
+        served.response
+    }
 
-        let ad_request = match service_request(ad_pb::DecisionRequest {
-            user_id: request.user_id,
+    async fn decide_contextual_ads(
+        &self,
+        request: &pb::FeedRequest,
+        context: &pb::FeedActionContext,
+        slots: usize,
+    ) -> Result<ad_pb::DecisionResponse, String> {
+        let ad_request = service_request(ad_pb::DecisionRequest {
+            user_id: request.user_id.clone(),
             placement: context.placement.clone(),
             domain: context.domain.clone(),
-            limit: Some(u32::try_from(ad_slots).unwrap_or(1)),
+            limit: Some(u32::try_from(slots).unwrap_or(1)),
             route_id: context.route_id.clone(),
             action_node_id: context.action_node_id.clone(),
             scene_equipment: context.scene_equipment.clone(),
             // Edge-derived delivery context; empty values fail closed to
             // unrestricted campaigns only (ad-center matching rule).
-            geo_region,
-            device_os,
-        }) {
-            Ok(request) => request,
-            Err(error) => {
-                tracing::warn!(%error, "contextual ad request setup degraded; serving organic feed");
-                if let Some(meta) = &mut served.response.meta {
-                    meta.degraded = true;
-                }
-                self.persist_served(&mut served).await;
-                return served.response;
-            }
-        };
+            geo_region: request.geo_region.clone(),
+            device_os: request.device_os.clone(),
+        })
+        .map_err(|error| error.to_string())?;
         let mut ad_main = self.ad_main.clone();
-        match ad_main.decide(ad_request).await {
-            Ok(decision) => {
-                mix_contextual_ad(&mut served.response, decision.into_inner(), &context, limit)
-            }
-            Err(error) => {
-                tracing::warn!(%error, "contextual ad decision degraded; serving organic feed");
-                if let Some(meta) = &mut served.response.meta {
-                    meta.degraded = true;
-                }
-            }
-        }
-        self.persist_served(&mut served).await;
-        served.response
+        tokio::time::timeout(AD_DECISION_TIMEOUT, ad_main.decide(ad_request))
+            .await
+            .map_err(|_| "contextual ad decision timed out".to_string())?
+            .map_err(|error| error.to_string())
+            .map(|response| response.into_inner())
     }
 
     /// Exposure persistence runs ONCE per request, after commercial mixing:
@@ -198,7 +215,11 @@ impl FeedService {
         let page = if guard.peer_holds_lease() {
             self.pipeline.execute(request.clone()).await.response
         } else {
-            match cache.load(key).await.and_then(CachedFeedPage::into_response) {
+            match cache
+                .load(key)
+                .await
+                .and_then(CachedFeedPage::into_response)
+            {
                 Some(page) => {
                     guard.release().await;
                     return page;
@@ -219,16 +240,29 @@ impl FeedService {
 /// the requested route, node, placement and scene equipment are dropped
 /// before the mix, so a mismatched campaign can never buy its way in.
 ///
-/// Naturals displaced past the page limit are dropped here. The caller persists
-/// exposure only AFTER this mixing, so a displaced item never enters the ledger
-/// or the frequency guard — but the response cursor was already advanced past it
-/// by recall, so it is skipped for good rather than deferred to the next page.
-/// The loss is bounded by the ad slot count and always falls on the lowest-ranked
-/// tail of the page. Search does defer its overflow (`session.pending`), which it
-/// can because it owns a session pending list; the feed's cursor is recall's
-/// opaque token and cannot be rewound. Fixing this properly means reserving ad
-/// slots before selection, which would shrink every page whose ad decision comes
-/// back empty — a worse trade at current fill rates.
+/// The caller reserves organic capacity before executing the pipeline, so this
+/// function only receives the items that can actually fit and never needs to
+/// discard a rendered organic tail behind an opaque recall cursor.
+fn matching_ad_count(decision: &ad_pb::DecisionResponse, context: &pb::FeedActionContext) -> usize {
+    let mut campaigns = HashSet::new();
+    decision
+        .items
+        .iter()
+        .filter(|ad| ad_matches_context(ad, context) && campaigns.insert(ad.campaign_id.as_str()))
+        .count()
+}
+
+fn organic_limit_for(
+    limit: usize,
+    decision: Option<&ad_pb::DecisionResponse>,
+    context: Option<&pb::FeedActionContext>,
+) -> usize {
+    let reserved_ads = decision.zip(context).map_or(0, |(decision, context)| {
+        matching_ad_count(decision, context).min(FEED_AD_POLICY.ad_slots_for(limit))
+    });
+    limit.saturating_sub(reserved_ads).max(1)
+}
+
 fn mix_contextual_ad(
     response: &mut pb::FeedResponse,
     decision: ad_pb::DecisionResponse,
@@ -238,15 +272,9 @@ fn mix_contextual_ad(
     let ad_pb::DecisionResponse {
         items, degraded, ..
     } = decision;
-    let ads: Vec<pb::FeedAd> = items
+    let mut ads: Vec<pb::FeedAd> = items
         .into_iter()
-        .filter(|ad| {
-            ad.route_id == context.route_id
-                && ad.action_node_id == context.action_node_id
-                && ad.placement == context.placement
-                && scene_equipment_key(&ad.scene_equipment)
-                    == scene_equipment_key(context.scene_equipment.as_deref().unwrap_or_default())
-        })
+        .filter(|ad| ad_matches_context(ad, context))
         .map(|ad| pb::FeedAd {
             request_id: ad.request_id,
             campaign_id: ad.campaign_id,
@@ -262,6 +290,14 @@ fn mix_contextual_ad(
             scene_equipment: ad.scene_equipment,
         })
         .collect();
+    ads.sort_by(|left, right| {
+        right
+            .ecpm
+            .total_cmp(&left.ecpm)
+            .then_with(|| left.campaign_id.cmp(&right.campaign_id))
+    });
+    let mut campaigns = HashSet::new();
+    ads.retain(|ad| campaigns.insert(ad.campaign_id.clone()));
     if ads.is_empty() {
         if degraded && let Some(meta) = &mut response.meta {
             meta.degraded = true;
@@ -269,12 +305,10 @@ fn mix_contextual_ad(
         return;
     }
     let organics = std::mem::take(&mut response.items);
-    let (mixed, overflow) =
-        bookway_commercial_mix::mix_page(organics, ads, limit, FEED_AD_POLICY);
-    // Displaced tail organics stay invisible for this response and are never
-    // recorded as served (exposure persistence runs after this function and
-    // filters by rendered ids). They are not re-offered later, though — see the
-    // note on this function.
+    let (mixed, overflow) = bookway_commercial_mix::mix_page(organics, ads, limit, FEED_AD_POLICY);
+    // In production the caller reserves this capacity, so overflow should be
+    // empty. Keep the defensive discard for direct/unit callers; the rendered
+    // page and exposure ledger still stay bounded by the mix contract.
     drop(overflow);
     let mut items = Vec::with_capacity(mixed.len());
     for slot in mixed {
@@ -304,6 +338,18 @@ fn mix_contextual_ad(
     }
 }
 
+fn ad_matches_context(ad: &ad_pb::AdDecision, context: &pb::FeedActionContext) -> bool {
+    !ad.campaign_id.trim().is_empty()
+        && !ad.request_id.trim().is_empty()
+        && ad.ecpm.is_finite()
+        && ad.ecpm >= 0.0
+        && ad.route_id == context.route_id
+        && ad.action_node_id == context.action_node_id
+        && ad.placement == context.placement
+        && scene_equipment_key(&ad.scene_equipment)
+            == scene_equipment_key(context.scene_equipment.as_deref().unwrap_or_default())
+}
+
 fn scene_equipment_key(value: &str) -> String {
     value.trim().to_lowercase()
 }
@@ -317,8 +363,8 @@ fn service_request<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedFeedPage, cacheable_cold_start_page, cold_start_page_key, mix_contextual_ad,
-        valid_action_context,
+        CachedFeedPage, cacheable_cold_start_page, cold_start_page_key, matching_ad_count,
+        mix_contextual_ad, organic_limit_for, valid_action_context,
     };
     use crate::api::pb;
     use bookway_ad_main_api::pb as ad_pb;
@@ -487,7 +533,9 @@ mod tests {
             &mut response,
             ad_pb::DecisionResponse {
                 request_id: "ad-request-1".to_string(),
-                items: vec![high, low],
+                // The edge sorts by auction value, so even an out-of-order
+                // upstream response must render strongest inventory first.
+                items: vec![low, high],
                 degraded: false,
             },
             &context(),
@@ -503,13 +551,85 @@ mod tests {
         assert!(positions[1] > positions[0]);
         // Strongest inventory wins the earliest slot.
         assert_eq!(
-            response.items[positions[0]].ad.as_ref().map(|ad| ad.campaign_id.as_str()),
+            response.items[positions[0]]
+                .ad
+                .as_ref()
+                .map(|ad| ad.campaign_id.as_str()),
             Some("campaign-high")
         );
         assert_eq!(
-            response.items[positions[1]].ad.as_ref().map(|ad| ad.campaign_id.as_str()),
+            response.items[positions[1]]
+                .ad
+                .as_ref()
+                .map(|ad| ad.campaign_id.as_str()),
             Some("campaign-low")
         );
+    }
+
+    #[test]
+    fn only_context_matching_ads_reserve_organic_capacity() {
+        let context = context();
+        let decision = ad_pb::DecisionResponse {
+            items: vec![
+                feed_ad("matching", "trail shoes", 10.0),
+                feed_ad("other-equipment", "headlamp", 100.0),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(matching_ad_count(&decision, &context), 1);
+    }
+
+    #[test]
+    fn organic_capacity_accounts_for_only_renderable_ads() {
+        let context = context();
+        let decision = ad_pb::DecisionResponse {
+            items: vec![
+                feed_ad("matching-a", "trail shoes", 10.0),
+                feed_ad("matching-b", "trail shoes", 9.0),
+                feed_ad("other", "headlamp", 100.0),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(organic_limit_for(20, Some(&decision), Some(&context)), 18);
+        assert_eq!(organic_limit_for(20, None, Some(&context)), 20);
+        assert_eq!(organic_limit_for(1, Some(&decision), Some(&context)), 1);
+    }
+
+    #[test]
+    fn duplicate_campaigns_reserve_and_render_only_one_slot() {
+        let context = context();
+        let decision = ad_pb::DecisionResponse {
+            items: vec![
+                feed_ad("same-campaign", "trail shoes", 9.0),
+                feed_ad("same-campaign", "trail shoes", 10.0),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(matching_ad_count(&decision, &context), 1);
+        let mut response = full_page();
+        mix_contextual_ad(&mut response, decision, &context, 20);
+        assert_eq!(ad_positions(&response).len(), 1);
+        let position = ad_positions(&response)[0];
+        assert_eq!(
+            response.items[position].ad.as_ref().map(|ad| ad.ecpm),
+            Some(10.0)
+        );
+    }
+
+    #[test]
+    fn malformed_ad_decisions_never_reserve_or_render_a_slot() {
+        let context = context();
+        let mut malformed = feed_ad("", "trail shoes", 10.0);
+        malformed.request_id.clear();
+        malformed.ecpm = f64::NAN;
+        let decision = ad_pb::DecisionResponse {
+            items: vec![malformed],
+            ..Default::default()
+        };
+        assert_eq!(matching_ad_count(&decision, &context), 0);
+        let mut response = full_page();
+        mix_contextual_ad(&mut response, decision, &context, 20);
+        assert!(ad_positions(&response).is_empty());
     }
 
     #[test]
@@ -609,7 +729,13 @@ mod tests {
             &mut response,
             ad_pb::DecisionResponse {
                 items: (0..5)
-                    .map(|index| feed_ad(&format!("campaign-{index}"), "trail shoes", f64::from(index)))
+                    .map(|index| {
+                        feed_ad(
+                            &format!("campaign-{index}"),
+                            "trail shoes",
+                            f64::from(index),
+                        )
+                    })
                     .collect(),
                 ..Default::default()
             },
@@ -619,6 +745,9 @@ mod tests {
         assert!(response.items.len() <= 20);
         assert_eq!(ad_positions(&response).len(), 2);
         let rendered = u32::try_from(response.items.len()).unwrap_or(u32::MAX);
-        assert_eq!(response.meta.as_ref().map(|meta| meta.selected), Some(rendered));
+        assert_eq!(
+            response.meta.as_ref().map(|meta| meta.selected),
+            Some(rendered)
+        );
     }
 }

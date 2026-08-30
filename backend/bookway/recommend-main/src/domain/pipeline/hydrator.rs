@@ -11,6 +11,11 @@ use super::{Candidate, CandidateHydrator, FeedQuery, HydratorFailurePolicy, Pipe
 use crate::datasource::{FrequencyCapDataSource, SharedExposureDataSource};
 
 const SERVED_HISTORY_LIMIT: usize = 500;
+const SERVED_HISTORY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(20);
+const FREQUENCY_CAP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30);
+const SOCIAL_CONTEXT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(35);
+const ROUTE_CONTEXT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30);
+const REACTION_CONTEXT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30);
 
 pub(crate) struct ServedHistoryHydrator {
     exposures: SharedExposureDataSource,
@@ -40,10 +45,13 @@ impl CandidateHydrator for ServedHistoryHydrator {
         let Some(user_id) = query.user_id.as_deref() else {
             return Ok(());
         };
-        let served = self
-            .exposures
-            .recent_content_ids(user_id, &query.surface, SERVED_HISTORY_LIMIT)
-            .await;
+        let served = tokio::time::timeout(
+            SERVED_HISTORY_TIMEOUT,
+            self.exposures
+                .recent_content_ids(user_id, &query.surface, SERVED_HISTORY_LIMIT),
+        )
+        .await
+        .unwrap_or_default();
         for candidate in candidates {
             candidate.previously_served = served.contains(&candidate.post.id);
         }
@@ -90,7 +98,17 @@ impl CandidateHydrator for FrequencyCapHydrator {
             .iter()
             .map(|candidate| candidate.post.id.clone())
             .collect::<Vec<_>>();
-        let counts = self.caps.served_counts(user_id, &content_ids).await?;
+        let counts = tokio::time::timeout(
+            FREQUENCY_CAP_TIMEOUT,
+            self.caps.served_counts(user_id, &content_ids),
+        )
+        .await
+        .map_err(|_| PipelineError::FrequencyCap(crate::datasource::FrequencyCapError::Redis(
+            redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "frequency cap lookup timed out",
+            )),
+        )))??;
         for (candidate, count) in candidates.iter_mut().zip(counts) {
             candidate.daily_served_count = count;
         }
@@ -144,10 +162,15 @@ impl CandidateHydrator for SocialContextHydrator {
             user_id: user_id.to_string(),
             post_ids: Vec::new(),
         })?;
-        let (context, visibility) = tokio::try_join!(
-            context_client.context(context_request),
-            visibility_client.visibility_context(visibility_request),
+        let (context, visibility) = tokio::time::timeout(
+            SOCIAL_CONTEXT_TIMEOUT,
+            tokio::try_join!(
+                context_client.context(context_request),
+                visibility_client.visibility_context(visibility_request),
+            ),
         )
+        .await
+        .map_err(|_| PipelineError::Bbs("social context request timed out".to_string()))?
         .map_err(|error| PipelineError::Bbs(error.to_string()))?;
         let context = context.into_inner();
         let visibility = visibility.into_inner();
@@ -195,14 +218,17 @@ impl CandidateHydrator for RouteContextHydrator {
             return Ok(());
         }
         let mut client = self.client.clone();
-        let context = client
-            .route_context(bbs_request(bbs_pb::RouteContextRequest {
+        let context = tokio::time::timeout(
+            ROUTE_CONTEXT_TIMEOUT,
+            client.route_context(bbs_request(bbs_pb::RouteContextRequest {
                 user_id: query.user_id_or_empty().to_string(),
                 route_ids,
-            })?)
-            .await
-            .map_err(|error| PipelineError::Bbs(error.to_string()))?
-            .into_inner();
+            })?),
+        )
+        .await
+        .map_err(|_| PipelineError::Bbs("route context request timed out".to_string()))?
+        .map_err(|error| PipelineError::Bbs(error.to_string()))?
+        .into_inner();
         for candidate in candidates {
             // BBS owns participation. The count is assigned from the fact just
             // read; a candidate BBS did not answer for stays absent rather than
@@ -260,14 +286,17 @@ impl CandidateHydrator for ReactionContextHydrator {
             .map(|candidate| candidate.post.id.clone())
             .collect();
         let mut client = self.client.clone();
-        let context = client
-            .context(interaction_status_request(like_pb::ContextRequest {
+        let context = tokio::time::timeout(
+            REACTION_CONTEXT_TIMEOUT,
+            client.context(interaction_status_request(like_pb::ContextRequest {
                 user_id: query.user_id.clone(),
                 post_ids,
-            })?)
-            .await
-            .map_err(|error| PipelineError::InteractionStatus(error.to_string()))?
-            .into_inner();
+            })?),
+        )
+        .await
+        .map_err(|_| PipelineError::InteractionStatus("reaction context request timed out".to_string()))?
+        .map_err(|error| PipelineError::InteractionStatus(error.to_string()))?
+        .into_inner();
         for candidate in candidates {
             candidate.liked = context.liked_post_ids.contains(&candidate.post.id);
             candidate.bookmarked = context.bookmarked_post_ids.contains(&candidate.post.id);
@@ -355,8 +384,6 @@ mod tests {
             surface: "home".to_string(),
             cursor: None,
             limit: 10,
-            geo_region: String::new(),
-            device_os: String::new(),
         }
     }
 

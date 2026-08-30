@@ -29,6 +29,15 @@ struct Config {
     concurrency: usize,
     p99_budget_ms: u128,
     request_timeout: Duration,
+    action_context: Option<ActionContext>,
+}
+
+#[derive(Clone, Debug)]
+struct ActionContext {
+    route_id: String,
+    action_node_id: String,
+    scene_equipment: String,
+    placement: String,
 }
 
 impl Config {
@@ -47,6 +56,7 @@ impl Config {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         let search_query = non_empty("GATEWAY_LOADTEST_SEARCH_QUERY", "跑步装备")?;
+        let action_context = action_context_from_env()?;
         Ok(Self {
             gateway_url: gateway_url.trim_end_matches('/').to_string(),
             user_id,
@@ -59,6 +69,7 @@ impl Config {
             request_timeout: Duration::from_millis(
                 env_number("GATEWAY_LOADTEST_REQUEST_TIMEOUT_MS", 500_u64)?.clamp(1, 60_000),
             ),
+            action_context,
         })
     }
 }
@@ -99,17 +110,112 @@ impl Surface {
 
     fn endpoint(self, config: &Config) -> String {
         match self {
-            Self::Feed => format!(
-                "{}/v1/feed?interests=learning&limit=10&surface=home",
-                config.gateway_url
-            ),
-            Self::Search => format!(
-                "{}/v1/search?q={}&search_type=all&limit=10",
-                config.gateway_url,
-                percent_encode_query(&config.search_query)
-            ),
+            Self::Feed => {
+                let base = format!(
+                    "{}/v1/feed?interests=learning&limit=10&surface=home",
+                    config.gateway_url
+                );
+                append_action_context(base, self, config.action_context.as_ref())
+            }
+            Self::Search => {
+                let base = format!(
+                    "{}/v1/search?q={}&search_type=all&limit=10",
+                    config.gateway_url,
+                    percent_encode_query(&config.search_query)
+                );
+                append_action_context(base, self, config.action_context.as_ref())
+            }
         }
     }
+}
+
+fn action_context_from_env() -> Result<Option<ActionContext>, LoadTestError> {
+    let route_id = env::var("GATEWAY_LOADTEST_ROUTE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let action_node_id = env::var("GATEWAY_LOADTEST_ACTION_NODE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let scene_equipment = env::var("GATEWAY_LOADTEST_SCENE_EQUIPMENT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let configured = [
+        route_id.is_some(),
+        action_node_id.is_some(),
+        scene_equipment.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if configured == 0 {
+        return Ok(None);
+    }
+    if configured != 3 {
+        return Err(LoadTestError::InvalidSetting {
+            key: "GATEWAY_LOADTEST_ROUTE_ID/ACTION_NODE_ID/SCENE_EQUIPMENT",
+            value: "all three action context fields are required together".to_string(),
+        });
+    }
+    let placement = env::var("GATEWAY_LOADTEST_ACTION_PLACEMENT")
+        .unwrap_or_else(|_| "action_node".to_string())
+        .trim()
+        .to_string();
+    if placement.is_empty() {
+        return Err(LoadTestError::InvalidSetting {
+            key: "GATEWAY_LOADTEST_ACTION_PLACEMENT",
+            value: placement,
+        });
+    }
+    let route_id = route_id.ok_or_else(|| LoadTestError::InvalidSetting {
+        key: "GATEWAY_LOADTEST_ROUTE_ID/ACTION_NODE_ID/SCENE_EQUIPMENT",
+        value: "route id is required with action context".to_string(),
+    })?;
+    let action_node_id = action_node_id.ok_or_else(|| LoadTestError::InvalidSetting {
+        key: "GATEWAY_LOADTEST_ROUTE_ID/ACTION_NODE_ID/SCENE_EQUIPMENT",
+        value: "action node id is required with action context".to_string(),
+    })?;
+    let scene_equipment = scene_equipment.ok_or_else(|| LoadTestError::InvalidSetting {
+        key: "GATEWAY_LOADTEST_ROUTE_ID/ACTION_NODE_ID/SCENE_EQUIPMENT",
+        value: "scene equipment is required with action context".to_string(),
+    })?;
+    Ok(Some(ActionContext {
+        route_id,
+        action_node_id,
+        scene_equipment,
+        placement,
+    }))
+}
+
+fn append_action_context(
+    mut endpoint: String,
+    surface: Surface,
+    context: Option<&ActionContext>,
+) -> String {
+    let Some(context) = context else {
+        return endpoint;
+    };
+    let params = [
+        ("route_id", context.route_id.as_str()),
+        ("action_node_id", context.action_node_id.as_str()),
+        ("scene_equipment", context.scene_equipment.as_str()),
+    ];
+    for (key, value) in params {
+        endpoint.push('&');
+        endpoint.push_str(key);
+        endpoint.push('=');
+        endpoint.push_str(&percent_encode_query(value));
+    }
+    endpoint.push('&');
+    endpoint.push_str(match surface {
+        Surface::Feed => "placement",
+        Surface::Search => "ad_placement",
+    });
+    endpoint.push('=');
+    endpoint.push_str(&percent_encode_query(&context.placement));
+    endpoint
 }
 
 fn percent_encode_query(value: &str) -> String {
@@ -155,6 +261,7 @@ struct LoadTestReport {
     p99_budget_ms: u128,
     requests_per_surface: usize,
     concurrency: usize,
+    contextual_action_node: bool,
     surfaces: Vec<SurfaceReport>,
 }
 
@@ -268,6 +375,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         p99_budget_ms: config.p99_budget_ms,
         requests_per_surface: config.requests_per_surface,
         concurrency: config.concurrency,
+        contextual_action_node: config.action_context.is_some(),
         surfaces: reports,
     };
     println!("{}", serde_json::to_string(&report)?);
@@ -286,7 +394,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Sample, Surface, percent_encode_query, percentile, report};
+    use super::{
+        ActionContext, Sample, Surface, append_action_context, percent_encode_query, percentile,
+        report,
+    };
 
     #[test]
     fn percentile_uses_nearest_rank() {
@@ -342,5 +453,24 @@ mod tests {
             percent_encode_query("跑步 装备"),
             "%E8%B7%91%E6%AD%A5%20%E8%A3%85%E5%A4%87"
         );
+    }
+
+    #[test]
+    fn contextual_loadtest_urls_carry_the_complete_action_context() {
+        let context = ActionContext {
+            route_id: "route/one".to_string(),
+            action_node_id: "node-1".to_string(),
+            scene_equipment: "trail shoes".to_string(),
+            placement: "action node".to_string(),
+        };
+        let endpoint = append_action_context(
+            "http://127.0.0.1:8080/v1/search?q=walk".to_string(),
+            Surface::Search,
+            Some(&context),
+        );
+        assert!(endpoint.contains("route_id=route%2Fone"));
+        assert!(endpoint.contains("action_node_id=node-1"));
+        assert!(endpoint.contains("scene_equipment=trail%20shoes"));
+        assert!(endpoint.contains("ad_placement=action%20node"));
     }
 }

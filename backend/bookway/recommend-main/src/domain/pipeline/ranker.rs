@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tonic::transport::Channel;
@@ -8,6 +8,9 @@ use bookway_feature_main_api::pb::{self as feature, feature_main_client::Feature
 use bookway_recommend_rank_api::pb as rank;
 use bookway_bbs_link_api::pb::GrowthDomain;
 use bookway_recommend_recall_api::pb as recall;
+
+const FEATURE_REQUEST_TIMEOUT: Duration = Duration::from_millis(30);
+const RANK_REQUEST_TIMEOUT: Duration = Duration::from_millis(80);
 
 pub(crate) struct RecommendRanker {
     ranker: Arc<rank::recommend_rank_client::RecommendRankClient<Channel>>,
@@ -34,16 +37,19 @@ impl RecommendRanker {
             .map(|candidate| candidate.post.id.clone())
             .collect();
         let mut feature_client = self.feature_client.clone();
-        let response = feature_client
-            .features(
+        let response = tokio::time::timeout(
+            FEATURE_REQUEST_TIMEOUT,
+            feature_client.features(
                 bookway_runtime::grpc_service_request(feature::FeaturesRequest {
                     user_id: user_id.to_string(),
                     content_ids: ids,
                 })
                 .map_err(|error| PipelineError::Model(error.to_string()))?,
-            )
-            .await
-            .map_err(|error| PipelineError::Model(error.to_string()))?;
+            ),
+        )
+        .await
+        .map_err(|_| PipelineError::Model("feature request timed out".to_string()))?
+        .map_err(|error| PipelineError::Model(error.to_string()))?;
         Ok(response.into_inner())
     }
 }
@@ -59,8 +65,9 @@ impl CandidateRanker for RecommendRanker {
         let features = self.request_features(user_id, candidates).await?;
         let rank_features = rank_features(features.clone());
         let mut client = (*self.ranker).clone();
-        let response = match client
-            .rank(
+        let response = match tokio::time::timeout(
+            RANK_REQUEST_TIMEOUT,
+            client.rank(
                 bookway_runtime::grpc_service_request(rank::RankRequest {
                     user_id: user_id.to_string(),
                     features: Some(rank_features),
@@ -68,22 +75,16 @@ impl CandidateRanker for RecommendRanker {
                     user_context: user_context_text(query),
                 })
                 .map_err(|error| PipelineError::Model(error.to_string()))?,
-            )
-            .await
+            ),
+        )
+        .await
         {
-            Ok(response) => response.into_inner(),
+            Ok(Ok(response)) => response.into_inner(),
+            Ok(Err(error)) => {
+                return Ok(feature_fallback_outcome(candidates, &features, error.to_string()));
+            }
             Err(error) => {
-                // The feature read is already bounded and contains the same
-                // calibrated objectives as the model contract. Preserve
-                // action-oriented ordering during a model outage instead of
-                // falling back to a click/popularity-only heuristic.
-                apply_feature_fallback(candidates, &features);
-                tracing::warn!(%error, "recommend-rank unavailable; applied local multi-objective fallback");
-                return Ok(RankOutcome {
-                    model_version: Some("recommend-rank-feature-fallback-v1".to_string()),
-                    experiment_bucket: None,
-                    degraded: true,
-                });
+                return Ok(feature_fallback_outcome(candidates, &features, error.to_string()));
             }
         };
         let expected_scores = candidates.len();
@@ -105,6 +106,23 @@ impl CandidateRanker for RecommendRanker {
                 .then_some(response.experiment_bucket),
             degraded: response.degraded || scored_candidates != expected_scores,
         })
+    }
+}
+
+fn feature_fallback_outcome(
+    candidates: &mut [Candidate],
+    features: &feature::FeaturesResponse,
+    error: String,
+) -> RankOutcome {
+    // The feature read is already bounded and contains the same calibrated
+    // objectives as the model contract. Preserve action-oriented ordering
+    // during a model outage instead of falling back to click/popularity only.
+    apply_feature_fallback(candidates, features);
+    tracing::warn!(error, "recommend-rank unavailable; applied local multi-objective fallback");
+    RankOutcome {
+        model_version: Some("recommend-rank-feature-fallback-v1".to_string()),
+        experiment_bucket: None,
+        degraded: true,
     }
 }
 
@@ -292,12 +310,21 @@ fn finite_probability(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
     use bookway_bbs_link_api::pb::PostSummary;
 
-    use super::{apply_feature_fallback, apply_ranked_scores, candidate_to_proto};
+    use super::{
+        FEATURE_REQUEST_TIMEOUT, RANK_REQUEST_TIMEOUT, apply_feature_fallback,
+        apply_ranked_scores, candidate_to_proto,
+    };
     use crate::domain::pipeline::Candidate;
     use bookway_feature_main_api::pb as feature;
+
+    #[test]
+    fn ranking_dependencies_leave_room_for_feed_fallback() {
+        assert!(FEATURE_REQUEST_TIMEOUT + RANK_REQUEST_TIMEOUT < Duration::from_millis(140));
+    }
 
     #[test]
     fn preserves_recall_evidence_after_heuristic_scoring() {

@@ -32,9 +32,12 @@ impl SemanticRecallClients {
     }
 }
 
-const SEMANTIC_EMBED_TIMEOUT: Duration = Duration::from_millis(100);
-const SEMANTIC_SEARCH_TIMEOUT: Duration = Duration::from_millis(150);
-const SEMANTIC_SUMMARY_TIMEOUT: Duration = Duration::from_millis(150);
+// Semantic recall is additive. Bound its three serial upstream calls so a
+// slow embedding/search/hydration dependency cannot consume the whole Feed
+// request deadline; list-based sources can still produce a useful page.
+const SEMANTIC_EMBED_TIMEOUT: Duration = Duration::from_millis(25);
+const SEMANTIC_SEARCH_TIMEOUT: Duration = Duration::from_millis(35);
+const SEMANTIC_SUMMARY_TIMEOUT: Duration = Duration::from_millis(35);
 
 /// Serving context for the embedding model, composed only from the hydrated
 /// interest facts Recommend Main already trusted enough to put on the request
@@ -227,7 +230,16 @@ mod tests {
     use bookway_bbs_link_api::pb::{GrowthDomain, PostSummary, PublicContentSummary};
     use bookway_bbs_search_api::pb::{SearchResult, SearchResultType};
 
-    use super::{candidates_from_semantic_page, interest_query};
+    use super::{
+        SEMANTIC_EMBED_TIMEOUT, SEMANTIC_SEARCH_TIMEOUT, SEMANTIC_SUMMARY_TIMEOUT,
+        candidates_from_semantic_page, interest_query,
+    };
+
+    #[test]
+    fn semantic_lane_budget_stays_below_the_feed_deadline() {
+        let total = SEMANTIC_EMBED_TIMEOUT + SEMANTIC_SEARCH_TIMEOUT + SEMANTIC_SUMMARY_TIMEOUT;
+        assert!(total < std::time::Duration::from_millis(140));
+    }
 
     fn hit(id: &str, result_type: SearchResultType) -> SearchResult {
         SearchResult {
