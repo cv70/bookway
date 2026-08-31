@@ -164,10 +164,12 @@ impl CandidateHydrator for SocialContextHydrator {
         })?;
         let (context, visibility) = tokio::time::timeout(
             SOCIAL_CONTEXT_TIMEOUT,
-            tokio::try_join!(
-                context_client.context(context_request),
-                visibility_client.visibility_context(visibility_request),
-            ),
+            async {
+                tokio::try_join!(
+                    context_client.context(context_request),
+                    visibility_client.visibility_context(visibility_request),
+                )
+            },
         )
         .await
         .map_err(|_| PipelineError::Bbs("social context request timed out".to_string()))?
